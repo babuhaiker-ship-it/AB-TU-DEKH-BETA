@@ -13,7 +13,6 @@ from pyrogram.types import (
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, UserNotParticipant, FloodWait
 from pymongo import MongoClient, ASCENDING, ReturnDocument
 import aiohttp
-from config import *
 from collections import defaultdict
 import re
 import html # Import the html module
@@ -943,7 +942,7 @@ async def share_callback(client, callback_query):
     await callback_query.message.reply(
         f"Share this video with your friends!\n<code>{share_link}</code>",
         quote=True
-    )
+        )
 
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
