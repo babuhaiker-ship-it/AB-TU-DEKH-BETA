@@ -65,13 +65,13 @@ categories_collection = db['categories']
 settings_collection = db['settings']
 
 # Create indexes
-users_collection.create_index([("user_id", ASCENDING)])
-tokens_collection.create_index([("user_id", ASCENDING)])
-media_collection.create_index([("uuid", ASCENDING)])
+users_collection.create_index([("user_id", ASCENDING)], unique=True)
+tokens_collection.create_index([("user_id", ASCENDING)], unique=True)
+media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
-media_collection.create_index([("file_unique_id", ASCENDING)])
+media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
-history_collection.create_index([("user_id", ASCENDING)])
+history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
