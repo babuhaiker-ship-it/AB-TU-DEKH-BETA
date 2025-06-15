@@ -1,4 +1,3 @@
-# Spicy Nyraa Bot - Main Script
 import os
 import asyncio
 import uuid
