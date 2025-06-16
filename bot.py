@@ -28,19 +28,19 @@ logger = logging.getLogger(__name__)
 import os
 
 class BotConfig:
-    BOT_TOKEN = os.getenv('BOT_TOKEN', '7646433933:AAF5iWb7rngRe1Tpxkc252hL0wm-FtZJA4U')
-    API_ID = int(os.getenv('API_ID', 29800015))
-    API_HASH = os.getenv('API_HASH', 'c8f37108be31ab9ea2818bfe533fbb6f')
-    BOT_USERNAME = os.getenv('BOT_USERNAME', '@SpicyNyraa_bot')
-    MONGO_URI = os.getenv('MONGO_URI', 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0')
+    BOT_TOKEN = os.getenv('BOT_TOKEN') # Removed default value
+    API_ID = int(os.getenv('API_ID', 0)) # Set default to 0 for int conversion safety
+    API_HASH = os.getenv('API_HASH') # Removed default value
+    BOT_USERNAME = os.getenv('BOT_USERNAME') # Removed default value
+    MONGO_URI = os.getenv('MONGO_URI') # Removed default value
     MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'spicybot')
     CHANNEL_ID = int(os.getenv('CHANNEL_ID', -1001234567890))
     CHANNEL_INVITE_LINK = os.getenv('CHANNEL_INVITE_LINK', 'https://t.me/SpicyNyraa')
     VIDEO_CHANNEL_ID = int(os.getenv('VIDEO_CHANNEL_ID', -1002626689003))
     BUY_BOT_URL = os.getenv('BUY_BOT_URL', 'https://t.me/hanielxsupportbot')
-    ADMIN_IDS = [int(i) for i in os.getenv('ADMIN_IDS', '6612030110').split(',')]
+    ADMIN_IDS = [int(i) for i in os.getenv('ADMIN_IDS', '').split(',') if i] # Removed default value, added check for empty split
     URL_SHORTENER = os.getenv('URL_SHORTENER', 'https://api.linkshortify.com/st')
-    SHORTENER_API_KEY = os.getenv('SHORTENER_API_KEY', '5cd923c490f64017cffa6e3bb6cc724560a8cfc6')
+    SHORTENER_API_KEY = os.getenv('SHORTENER_API_KEY') # Removed default value
     TUTORIAL_LINK_2 = os.getenv('TUTORIAL_LINK_2', 'https://t.me/urlshortenertutorial')
     TOKEN_EXPIRY = int(os.getenv('TOKEN_EXPIRY', 86400))  # 24 hours in seconds
     DEFAULT_CATEGORY = os.getenv('DEFAULT_CATEGORY', 'default')
@@ -48,9 +48,13 @@ class BotConfig:
     NEW_USER_TOKENS = int(os.getenv('NEW_USER_TOKENS', 3))
     REFERRAL_BONUS = int(os.getenv('REFERRAL_BONUS', 1))
     REFRESH_BONUS = int(os.getenv('REFRESH_BONUS', 1))
+    MENU_TIMEOUT = int(os.getenv('MENU_TIMEOUT', 1800)) # Added MENU_TIMEOUT config
 
 try:
     config = BotConfig()
+    # Basic validation for essential configs
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.SHORTENER_API_KEY, config.BOT_USERNAME]):
+        raise ValueError("One or more essential environment variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -72,6 +76,7 @@ media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
+history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
@@ -128,30 +133,38 @@ def add_token(user_id: int, duration=config.TOKEN_EXPIRY):
         'created_at': now,
         'expires_at': expires
     }
-    tokens_collection.update_one(
-        {'user_id': user_id},
-        {'$push': {'tokens': token}},
-        upsert=True
-    )
-    return token
+    try:
+        tokens_collection.update_one(
+            {'user_id': user_id},
+            {'$push': {'tokens': token}},
+            upsert=True
+        )
+        logger.info(f"Token added for user {user_id}")
+        return token
+    except Exception as e:
+        logger.error(f"Error adding token for user {user_id}: {e}", exc_info=True)
+        return None
 
 def get_and_cleanup_tokens(user_id: int):
     """
-    Atomically removes expired tokens and returns the list of valid tokens.
+    Removes expired tokens and returns the list of valid tokens.
     """
     now = datetime.utcnow()
     
-    # Remove expired tokens and retrieve the updated document
-    result = tokens_collection.find_one_and_update(
-        {'user_id': user_id},
-        {'$pull': {'tokens': {'expires_at': {'$lt': now}}}},
-        return_document=ReturnDocument.AFTER, # Return the document after the update
-        upsert=True # Create if not exists to ensure document is there for initial push
-    )
+    # Remove expired tokens
+    try:
+        tokens_collection.update_one(
+            {'user_id': user_id},
+            {'$pull': {'tokens': {'expires_at': {'$lt': now}}}},
+            upsert=True # Ensure the document exists for future updates
+        )
+    except Exception as e:
+        logger.error(f"Error cleaning up expired tokens for user {user_id}: {e}", exc_info=True)
+        # Continue to try fetching even if cleanup failed for some reason
     
-    if result and result.get('tokens'):
-        return result['tokens']
-    return []
+    # Fetch the document after cleanup
+    doc = tokens_collection.find_one({'user_id': user_id})
+    return doc.get('tokens', []) if doc else []
 
 def user_has_token(user_id: int):
     return len(get_and_cleanup_tokens(user_id)) > 0
@@ -257,11 +270,16 @@ def get_video_by_uuid(uuid_: str):
 
 def save_history(user_id: int, video_uuid: str, category: str):
     now = datetime.utcnow()
-    history_collection.update_one(
-        {'user_id': user_id},
-        {'$push': {'history': {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}}},
-        upsert=True
-    )
+    entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
+    try:
+        history_collection.update_one(
+            {'user_id': user_id},
+            {'$push': {'history': {'$each': [entry], '$slice': -100}}}, # Limit history to last 100 entries
+            upsert=True
+        )
+        logger.info(f"History saved for user {user_id}, video {video_uuid}. History size limited to 100.")
+    except Exception as e:
+        logger.error(f"Error saving history for user {user_id}, video {video_uuid}: {e}", exc_info=True)
 
 def get_last_video(user_id: int):
     doc = history_collection.find_one({'user_id': user_id})
@@ -271,7 +289,7 @@ def get_last_video(user_id: int):
 
 # --- Menu State Management ---
 active_menus = {}
-MENU_TIMEOUT = 1800  # 30 minutes
+MENU_TIMEOUT = config.MENU_TIMEOUT  # Use configured timeout
 
 def set_active_menu(user_id: int, message_id: int):
     """Set an active menu for a user."""
@@ -401,12 +419,17 @@ def buy_token_keyboard():
 async def handle_shared_video(client, user_id, video_uuid, message_id=None):
     video = get_video_by_uuid(video_uuid)
     if not video:
+        logger.warning(f"User {user_id} attempted to view non-existent shared video {video_uuid}.")
         return False, "Oops, invalid link. Try again!"
     
+    if video.get('banned'): # Check for banned status
+        logger.warning(f"User {user_id} attempted to view banned video {video_uuid}.")
+        return False, "❌ This content is no longer available."
+
     if not user_has_token(user_id):
         return False, await send_token_earning_options(client, message_id)
         
-    if not await check_subscription(client, user_id):
+    if not await check_subscription_cached(client, user_id): # Using cached subscription check
         return False, "Join the channel to watch!", join_channel_keyboard()
     
     save_history(user_id, video_uuid, video['category'])
@@ -417,28 +440,39 @@ async def handle_token_refresh(user_id: int, ad_code: str):
     try:
         if is_rate_limited(user_id):
             return False, "⚠️ You're refreshing too quickly. Please wait a minute and try again."
+
+        # Prevent token refresh if user already has valid tokens
+        if user_has_token(user_id):
+            logger.info(f"User {user_id} attempted token refresh but already has valid tokens.")
+            return False, "💡 You already have an active token. No need to refresh yet!"
             
         decoded = b64_to_str(ad_code)
         if not decoded:
+            logger.warning(f"User {user_id} provided invalid base64 for token refresh: {ad_code}")
             return False, "Oops, invalid link. Try again!"
         
         try:
             code_user_id, timestamp = map(int, decoded.split(':'))
         except ValueError:
-            logger.error(f"Invalid token refresh code format: {ad_code}")
+            logger.error(f"User {user_id} provided invalid token refresh code format: {ad_code}")
             return False, "Invalid token refresh link format."
             
         if code_user_id != user_id:
+            logger.warning(f"User {user_id} attempted to use another user's token refresh link ({code_user_id}).")
             return False, "This token refresh link is not for you."
             
         if timestamp < get_current_time():
+            logger.warning(f"User {user_id} attempted to use expired token refresh link.")
             return False, "This token refresh link has expired."
             
-        add_token(user_id)
-        logger.info(f"Token added for user {user_id} via refresh")
-        return True, "🎉 <b>Success!</b> You got 1 token. Each token lasts 24 hours."
+        added_token = add_token(user_id, config.REFRESH_BONUS * 86400) # Use REFRESH_BONUS and convert to seconds
+        if added_token:
+            logger.info(f"Token added for user {user_id} via refresh. New token count: {len(get_valid_tokens(user_id))}")
+            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts 24 hours."
+        else:
+            return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later."
     except Exception as e:
-        logger.error(f"Token refresh failed for user {user_id}: {e}")
+        logger.error(f"Token refresh failed for user {user_id}: {e}", exc_info=True)
         return False, "❌ <b>Something went wrong!</b>\nPlease try again later."
 
 # --- Auto-Delete & Protect Content ---
@@ -476,29 +510,44 @@ async def send_video_with_auto_delete(client: Client, chat_id: int, video_data: 
 # In-memory defaultdict for rate limiting (will be replaced by MongoDB)
 # rate_limits = defaultdict(list)
 RATE_LIMIT_WINDOW = 120  # Increased to 2 minutes
-RATE_LIMIT_MAX = 20  # Increased to 20 requests per 2 minutes
+RATE_LIMIT_MAX = 60  # Increased to 60 requests per 2 minutes
 
 async def is_rate_limited(user_id: int) -> bool:
     if is_admin(user_id):  # Skip rate limiting for admins
         return False
         
     now = datetime.utcnow()
+    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
     
-    # Atomically remove old entries and get the current count
-    rate_limit_doc = tokens_collection.find_one_and_update(
-        {'user_id': user_id},
-        {
-            '$pull': {'rate_limits': {'timestamp': {'$lt': now - timedelta(seconds=RATE_LIMIT_WINDOW)}}},
-            '$push': {'rate_limits': {'timestamp': now}}
-        },
-        return_document=ReturnDocument.AFTER, # Return the document after the update
-        upsert=True
-    )
-    
-    # Check limit based on the size of the 'rate_limits' array
-    if rate_limit_doc and len(rate_limit_doc.get('rate_limits', [])) > RATE_LIMIT_MAX:
-        return True
-    return False
+    # Use aggregation to count documents within the sliding window efficiently
+    # This ensures only active rate limit entries are considered
+    try:
+        # First, remove old entries to keep the array lean and accurate
+        tokens_collection.update_one(
+            {'user_id': user_id},
+            {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
+            upsert=True
+        )
+
+        # Then, push the new timestamp
+        tokens_collection.update_one(
+            {'user_id': user_id},
+            {'$push': {'rate_limits': {'timestamp': now}}},
+            upsert=True
+        )
+
+        # Get the count after adding the new entry and cleaning up old ones
+        rate_limit_doc = tokens_collection.find_one({'user_id': user_id}, {'rate_limits': 1})
+        current_requests = len(rate_limit_doc.get('rate_limits', [])) if rate_limit_doc else 0
+        
+        if current_requests > RATE_LIMIT_MAX:
+            logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error in is_rate_limited for user {user_id}: {e}", exc_info=True)
+        # Default to not rate-limiting if there's a database error to prevent bot from stopping
+        return False
 
 # --- Error Handling ---
 async def handle_error(client: Client, message: Message, error: Exception):
@@ -506,7 +555,7 @@ async def handle_error(client: Client, message: Message, error: Exception):
         return
     elif isinstance(error, FloodWait):
         logger.warning(f"FloodWait: {error.value} seconds")
-        await message.reply_text("⚠️ <b>Too Many Requests!</b>\nPlease wait <b>{error.value}</b> seconds before trying again.")
+        await message.reply_text(f"⚠️ <b>Too Many Requests!</b>\nPlease wait <b>{error.value}</b> seconds before trying again.")
     else:
         logger.error(f"An error occurred: {error}", exc_info=True)
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later.")
@@ -515,81 +564,110 @@ async def handle_error(client: Client, message: Message, error: Exception):
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message: Message):
     user_id = message.from_user.id
-    
-    # Rate limiting
-    if is_rate_limited(user_id):
-        await handle_error(client, message, FloodWait(10))
-        return
-    
-    try:
-        user = users_collection.find_one({'user_id': user_id})
-        args = message.text.split()
-        
-        # Handle first-time users and referrals
-        if not user:
-            users_collection.insert_one({
-                'user_id': user_id,
-                'username': message.from_user.username,
-                'first_name': message.from_user.first_name,
-                'last_name': message.from_user.last_name,
-                'joined_date': datetime.utcnow(),
-                'referral_count': 0
-            })
-            for _ in range(config.NEW_USER_TOKENS):
-                add_token(user_id)
-            logger.info(f"New user registered: {user_id}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if is_rate_limited(user_id):
+                raise FloodWait(10) # Default value, actual will come from Telegram
             
+            user = users_collection.find_one({'user_id': user_id})
+            args = message.text.split()
+            
+            # Handle first-time users and referrals
+            if not user:
+                users_collection.insert_one({
+                    'user_id': user_id,
+                    'username': html.escape(message.from_user.username) if message.from_user.username else None,
+                    'first_name': html.escape(message.from_user.first_name) if message.from_user.first_name else None,
+                    'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
+                    'joined_date': datetime.utcnow(),
+                    'referral_count': 0
+                })
+                for _ in range(config.NEW_USER_TOKENS):
+                    add_token(user_id)
+                logger.info(f"New user registered: {user_id}")
+                
+                if len(args) > 1:
+                    ref_code = args[1]
+                    referrer_id = handle_referral(user_id, ref_code)
+                    if referrer_id:
+                        logger.info(f"User {user_id} referred by {referrer_id} via referral link.")
+            
+            # Handle shared video or token refresh
             if len(args) > 1:
-                ref_code = args[1]
-                referrer_id = handle_referral(user_id, ref_code)
-                if referrer_id:
-                    logger.info(f"User {user_id} referred by {referrer_id}")
-        
-        # Handle shared video or token refresh
-        if len(args) > 1:
-            arg = args[1]
-            
-            # Handle token refresh
-            if arg.startswith('token_'):
-                success, msg = await handle_token_refresh(user_id, arg[6:])
-                await message.reply(msg)
-                if success:
-                    await message.reply(
-                        "🎉 <b>Success!</b> Click on Get Video to watch spicy content.",
-                        reply_markup=await get_main_keyboard(user_id)
-                    )
-                return
+                arg = args[1]
                 
-            # Handle video share
-            video_uuid = arg
-            logger.info(f"User {user_id} attempting to view shared video {video_uuid}")
-            
-            if not media_collection.find_one({'uuid': video_uuid}):
-                logger.warning(f"Invalid shared video UUID {video_uuid} attempted by user {user_id}")
-                await handle_error(client, message, ValueError("Invalid video link"))
-                return
-                
-            success, result = await handle_shared_video(client, user_id, video_uuid)
-            if not success:
-                if isinstance(result, tuple):
-                    await message.reply(result[0], reply_markup=result[1])
-                else:
-                    await message.reply(result)
-                return
-                
-            video = result
-            if await is_menu_active(client, user_id, message.chat.id):
-                try:
-                    # Delete old menu first
-                    old_menu = active_menus.get(user_id)
-                    if old_menu and old_menu.get('chat_id'):
-                        try:
-                            await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
-                            logger.info(f"Deleted old menu message {old_menu['message_id']} for user {user_id}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete old menu message: {e}")
+                # Handle token refresh
+                if arg.startswith('token_'):
+                    success, msg = await handle_token_refresh(user_id, arg[6:])
+                    await message.reply(msg)
+                    if success:
+                        await message.reply(
+                            "🎉 <b>Success!</b> Click on Get Video to watch spicy content.",
+                            reply_markup=await get_main_keyboard(user_id)
+                        )
+                    return # Exit the command after handling token refresh
                     
-                    # Send new video
+                # Handle video share
+                video_uuid = arg
+                logger.info(f"User {user_id} attempting to view shared video {video_uuid}")
+                
+                # Ensure the video_uuid is a valid UUID format
+                try:
+                    uuid.UUID(video_uuid)
+                except ValueError:
+                    logger.warning(f"User {user_id} attempted to view shared video with invalid UUID format: {video_uuid}.")
+                    await handle_error(client, message, ValueError("Invalid video link format."))
+                    return # Exit if video UUID format is invalid
+
+                if not media_collection.find_one({'uuid': video_uuid}):
+                    logger.warning(f"User {user_id} attempted to view non-existent shared video UUID {video_uuid}.")
+                    await handle_error(client, message, ValueError("Invalid video link"))
+                    return # Exit if video not found
+                    
+                success, result_or_msg = await handle_shared_video(client, user_id, video_uuid)
+                if not success:
+                    # handle_shared_video now returns a tuple (error_message, keyboard) or just error_message
+                    if isinstance(result_or_msg, tuple):
+                        error_msg, keyboard = result_or_msg
+                        await message.reply(error_msg, reply_markup=keyboard)
+                    else:
+                        await message.reply(result_or_msg)
+                    return # Exit if shared video handling failed
+                    
+                video = result_or_msg # Now `result` is the video object if successful
+                
+                if await is_menu_active(client, user_id, message.chat.id):
+                    try:
+                        # Delete old menu first
+                        old_menu = active_menus.get(user_id)
+                        if old_menu and old_menu.get('chat_id'):
+                            try:
+                                await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
+                                logger.info(f"User {user_id} deleted old menu message {old_menu['message_id']} for shared video update.")
+                            except Exception as e:
+                                logger.warning(f"User {user_id} failed to delete old menu message {old_menu['message_id']}: {e}")
+                        
+                        # Send new video
+                        sent_success, sent_message_or_error = await send_video_with_auto_delete(
+                            client,
+                            message.chat.id,
+                            video,
+                            reply_markup=video_nav_keyboard(video['uuid'], video['category'])
+                        )
+                        if sent_success:
+                            save_history(user_id, video['uuid'], video['category'])
+                            set_active_menu(user_id, sent_message_or_error.id)
+                            await message.reply("🎉 <b>Success!</b> Video updated in your active menu.")
+                            logger.info(f"User {user_id} updated menu with shared video {video_uuid}.")
+                        else:
+                            await message.reply(sent_message_or_error)
+
+                    except Exception as e:
+                        logger.error(f"User {user_id} failed to update menu with shared video: {e}", exc_info=True)
+                        await handle_error(client, message, e)
+                else:
+                    # Send as new message
                     sent_success, sent_message_or_error = await send_video_with_auto_delete(
                         client,
                         message.chat.id,
@@ -599,62 +677,62 @@ async def start_cmd(client, message: Message):
                     if sent_success:
                         save_history(user_id, video['uuid'], video['category'])
                         set_active_menu(user_id, sent_message_or_error.id)
-                        await message.reply("🎉 <b>Success!</b> Video updated in your active menu.")
-                        logger.info(f"Updated menu with shared video {video_uuid} for user {user_id}")
+                        logger.info(f"User {user_id} sent shared video {video_uuid} as new menu.")
                     else:
                         await message.reply(sent_message_or_error)
-
-                except Exception as e:
-                    logger.error(f"Failed to update menu with shared video: {e}")
-                    await handle_error(client, message, e)
-            else:
-                # Send as new message
-                sent_success, sent_message_or_error = await send_video_with_auto_delete(
-                    client,
-                    message.chat.id,
-                    video,
-                    reply_markup=video_nav_keyboard(video['uuid'], video['category'])
-                )
-                if sent_success:
-                    save_history(user_id, video['uuid'], video['category'])
-                    set_active_menu(user_id, sent_message_or_error.id)
-                    logger.info(f"Sent shared video {video_uuid} as new menu for user {user_id}")
-                else:
-                    await message.reply(sent_message_or_error)
-        
-        if not user:
-            await message.reply(
-                f"👤 <b>dear {message.from_user.mention}</b> This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help.",
-                reply_markup=await get_main_keyboard(user_id)
-            )
-        else:
-            await message.reply(
-                "👤 <b>This is Spicy Nyraa Bot.</b> Click on Get Video to watch spicy content.",
-                reply_markup=await get_main_keyboard(user_id)
-            )
             
-    except Exception as e:
-        logger.error(f"Error in start command: {e}")
-        await handle_error(client, message, e)
+            # Send initial welcome/returning user message
+            if not user:
+                # Sanitize message.from_user.mention explicitly if it can contain HTML-like characters
+                user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there" # Fallback to "there"
+                await message.reply(
+                    f"👤 <b>dear {user_mention_safe}</b> This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help.",
+                    reply_markup=await get_main_keyboard(user_id)
+                )
+            else:
+                await message.reply(
+                    "👤 <b>This is Spicy Nyraa Bot.</b> Click on Get Video to watch spicy content.",
+                    reply_markup=await get_main_keyboard(user_id)
+                )
+            break  # Exit the retry loop on successful execution
+        
+        except FloodWait as e:
+            wait_time = e.value
+            logger.warning(f"User {user_id} hit FloodWait: Waiting for {wait_time} seconds (attempt {attempt + 1}/{max_retries}).")
+            await asyncio.sleep(wait_time + 1)  # Wait a bit longer than required
+            if attempt < max_retries - 1:
+                continue  # Retry
+            else:
+                logger.error(f"User {user_id} failed to process /start after {max_retries} retries due to FloodWait.")
+                await handle_error(client, message, e)  # Max retries reached, propagate error
+                break # Exit loop as max retries reached
+        except Exception as e:
+            logger.error(f"User {user_id} encountered an unexpected error in start command: {e}", exc_info=True)
+            await handle_error(client, message, e)
+            break # Exit loop on other errors
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client, message: Message):
+    user_id = message.from_user.id
+    # Sanitize message.from_user.mention explicitly
+    user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
     await message.reply(
-        f"👤 <b>dear {message.from_user.mention}</b> this is how to use spicy nyraa.\n\n"
+        f"👤 <b>dear {user_mention_safe}</b> this is how to use spicy nyraa.\n\n"
         "- Use Get Video to watch spicy content.\n"
         "- Each token gives you 24 hours access.\n"
         "- Earn tokens by referral, refresh, or buy.\n"
         "- Join the channel to access videos.\n"
         "- Use /profile to check your stats.",
-        reply_markup=await get_main_keyboard(message.from_user.id)
+        reply_markup=await get_main_keyboard(user_id)
     )
 
 @app.on_message(filters.command("profile") & filters.private)
 async def profile_cmd(client, message: Message):
     user_id = message.from_user.id
-    
+    logger.info(f"User {user_id} requested profile.")
     if is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
+        logger.warning(f"User {user_id} hit rate limit in profile_cmd.")
         return
 
     user = users_collection.find_one({'user_id': user_id})
@@ -665,56 +743,74 @@ async def profile_cmd(client, message: Message):
     view_count = len(views['history']) if views and 'history' in views else 0
     ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
     
-    # Sanitize user's first name and username for HTML
+    # Sanitize user's first name and username for HTML (already present, verifying and ensuring usage)
     sanitized_first_name = html.escape(message.from_user.first_name if message.from_user.first_name else '')
     sanitized_username = html.escape(message.from_user.username if message.from_user.username else '')
 
-    await message.reply(f"👤 <b>Your Profile</b>\n\n<b>Tokens:</b> {len(tokens)}\n<b>Video Views:</b> {view_count}\n<b>Referrals:</b> {referral_count}\n<b>Referral Link:</b> <code>{ref_link}</code>\n{('Referred by: ' + str(referred_by)) if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
+    await message.reply(f"👤 <b>Your Profile</b>\n\n<b>Tokens:</b> {len(tokens)}\n<b>Video Views:</b> {view_count}\n<b>Referrals:</b> {referral_count}\n<b>Referral Link:</b> <code>{ref_link}</code>\n{(f'Referred by: {referred_by}') if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
 
 @app.on_message(filters.regex("^Get Video$") & filters.private)
 async def get_video(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"User {user_id} requested Get Video.")
+    
+    if is_rate_limited(user_id):
+        await handle_error(client, message, FloodWait(10))
+        logger.warning(f"User {user_id} hit rate limit in get_video.")
+        return
+
     if not await check_subscription_cached(client, user_id):
+        logger.info(f"User {user_id} not subscribed, prompting to join channel.")
         await message.reply("📢 <b>Join our channel to watch videos!</b>", reply_markup=join_channel_keyboard())
         return
     if not user_has_token(user_id):
+        logger.info(f"User {user_id} has no tokens, prompting earning options.")
         await send_token_earning_options(client, message)
         return
-    if await is_menu_active(client, user_id, message.chat.id):
+    
+    chat_id = message.chat.id # Get chat_id here
+    if await is_menu_active(client, user_id, chat_id): # Pass chat_id to is_menu_active
+        logger.warning(f"User {user_id} tried to open new menu but active menu already open.")
         await message.reply("⚠️ <b>Menu Already Open</b>\nScroll up, your menu is already open.")
         return
+    
     cats = get_categories()
     if not cats:
         add_category(config.DEFAULT_CATEGORY)
         cats = [config.DEFAULT_CATEGORY]
+        logger.info(f"Default category '{config.DEFAULT_CATEGORY}' created for user {user_id}.")
+    logger.info(f"User {user_id} prompted to choose category.")
     await message.reply("🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)"))
 async def select_category(client, callback_query):
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
+    category = callback_query.data[4:] # Extract category from callback_data
+    logger.info(f"User {user_id} selected category: {category}.")
     
     if is_rate_limited(user_id):
         await callback_query.answer("⚠️ You're changing categories too quickly. Please wait a minute and try again.", show_alert=True)
-        logger.warning(f"User {user_id} hit rate limit in select_category")
+        logger.warning(f"User {user_id} hit rate limit in select_category.")
         return
         
     # Check for active menu
-    if await is_menu_active(client, user_id, chat_id):
+    if await is_menu_active(client, user_id, chat_id): # Pass chat_id
+        logger.warning(f"User {user_id} tried to select category but already has active menu.")
         await callback_query.message.reply(
             "You already have an active menu. Please use that one or wait for it to expire."
         )
         return
         
-    category = callback_query.data[4:]
+    # Ensure category exists and sanitize input
+    sanitized_category = html.escape(category)
+    if sanitized_category not in get_categories():
+        sanitized_category = config.DEFAULT_CATEGORY
+        logger.warning(f"User {user_id} selected invalid category '{category}', falling back to default.")
     
-    # Ensure category exists
-    if category not in get_categories():
-        category = config.DEFAULT_CATEGORY
-        logger.warning(f"Invalid category {category}, falling back to default")
-    
-    video = get_random_video(category)
+    video = get_random_video(sanitized_category)
     if not video:
+        logger.warning(f"No videos found in category '{sanitized_category}' for user {user_id}.")
         await callback_query.message.edit_text(
             "No videos in this category. Try another!",
             reply_markup=category_keyboard()
@@ -726,21 +822,22 @@ async def select_category(client, callback_query):
             client,
             chat_id,
             video,
-            reply_markup=video_nav_keyboard(video['uuid'], category)
+            reply_markup=video_nav_keyboard(video['uuid'], sanitized_category)
         )
         
         if sent_success:
-            save_history(user_id, video['uuid'], category)
+            save_history(user_id, video['uuid'], sanitized_category)
             set_active_menu(user_id, sent_message_or_error.id)
             await callback_query.message.delete()
-            logger.info(f"User {user_id} selected category {category}")
+            logger.info(f"User {user_id} selected category {sanitized_category} and video {video['uuid']} sent.")
         else:
+            logger.error(f"User {user_id} failed to send video after category selection: {sent_message_or_error}")
             await callback_query.message.edit_text(
                 sent_message_or_error,
                 reply_markup=category_keyboard()
             )
     except Exception as e:
-        logger.error(f"Error sending video: {e}")
+        logger.error(f"User {user_id} error sending video after category selection: {e}", exc_info=True)
         await callback_query.message.edit_text(
             "❌ Something went wrong. Please try again.",
             reply_markup=category_keyboard()
@@ -748,54 +845,89 @@ async def select_category(client, callback_query):
 
 @app.on_callback_query(filters.regex(r"^next_(.+)_(.+)$"))
 async def next_video(client, callback_query):
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id # Get chat_id
+    logger.info(f"User {user_id} requested next video.")
     try:
-        user_id = callback_query.from_user.id
         _, current_uuid, category = callback_query.data.split('_')
-        video = get_random_video(category)
+        
+        if is_rate_limited(user_id):
+            await callback_query.answer("⚠️ You're browsing too quickly. Please wait a minute and try again.", show_alert=True)
+            logger.warning(f"User {user_id} hit rate limit in next_video.")
+            return
+
+        # Ensure category exists and sanitize input
+        sanitized_category = html.escape(category)
+        if sanitized_category not in get_categories():
+            sanitized_category = config.DEFAULT_CATEGORY
+            logger.warning(f"User {user_id} used invalid category '{category}' for next video, falling back to default.")
+
+        video = get_random_video(sanitized_category)
         
         if not video:
+            logger.warning(f"No next video found in category '{sanitized_category}' for user {user_id}.")
             await callback_query.answer("No videos in this category. Try another!", show_alert=True)
+            return
+        
+        # Check for active menu before attempting to delete/edit
+        if not await is_menu_active(client, user_id, chat_id):
+            logger.warning(f"User {user_id} tried to navigate next but menu expired or not active.")
+            await callback_query.message.reply("Menu expired. Please click Get Video to restart.")
             return
         
         try:
             sent_success, sent_message_or_error = await send_video_with_auto_delete(
                 client,
-                callback_query.message.chat.id,
+                chat_id, # Use chat_id
                 video,
-                reply_markup=video_nav_keyboard(video['uuid'], category)
+                reply_markup=video_nav_keyboard(video['uuid'], sanitized_category)
             )
             
             if sent_success:
-                save_history(user_id, video['uuid'], category)
+                save_history(user_id, video['uuid'], sanitized_category)
                 set_active_menu(user_id, sent_message_or_error.id)
                 await callback_query.message.delete()
+                logger.info(f"User {user_id} navigated to next video {video['uuid']} in category {sanitized_category}.")
             else:
+                logger.error(f"User {user_id} failed to send next video: {sent_message_or_error}")
                 await callback_query.answer(sent_message_or_error, show_alert=True)
         except MessageIdInvalid:
+            logger.warning(f"User {user_id} encountered MessageIdInvalid while sending next video, sending as new message.")
             # If edit fails, send as new message
             sent_success, sent_message_or_error = await send_video_with_auto_delete(
                 client,
-                callback_query.message.chat.id,
+                chat_id, # Use chat_id
                 video,
-                reply_markup=video_nav_keyboard(video['uuid'], category)
+                reply_markup=video_nav_keyboard(video['uuid'], sanitized_category)
             )
             if sent_success:
-                save_history(user_id, video['uuid'], category)
+                save_history(user_id, video['uuid'], sanitized_category)
                 set_active_menu(user_id, sent_message_or_error.id)
+                logger.info(f"User {user_id} sent next video {video['uuid']} as new message.")
             else:
+                logger.error(f"User {user_id} failed to send next video as new message: {sent_message_or_error}")
                 await callback_query.answer(sent_message_or_error, show_alert=True)
     except Exception as e:
-        logger.error(f"Error in next_video: {e}")
+        logger.error(f"User {user_id} error in next_video: {e}", exc_info=True)
         await callback_query.answer("Something went wrong. Please try again.", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^prev_(.+)_(.+)$"))
 async def prev_video(client, callback_query):
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id # Get chat_id
+    logger.info(f"User {user_id} requested previous video.")
     try:
-        user_id = callback_query.from_user.id
         _, current_uuid, category_hint = callback_query.data.split('_') # Use category_hint as it might not be the actual category of the prev video
+        
+        if is_rate_limited(user_id):
+            await callback_query.answer("⚠️ You're browsing too quickly. Please wait a minute and try again.", show_alert=True)
+            logger.warning(f"User {user_id} hit rate limit in prev_video.")
+            return
+
         history_doc = history_collection.find_one({'user_id': user_id})
         
         if not history_doc or not history_doc.get('history'):
+            logger.warning(f"User {user_id} has no previous video history.")
             await callback_query.answer(
                 "No previous videos available in your history. Try 'Get Video' to start!",
                 show_alert=True
@@ -806,34 +938,56 @@ async def prev_video(client, callback_query):
         
         found_video = None
         found_category = None
-        # Iterate in reverse to find the most recent valid previous video
-        for entry in reversed(history_entries):
-            # Skip the current video
-            if entry['video_uuid'] == current_uuid:
-                continue
-            
-            video = media_collection.find_one({'uuid': entry['video_uuid']})
-            if video:
-                found_video = video
-                found_category = entry['category'] # Use the category from history for navigation
-                break # Found a valid previous video
+        
+        # Efficient history lookup by getting the last two entries if available
+        # The current_uuid is the last one, so we want the one before it.
+        if len(history_entries) > 1:
+            # Check the second to last entry
+            prev_entry = history_entries[-2]
+            # Ensure it's not the same as the current video (in case of double clicks or rapid navigation)
+            if prev_entry['video_uuid'] != current_uuid:
+                video = media_collection.find_one({'uuid': prev_entry['video_uuid']})
+                if video:
+                    found_video = video
+                    found_category = prev_entry['category'] # Use the category from history for navigation
         
         if not found_video:
+            logger.warning(f"User {user_id} could not find valid previous video in history after efficient lookup.")
+            # Fallback to full reverse iteration if efficient lookup fails
+            for entry in reversed(history_entries):
+                if entry['video_uuid'] == current_uuid:
+                    continue # Skip the current video
+                
+                video = media_collection.find_one({'uuid': entry['video_uuid']})
+                if video:
+                    found_video = video
+                    found_category = entry['category'] # Use the category from history for navigation
+                    break # Found a valid previous video
+
+        if not found_video:
+            logger.warning(f"User {user_id} could not find any valid previous video in history after full scan.")
             await callback_query.answer(
                 "Could not find any valid previous videos in your history. Some videos might have been deleted.",
                 show_alert=True
             )
             return
             
+        # Check for active menu before attempting to delete/edit
+        if not await is_menu_active(client, user_id, chat_id):
+            logger.warning(f"User {user_id} tried to navigate previous but menu expired or not active.")
+            await callback_query.message.reply("Menu expired. Please click Get Video to restart.")
+            return
+
         # Delete old menu before sending new one
         try:
             await callback_query.message.delete()
+            logger.info(f"User {user_id} deleted old menu message for previous video navigation.")
         except Exception as e:
-            logger.error(f"Failed to delete old menu message for user {user_id}: {e}")
+            logger.error(f"User {user_id} failed to delete old menu message for prev_video: {e}")
         
         sent_success, sent_message_or_error = await send_video_with_auto_delete(
             client,
-            callback_query.message.chat.id,
+            chat_id, # Use chat_id
             found_video,
             reply_markup=video_nav_keyboard(found_video['uuid'], found_category)
         )
@@ -841,14 +995,15 @@ async def prev_video(client, callback_query):
         if sent_success:
             save_history(user_id, found_video['uuid'], found_category)
             set_active_menu(user_id, sent_message_or_error.id)
-            logger.info(f"User {user_id} navigated to previous video {found_video['uuid']} in category {found_category}")
+            logger.info(f"User {user_id} navigated to previous video {found_video['uuid']} in category {found_category}.")
         else:
+            logger.error(f"User {user_id} failed to send previous video: {sent_message_or_error}")
             await callback_query.answer(
                 sent_message_or_error,
                 show_alert=True
             )
     except Exception as e:
-        logger.error(f"Error in prev_video for user {user_id}: {e}")
+        logger.error(f"User {user_id} error in prev_video: {e}", exc_info=True)
         await callback_query.answer(
             "An unexpected error occurred while trying to go to the previous video. Please try again.",
             show_alert=True
@@ -856,68 +1011,89 @@ async def prev_video(client, callback_query):
 
 @app.on_callback_query(filters.regex(r"^change_cat$"))
 async def change_category(client, callback_query):
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id # Get chat_id
+    logger.info(f"User {user_id} requested to change category.")
     await callback_query.message.edit_text("🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
 
 @app.on_message(filters.regex("^Profile$") & filters.private)
 async def profile_btn(client, message: Message):
+    user_id = message.from_user.id # Added user_id for logging
+    logger.info(f"User {user_id} clicked Profile button.")
     await profile_cmd(client, message)
 
 @app.on_message(filters.regex("^Refer & Earn$") & filters.private)
 async def refer_btn(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"User {user_id} clicked Refer & Earn button.")
     
     if is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
+        logger.warning(f"User {user_id} hit rate limit in refer_btn.")
         return
 
     ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-    await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this link to earn tokens:\n<code>{ref_link}</code>", reply_markup=referral_keyboard(ref_link))
+    await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this link to earn tokens:\n<code>{html.escape(ref_link)}</code>", reply_markup=referral_keyboard(ref_link))
 
 @app.on_message(filters.regex("^Buy Token$") & filters.private)
 async def buy_token_btn(client, message: Message):
+    user_id = message.from_user.id # Added user_id for logging
+    logger.info(f"User {user_id} clicked Buy Token button.")
     await message.reply("Buy tokens from our support bot.", reply_markup=buy_token_keyboard())
 
 @app.on_message(filters.regex("^Refresh Token$") & filters.private)
 async def refresh_token_btn(client, message: Message):
     user_id = message.from_user.id
-    logger.info(f"User {user_id} requested token refresh")
+    logger.info(f"User {user_id} requested token refresh.")
 
     if is_rate_limited(user_id):
         await message.reply_text("⚠️ You're refreshing too quickly. Please wait a minute and try again.")
-        logger.warning(f"User {user_id} hit rate limit in refresh_token_btn")
+        logger.warning(f"User {user_id} hit rate limit in refresh_token_btn.")
         return
 
     temp_msg = await message.reply("Please wait...")
+    # Add validation here to prevent refresh if user already has a valid token
+    if user_has_token(user_id):
+        await temp_msg.delete()
+        await message.reply("💡 You already have an active token. No need to refresh yet!")
+        logger.info(f"User {user_id} attempted token refresh but already has valid tokens.")
+        return
+
     ad_code = str_to_b64(f"{user_id}:{str(get_current_time() + config.TOKEN_EXPIRY)}")
     ad_url = await shorten_url(f"https://telegram.dog/{client.username}?start=token_{ad_code}")
     await temp_msg.delete()
 
     disable_preview = False
     if ad_url.startswith(f"https://telegram.dog/{client.username}"):
-        logger.warning(f"URL shortening failed for user {user_id}. Using long URL: {ad_url}")
+        logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
         disable_preview = True # Disable preview for long Telegram links
 
+    # Sanitize user mention
+    user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
     await message.reply_text(
         f"💡 <b>Information</b>\nHere are the details you requested...\n\n"
-        f"Hey 💕 <b>{message.from_user.mention}</b> \n\nYour Ads token is expired, refresh your token and try again. \n\n<b>Token Timeout:</b> 24 hour \n\n<b>What is token?</b> \nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad. \n\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
+        f"Hey 💕 <b>{user_mention_safe}</b> \n\nYour Ads token is expired, refresh your token and try again. \n\n<b>Token Timeout:</b> 24 hour \n\n<b>What is token?</b> \nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad. \n\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
         disable_web_page_preview = disable_preview,
         reply_markup=token_earning_keyboard(ad_url)
     )
 
 async def send_token_earning_options(client: Client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"User {user_id} is being sent token earning options.")
     if is_rate_limited(user_id):
         await message.reply_text("⚠️ You're requesting token options too quickly. Please wait a minute and try again.")
-        logger.warning(f"User {user_id} hit rate limit in send_token_earning_options")
+        logger.warning(f"User {user_id} hit rate limit in send_token_earning_options.")
         return
 
+    # No need to generate a new ad_code if user already has tokens, just provide options
+    # This function is typically called when user_has_token is False
     ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
     long_url = f"https://telegram.dog/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await shorten_url(long_url)
     
     disable_preview = False
     if ad_url.startswith(f"https://telegram.dog/{client.username}"):
-        logger.warning(f"URL shortening failed for user {user_id} in send_token_earning_options. Using long URL: {ad_url}")
+        logger.warning(f"User {user_id} URL shortening failed for send_token_earning_options. Using long URL: {ad_url}")
         disable_preview = True
 
     await message.reply(
@@ -929,9 +1105,10 @@ async def send_token_earning_options(client: Client, message: Message):
 @app.on_callback_query(filters.regex("^check_sub$"))
 async def check_sub_callback(client, callback_query):
     user_id = callback_query.from_user.id
+    logger.info(f"User {user_id} clicked Check Subscription button.")
     if is_rate_limited(user_id):
         await callback_query.answer("⚠️ You're checking too quickly. Please wait a minute and try again.", show_alert=True)
-        logger.warning(f"User {user_id} hit rate limit in check_sub_callback")
+        logger.warning(f"User {user_id} hit rate limit in check_sub_callback.")
         return
 
     is_member = await check_subscription_cached(client, user_id)  # Use cached version
@@ -945,29 +1122,44 @@ async def check_sub_callback(client, callback_query):
             "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
             reply_markup=await get_main_keyboard(user_id)
         )
+        logger.info(f"User {user_id} is subscribed.")
     else:
         await callback_query.message.edit_text(
             "❌ You are not subscribed yet. Please join our channel:",
             reply_markup=join_channel_keyboard()
         )
+        logger.info(f"User {user_id} is not subscribed.")
 
 @app.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client, callback_query):
+    user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
+    
+    # Validate UUID format
+    try:
+        uuid.UUID(video_uuid)
+    except ValueError:
+        logger.warning(f"User {user_id} attempted to share with invalid UUID format: {video_uuid}.")
+        await callback_query.answer("❌ Invalid video ID.", show_alert=True)
+        return
+
     share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start={video_uuid}"
     await callback_query.answer()
+    logger.info(f"User {user_id} requested share link for video {video_uuid}.")
     await callback_query.message.reply(
-        f"🔗 <b>Share & Earn!</b>\nShare this video with your friends!\n<code>{share_link}</code>",
+        f"🔗 <b>Share & Earn!</b>\nShare this video with your friends!\n<code>{html.escape(share_link)}</code>",
         quote=True
         )
 
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
 async def broadcast_cmd(client, message: Message):
+    user_id = message.from_user.id # Added user_id for logging
     replied_message = message.reply_to_message
     users = list(users_collection.find({}, {'user_id': 1}))
     total_users = len(users)
     broadcast_msg = await message.reply(f"📣 <b>Broadcasting</b> to <b>{total_users}</b> users...")
+    logger.info(f"Admin {user_id} initiated broadcast to {total_users} users.")
     
     success = 0
     blocked = 0
@@ -979,12 +1171,12 @@ async def broadcast_cmd(client, message: Message):
             success += 1
         except UserIsBlocked:
             blocked += 1
-            logger.info(f"User {user['user_id']} blocked the bot")
+            logger.info(f"User {user['user_id']} blocked the bot.")
         except ChatInvalid:
             failed += 1
-            logger.error(f"Invalid chat for user {user['user_id']}")
+            logger.error(f"Invalid chat for user {user['user_id']}.")
         except FloodWait as e:
-            logger.warning(f"FloodWait: {e.value} seconds. Pausing broadcast.")
+            logger.warning(f"User {user['user_id']} hit FloodWait during broadcast: {e.value} seconds. Pausing broadcast.")
             await asyncio.sleep(e.value + 1)  # Wait a bit longer than required
             await replied_message.copy(user['user_id']) # Retry after waiting
             success += 1
@@ -1009,12 +1201,15 @@ async def broadcast_cmd(client, message: Message):
         f"Blocked Users: {blocked}\n"
         f"Unsuccessful: {failed}"
     )
-    logger.info(f"Broadcast completed. Success: {success}, Blocked: {blocked}, Failed: {failed}")
+    logger.info(f"Broadcast completed. Success: {success}, Blocked: {blocked}, Failed: {failed}.")
 
 @app.on_message(filters.command("addcategory") & filters.private & filters.user(config.ADMIN_IDS))
 async def addcategory_cmd(client, message: Message):
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} requested to add category.")
     args = message.text.split()
     if len(args) < 2:
+        logger.warning(f"Admin {user_id} used addcategory with insufficient arguments.")
         await message.reply(
             "Usage: /addcategory <category_name>\n"
             "Category name can only contain letters, numbers, underscores, and hyphens."
@@ -1022,24 +1217,35 @@ async def addcategory_cmd(client, message: Message):
         return
     
     name = args[1]
+    # Input sanitization and validation for category name is done in validate_category_name
     success, msg = add_category(name)
+    if success:
+        logger.info(f"Admin {user_id} successfully added category '{name}'.")
+    else:
+        logger.warning(f"Admin {user_id} failed to add category '{name}': {msg}")
     await message.reply(msg)
 
 @app.on_message(filters.command("deletecategory") & filters.private & filters.user(config.ADMIN_IDS))
 async def deletecategory_cmd(client, message: Message):
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} requested to delete category.")
     if not is_admin(message.from_user.id):
+        logger.warning(f"Non-admin user {user_id} attempted to use deletecategory command.")
         await message.reply_text("❌ Only admins can use this command.")
         return
 
     categories = get_categories()
     if not categories:
+        logger.warning(f"Admin {user_id} tried to delete category but no categories exist.")
         await message.reply_text("No categories to delete.")
         return
 
     buttons = []
     for category in categories:
-        buttons.append([InlineKeyboardButton(category, callback_data=f"confirmdelcat_{category}")] ) # Changed callback to confirmdelcat_
-
+        # Sanitize category name for callback data and display
+        sanitized_category = html.escape(category)
+        buttons.append([InlineKeyboardButton(sanitized_category, callback_data=f"confirmdelcat_{category}")] ) # Pass original category name for logic
+        
     await message.reply_text(
         """Select a category to delete:
 
@@ -1050,11 +1256,15 @@ async def deletecategory_cmd(client, message: Message):
 @app.on_callback_query(filters.regex(r"^confirmdelcat_(.+)$"))
 async def confirm_delcat_callback(client, callback_query):
     user_id = callback_query.from_user.id
+    category_raw = callback_query.data[14:] # Extract raw category name
+    logger.info(f"Admin {user_id} confirmed deletion of category: {category_raw}.")
     if not is_admin(user_id):
         await callback_query.answer("❌ Not authorized.", show_alert=True)
+        logger.warning(f"Non-admin user {user_id} attempted to confirm category deletion.")
         return
     
-    category = callback_query.data[14:] # Extract category name after "confirmdelcat_"
+    # Sanitize category name before processing
+    category = html.escape(category_raw)
 
     # Log the admin action before execution
     logger.warning(f"Admin {user_id} is confirming deletion of category: {category}")
@@ -1062,7 +1272,7 @@ async def confirm_delcat_callback(client, callback_query):
     success, msg, deleted_count = delete_category(category)
     
     if success:
-        formatted_msg = f"✅ Category '{category}' deleted, and {deleted_count} videos removed permanently. Use /addcategory to create new categories."
+        formatted_msg = f"✅ Category '{html.escape(category)}' deleted, and {deleted_count} videos removed permanently. Use /addcategory to create new categories."
         await callback_query.message.edit_text(formatted_msg)
         logger.info(f"Admin {user_id} successfully deleted category {category} with {deleted_count} videos.")
     else:
@@ -1071,44 +1281,54 @@ async def confirm_delcat_callback(client, callback_query):
 
 @app.on_message(filters.command("addtoken") & filters.private & filters.user(config.ADMIN_IDS))
 async def addtoken_cmd(client, message: Message):
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} requested to add token.")
     args = message.text.split()
     if len(args) < 3:
+        logger.warning(f"Admin {user_id} used addtoken with insufficient arguments: {message.text}")
         await message.reply("Usage: /addtoken <user_id> <count>")
         return
         
     try:
-        user_id = int(args[1])
+        target_user_id = int(args[1]) # Renamed to avoid conflict with admin user_id
         count = int(args[2])
         
-        if user_id <= 0:
+        if target_user_id <= 0:
+            logger.warning(f"Admin {user_id} provided invalid target user ID: {target_user_id}.")
             await message.reply("User ID must be a positive integer.")
             return
             
         if count <= 0:
+            logger.warning(f"Admin {user_id} provided invalid token count: {count}.")
             await message.reply("Token count must be a positive integer.")
             return
             
         if count > 10:  # Reasonable limit
+            logger.warning(f"Admin {user_id} attempted to add more than 10 tokens ({count}).")
             await message.reply("Cannot add more than 10 tokens at once.")
             return
             
         # Check if user exists
-        user = users_collection.find_one({'user_id': user_id})
+        user = users_collection.find_one({'user_id': target_user_id})
         if not user:
+            logger.warning(f"Admin {user_id} attempted to add tokens to non-existent user {target_user_id}.")
             await message.reply("User not found in database.")
-            logger.warning(f"Admin {message.from_user.id} attempted to add tokens to non-existent user {user_id}.")
             return
             
         for _ in range(count):
-            add_token(user_id)
+            added = add_token(target_user_id)
+            if not added: # Check if add_token failed
+                logger.error(f"Admin {user_id} failed to add one of {count} tokens to user {target_user_id}.")
+                await message.reply("❌ Failed to add some tokens. Check logs for details.")
+                return # Exit if any token addition fails
             
-        logger.info(f"Admin {message.from_user.id} added {count} tokens to user {user_id}.")
-        await message.reply(f"Added {count} tokens to user {user_id}.")
+        logger.info(f"Admin {user_id} added {count} tokens to user {target_user_id}.")
+        await message.reply(f"Added {count} tokens to user {target_user_id}.")
     except ValueError:
-        logger.warning(f"Admin {message.from_user.id} provided invalid input for addtoken: {message.text}")
+        logger.warning(f"Admin {user_id} provided invalid input for addtoken: {message.text}")
         await message.reply("User ID and count must be valid integers.")
     except Exception as e:
-        logger.error(f"Error adding tokens by admin {message.from_user.id}: {e}")
+        logger.error(f"Admin {user_id} error adding tokens: {e}", exc_info=True)
         await message.reply("❌ Failed to add tokens. Please try again.")
 
 # --- Batch Add Videos ---
@@ -1125,13 +1345,15 @@ def format_size(size_bytes):
 @app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated batch add mode.")
     if user_id not in config.ADMIN_IDS:
+        logger.warning(f"Non-admin user {user_id} attempted to use batchadd command.")
         return
     
     # Initialize default category if none exists
     if not get_categories():
         add_category(config.DEFAULT_CATEGORY)
-        logger.info(f"Default category '{config.DEFAULT_CATEGORY}' created")
+        logger.info(f"Default category '{config.DEFAULT_CATEGORY}' created by admin {user_id}.")
     
     batch_add_state[user_id] = {
         'batch_mode': True,
@@ -1146,23 +1368,30 @@ async def batchadd_cmd(client, message: Message):
 @app.on_message(filters.command("done") & filters.private & filters.user(config.ADMIN_IDS))
 async def done_cmd(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"Admin {user_id} exited batch add mode.")
     if user_id not in config.ADMIN_IDS:
+        logger.warning(f"Non-admin user {user_id} attempted to use done command.")
         return
     
     if batch_add_state.get(user_id, {}).get('batch_mode'):
         batch_add_state[user_id]['batch_mode'] = False
+        # Clear specific user's state to prevent memory leak
+        if user_id in batch_add_state:
+            del batch_add_state[user_id]
         await message.reply("Batch add mode disabled.")
 
 @app.on_message(filters.video & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_video(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"Admin {user_id} sent a video for batch adding.")
 
     if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
-        logger.warning(f"User {user_id} sent video outside of batch add mode.")
+        logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
         return
 
     category = batch_add_state[user_id].get('current_category', config.DEFAULT_CATEGORY)
     if not category:
+        logger.warning(f"Admin {user_id} tried to add video but no category set.")
         await message.reply_text("⚠️ Please set a category first using /category.")
         return
 
@@ -1174,6 +1403,7 @@ async def handle_video(client, message: Message):
         return
 
     if not message.video:
+        logger.warning(f"Admin {user_id} sent non-video file in batch add mode.")
         await message.reply_text("❌ Please send a video file.")
         return
 
@@ -1183,6 +1413,7 @@ async def handle_video(client, message: Message):
 
     # Check for duplicate video using file_unique_id
     if media_collection.find_one({"file_unique_id": file_unique_id}):
+        logger.warning(f"Admin {user_id} attempted to add duplicate video: {file_unique_id}.")
         await message.reply_text("⚠️ This video has already been added.")
         return
 
@@ -1208,34 +1439,39 @@ async def handle_video(client, message: Message):
             "category": category,
             "size_bytes": file_size,
             "timestamp": get_current_time(),
-            "message_id": message_id_in_channel # Store the message_id in the channel
+            "message_id": message_id_in_channel, # Store the message_id in the channel
+            "banned": False # Initialize banned status for new videos
         }
         media_collection.insert_one(video_data)
-        logger.info(f"Video {file_id} added to category {category} by admin {user_id}")
+        logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}.")
         await message.reply_text(
-            f"✅ File {message.video.file_name} Added to {category}\n"\
-            f"📁 Category: {category}\n"
+            f"✅ File {html.escape(message.video.file_name)} Added to {html.escape(category)}\n"\
+            f"📁 Category: {html.escape(category)}\n"
             f"📊 Size: {format_size(file_size)}\n"
             f"🆔 File ID: {file_id}"
         )
     except Exception as e:
-        logger.error(f"Error adding video: {e}")
+        logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
         await message.reply_text("❌ Failed to add video. Please try again.")
 
 @app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_category_cmd(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"Admin {user_id} requested to set category.")
     if not is_admin(user_id):
+        logger.warning(f"Non-admin user {user_id} attempted to use set_category_cmd.")
         await message.reply_text("❌ Only admins can use this command.")
         return
 
     # Check if batch_mode is active
     if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode', False):
+        logger.warning(f"Admin {user_id} tried to set category outside of batch add mode.")
         await message.reply_text("❌ Error: Start batch mode with /batchadd first.")
         return
 
     categories = get_categories()
     if not categories:
+        logger.warning(f"Admin {user_id} tried to set category but no categories available.")
         await message.reply_text("⚠️ No categories available to set. Use /addcategory to create one.")
         return
 
@@ -1251,6 +1487,7 @@ async def set_category_cmd(client, message: Message):
 @app.on_callback_query(filters.regex(r"^setcat_(.+)$"))
 async def setcat_callback(client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
+    logger.info(f"Admin {user_id} selected category for batch adding: {callback_query.data[7:]}.")
     # Extract category name, handling potential spaces or special characters safely
     # The regex in the filter ensures it matches the format, this just extracts the group
     match = re.match(r"^setcat_(.+)$", callback_query.data)
@@ -1261,58 +1498,77 @@ async def setcat_callback(client, callback_query: CallbackQuery):
 
     if not is_admin(user_id):
         await callback_query.answer("❌ Only admins can use this command.", show_alert=True)
+        logger.warning(f"Non-admin user {user_id} attempted to set batch category.")
         return
 
     if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode', False):
         await callback_query.answer("❌ Error: Batch mode not active.", show_alert=True)
+        logger.warning(f"Admin {user_id} tried to set category but batch mode not active.")
         return
 
     if category_name not in get_categories():
         await callback_query.answer("❌ Invalid category.", show_alert=True)
+        logger.warning(f"Admin {user_id} tried to set invalid category: '{category_name}'.")
         return
 
     batch_add_state[user_id]['current_category'] = category_name
-    await callback_query.message.edit_text(f"✅ Category set to '{category_name}' for batch adding. Send videos now or use /done to finish.")
+    await callback_query.message.edit_text(f"✅ Category set to '{html.escape(category_name)}' for batch adding. Send videos now or use /done to finish.")
+    logger.info(f"Admin {user_id} successfully set batch category to '{category_name}'.")
 
 @app.on_message(filters.command("stats") & filters.private & filters.user(config.ADMIN_IDS))
 async def stats_cmd(client, message: Message):
+    user_id = message.from_user.id # Added user_id for logging
+    logger.info(f"Admin {user_id} requested stats.")
     total_users = users_collection.count_documents({})
     total_videos = media_collection.count_documents({})
     total_categories = categories_collection.count_documents({})
     await message.reply(f"Total Users: {total_users}\nTotal Videos: {total_videos}\nTotal Categories: {total_categories}")
+    logger.info(f"Admin {user_id} retrieved stats: Users={total_users}, Videos={total_videos}, Categories={total_categories}.")
 
 # --- Auto-Delete & Protect Content ---
 @app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.user(config.ADMIN_IDS))
 async def toggle_auto_delete(client, message):
+    user_id = message.from_user.id # Added user_id for logging
+    logger.info(f"Admin {user_id} requested to toggle auto-delete.")
     s = settings_collection.find_one({'_id': 'settings'}) or {'auto_delete': True}
     new_status = not s.get('auto_delete', True)
     settings_collection.update_one({'_id': 'settings'}, {'$set': {'auto_delete': new_status}}, upsert=True)
     await message.reply(f"Auto-delete feature is now {'enabled' if new_status else 'disabled'}.")
+    logger.info(f"Admin {user_id} toggled auto-delete to {'enabled' if new_status else 'disabled'}.")
 
 @app.on_message(filters.command('toggle_protect') & filters.private & filters.user(config.ADMIN_IDS))
 async def toggle_protect(client, message):
+    user_id = message.from_user.id # Added user_id for logging
+    logger.info(f"Admin {user_id} requested to toggle content protection.")
     s = settings_collection.find_one({'_id': 'settings'}) or {'protect_content': True}
     new_status = not s.get('protect_content', True)
     settings_collection.update_one({'_id': 'settings'}, {'$set': {'protect_content': new_status}}, upsert=True)
     await message.reply(f"Content protection is now {'enabled' if new_status else 'disabled'}.")
+    logger.info(f"Admin {user_id} toggled content protection to {'enabled' if new_status else 'disabled'}.")
 
 @app.on_message(filters.regex("^Join Channel$") & filters.private)
 async def join_channel_btn(client, message: Message):
+    user_id = message.from_user.id # Added user_id for logging
+    logger.info(f"User {user_id} clicked Join Channel button.")
     await message.reply("📢 <b>Join our channel to watch videos!</b>", reply_markup=join_channel_keyboard())
 
 @app.on_message(filters.regex("^Check Subscription$") & filters.private)
 async def check_sub_btn(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"User {user_id} clicked Check Subscription button (from main keyboard).")
+    
     if await check_subscription_cached(client, user_id):
         await message.reply(
             "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
             reply_markup=await get_main_keyboard(user_id)
         )
+        logger.info(f"User {user_id} confirmed subscription (from main keyboard). ")
     else:
         await message.reply(
             "❌ You are not subscribed yet. Please join our channel:",
             reply_markup=join_channel_keyboard()
         )
+        logger.info(f"User {user_id} not subscribed (from main keyboard). ")
 
 # --- Database Cleanup ---
 async def cleanup_expired_data():
@@ -1328,6 +1584,7 @@ async def cleanup_expired_data():
             )
             
             # Clean up old history (older than 30 days)
+            # This is handled by $slice in save_history, but this provides a fallback for older entries.
             month_ago = now - timedelta(days=30)
             history_collection.update_many(
                 {},
@@ -1340,49 +1597,57 @@ async def cleanup_expired_data():
             # Remove token documents with empty 'tokens' array
             tokens_collection.delete_many({'tokens': {'$size': 0}})
             
-            logger.info("Database cleanup completed")
+            # Clean up expired active_menus
+            expired_users = [uid for uid, menu_data in active_menus.items() if get_current_time() - menu_data['timestamp'] > config.MENU_TIMEOUT]
+            for user_id_to_clear in expired_users:
+                # No need to call cleanup_expired_menu here as it's for message deletion
+                # The goal here is to remove from active_menus dict
+                del active_menus[user_id_to_clear]
+                logger.info(f"Cleaned up expired active menu for user {user_id_to_clear} from memory.")
+
+            logger.info("Database cleanup and active_menus cleanup completed")
         except Exception as e:
-            logger.error(f"Error in database cleanup: {e}")
+            logger.error(f"Error in database cleanup: {e}", exc_info=True)
         
         # Run every 24 hours
         await asyncio.sleep(86400)
-
-async def verify_and_cleanup_media():
-    """Periodically verifies if media files still exist in the channel and cleans up invalid entries."""
-    while True:
-        logger.info("Starting media verification and cleanup.")
-        try:
-            all_media = list(media_collection.find({}))
-            for media_item in all_media:
-                video_uuid = media_item.get('uuid')
-                message_id_in_channel = media_item.get('message_id')
-                
-                if not message_id_in_channel:
-                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting.")
-                    media_collection.delete_one({'uuid': video_uuid})
-                    continue
-
-                try:
-                    # Attempt to get the message from the channel
-                    await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
-                except (MessageIdInvalid, ValueError): # ValueError can happen if message_id is malformed
-                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
-                    media_collection.delete_one({'uuid': video_uuid})
-                except Exception as e:
-                    logger.error(f"Error verifying media {video_uuid}: {e}")
-
-            logger.info("Media verification and cleanup completed.")
-        except Exception as e:
-            logger.error(f"Error in media verification cleanup task: {e}")
-        
-        # Run every 6 hours
-        await asyncio.sleep(6 * 3600)
 
 # --- Main ---
 if __name__ == '__main__':
     # Start cleanup task
     app.loop.create_task(cleanup_expired_data())
     # Start media verification and cleanup task
+    async def verify_and_cleanup_media():
+        """Periodically verifies if media files still exist in the channel and cleans up invalid entries."""
+        while True:
+            logger.info("Starting media verification and cleanup.")
+            try:
+                all_media = list(media_collection.find({}))
+                for media_item in all_media:
+                    video_uuid = media_item.get('uuid')
+                    message_id_in_channel = media_item.get('message_id')
+                    
+                    if not message_id_in_channel:
+                        logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting.")
+                        media_collection.delete_one({'uuid': video_uuid})
+                        continue
+
+                    try:
+                        # Attempt to get the message from the channel
+                        await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                    except (MessageIdInvalid, ValueError):
+                        logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
+                        media_collection.delete_one({'uuid': video_uuid})
+                    except Exception as e:
+                        logger.error(f"Error verifying media {video_uuid}: {e}")
+
+                logger.info("Media verification and cleanup completed.")
+            except Exception as e:
+                logger.error(f"Error in media verification cleanup task: {e}")
+            
+            # Run every 6 hours
+            await asyncio.sleep(6 * 3600)
+
     app.loop.create_task(verify_and_cleanup_media())
     # Start bot
     app.run() 
