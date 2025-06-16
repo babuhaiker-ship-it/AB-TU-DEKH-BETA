@@ -101,20 +101,30 @@ def get_current_time() -> int:
     return int(datetime.utcnow().timestamp())
 
 async def shorten_url(long_url: str) -> str:
+    logger.info(f"Attempting to shorten URL: {long_url}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(config.URL_SHORTENER, json={
                 'api': config.SHORTENER_API_KEY,
                 'url': long_url
             }, timeout=10) as resp:
+                logger.info(f"URL shortener API response status: {resp.status}")
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get('shortenedUrl'):
+                        logger.info(f"URL shortened successfully to: {data['shortenedUrl']}")
                         return data['shortenedUrl']
-        logger.warning(f"URL shortening failed for {long_url}")
+                    else:
+                        logger.warning(f"URL shortening API returned 200 but no shortenedUrl: {data}")
+                else:
+                    logger.warning(f"URL shortening API returned non-200 status {resp.status} for {long_url}")
+        logger.warning(f"URL shortening failed for {long_url} after API call.")
+        return long_url
+    except aiohttp.ClientError as ce:
+        logger.error(f"Aiohttp client error during URL shortening for {long_url}: {ce}", exc_info=True)
         return long_url
     except Exception as e:
-        logger.error(f"Error shortening URL: {e}")
+        logger.error(f"General error shortening URL {long_url}: {e}", exc_info=True)
         return long_url
 
 # --- Token Management ---
@@ -187,7 +197,8 @@ async def check_subscription(client: Client, user_id: int) -> bool:
     try:
         member = await client.get_chat_member(config.CHANNEL_ID, user_id)
         return member.status in ["member", "administrator", "creator"]
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error checking subscription for user {user_id} in channel {config.CHANNEL_ID}: {e}", exc_info=True)
         return False
 
 # --- Category Management ---
@@ -1044,39 +1055,54 @@ async def buy_token_btn(client, message: Message):
 @app.on_message(filters.regex("^Refresh Token$") & filters.private)
 async def refresh_token_btn(client, message: Message):
     user_id = message.from_user.id
-    logger.info(f"User {user_id} requested token refresh.")
+    logger.info(f"User {user_id} requested token refresh. Handler entered.")
 
-    if await is_rate_limited(user_id):
-        await message.reply_text("⚠️ You're refreshing too quickly. Please wait a minute and try again.")
-        logger.warning(f"User {user_id} hit rate limit in refresh_token_btn.")
-        return
+    try:
+        if await is_rate_limited(user_id):
+            await message.reply_text("⚠️ You're refreshing too quickly. Please wait a minute and try again.")
+            logger.warning(f"User {user_id} hit rate limit in refresh_token_btn.")
+            return
 
-    temp_msg = await message.reply("Please wait...")
-    # Add validation here to prevent refresh if user already has a valid token
-    if user_has_token(user_id):
+        temp_msg = await message.reply("Please wait...")
+        logger.info(f"User {user_id}: 'Please wait...' message sent. Checking for existing token.")
+
+        if user_has_token(user_id):
+            await temp_msg.delete()
+            await message.reply("💡 You already have an active token. No need to refresh yet!")
+            logger.info(f"User {user_id} attempted token refresh but already has valid tokens. Exiting.")
+            return
+
+        logger.info(f"User {user_id}: User does not have valid token. Generating ad_code and attempting to shorten URL.")
+        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
+        long_url = f"https://telegram.dog/{client.username}?start=token_{ad_code}"
+        ad_url = await shorten_url(long_url)
+        logger.info(f"User {user_id}: shorten_url call completed. Result: {ad_url}")
+        
         await temp_msg.delete()
-        await message.reply("💡 You already have an active token. No need to refresh yet!")
-        logger.info(f"User {user_id} attempted token refresh but already has valid tokens.")
-        return
 
-    ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-    long_url = f"https://telegram.dog/{client.username}?start=token_{ad_code}"
-    ad_url = await shorten_url(long_url)
-    await temp_msg.delete()
+        disable_preview = False
+        if ad_url.startswith(f"https://telegram.dog/{client.username}"):
+            logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
+            disable_preview = True # Disable preview for long Telegram links
 
-    disable_preview = False
-    if ad_url.startswith(f"https://telegram.dog/{client.username}"):
-        logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
-        disable_preview = True # Disable preview for long Telegram links
-
-    # Sanitize user mention
-    user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
-    await message.reply_text(
-        f"💡 <b>Information</b>\\nHere are the details you requested...\\n\\n"
-        f"Hey 💕 <b>{user_mention_safe}</b> \\n\\nYour Ads token is expired, refresh your token and try again. \\n\\n<b>Token Timeout:</b> 24 hour \\n\\n<b>What is token?</b> \\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad. \\n\\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
-        disable_web_page_preview = disable_preview,
-        reply_markup=token_earning_keyboard(ad_url)
-    )
+        # Sanitize user mention
+        user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
+        await message.reply_text(
+            f"💡 <b>Information</b>\\nHere are the details you requested...\\n\\n"
+            f"Hey 💕 <b>{user_mention_safe}</b> \\n\\nYour Ads token is expired, refresh your token and try again. \\n\\n<b>Token Timeout:</b> 24 hour \\n\\n<b>What is token?</b> \\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad. \\n\\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
+            disable_web_page_preview = disable_preview,
+            reply_markup=token_earning_keyboard(ad_url)
+        )
+        logger.info(f"User {user_id}: Refresh token message sent. Handler finished.")
+    except Exception as e:
+        logger.error(f"User {user_id} failed in refresh_token_btn: {e}", exc_info=True)
+        # Ensure temp_msg is deleted even on error
+        try:
+            await temp_msg.delete()
+            logger.info(f"User {user_id}: Deleted 'Please wait...' message due to error.")
+        except Exception as delete_e:
+            logger.warning(f"User {user_id}: Failed to delete 'Please wait...' message during error handling: {delete_e}")
+        await handle_error(client, message, e)
 
 async def send_token_earning_options(client: Client, message: Message):
     user_id = message.from_user.id
@@ -1106,30 +1132,56 @@ async def send_token_earning_options(client: Client, message: Message):
 @app.on_callback_query(filters.regex("^check_sub$"))
 async def check_sub_callback(client, callback_query):
     user_id = callback_query.from_user.id
-    logger.info(f"User {user_id} clicked Check Subscription button.")
-    if await is_rate_limited(user_id):
-        await callback_query.answer("⚠️ You're checking too quickly. Please wait a minute and try again.", show_alert=True)
-        logger.warning(f"User {user_id} hit rate limit in check_sub_callback.")
-        return
+    logger.info(f"User {user_id} clicked Check Subscription button (callback). ")
+    try:
+        if await is_rate_limited(user_id):
+            await callback_query.answer("⚠️ You're checking too quickly. Please wait a minute and try again.", show_alert=True)
+            logger.warning(f"User {user_id} hit rate limit in check_sub_callback.")
+            return
 
-    is_member = await check_subscription_cached(client, user_id)  # Use cached version
+        is_member = await check_subscription_cached(client, user_id)  # Use cached version
+        
+        # Invalidate cache after explicit check
+        if f"{user_id}" in subscription_cache:
+            del subscription_cache[f"{user_id}"]
+
+        if is_member:
+            await callback_query.message.edit_text(
+                "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
+                reply_markup=await get_main_keyboard(user_id)
+            )
+            logger.info(f"User {user_id} confirmed subscription (callback). ")
+        else:
+            await callback_query.message.edit_text(
+                "❌ You are not subscribed yet. Please join our channel:",
+                reply_markup=join_channel_keyboard()
+            )
+            logger.info(f"User {user_id} is not subscribed (callback). ")
+    except Exception as e:
+        logger.error(f"User {user_id} failed to check subscription (callback): {e}", exc_info=True)
+        await callback_query.answer("❌ Something went wrong. Please try again.", show_alert=True)
+
+@app.on_message(filters.regex("^Check Subscription$") & filters.private)
+async def check_sub_btn(client, message: Message):
+    user_id = message.from_user.id
+    logger.info(f"User {user_id} clicked Check Subscription button (from main keyboard). ")
     
-    # Invalidate cache after explicit check
-    if f"{user_id}" in subscription_cache:
-        del subscription_cache[f"{user_id}"]
-
-    if is_member:
-        await callback_query.message.edit_text(
-            "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
-            reply_markup=await get_main_keyboard(user_id)
-        )
-        logger.info(f"User {user_id} is subscribed.")
-    else:
-        await callback_query.message.edit_text(
-            "❌ You are not subscribed yet. Please join our channel:",
-            reply_markup=join_channel_keyboard()
-        )
-        logger.info(f"User {user_id} is not subscribed.")
+    try:
+        if await check_subscription_cached(client, user_id):
+            await message.reply(
+                "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
+                reply_markup=await get_main_keyboard(user_id)
+            )
+            logger.info(f"User {user_id} confirmed subscription (from main keyboard). ")
+        else:
+            await message.reply(
+                "❌ You are not subscribed yet. Please join our channel:",
+                reply_markup=join_channel_keyboard()
+            )
+            logger.info(f"User {user_id} not subscribed (from main keyboard). ")
+    except Exception as e:
+        logger.error(f"User {user_id} failed to check subscription from button: {e}", exc_info=True)
+        await handle_error(client, message, e)
 
 @app.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client, callback_query):
