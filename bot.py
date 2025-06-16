@@ -1,3 +1,4 @@
+# Spicy Nyraa Bot - Main Script
 import os
 import asyncio
 import uuid
@@ -322,6 +323,9 @@ SUBSCRIPTION_CACHE_TTL = 60  # 1 minutes
 
 async def check_subscription_cached(client: Client, user_id: int) -> bool:
     """Check subscription status with caching"""
+    if is_admin(user_id):  # Skip cache for admins
+        return await check_subscription(client, user_id)
+        
     now = get_current_time()
     cache_key = f"{user_id}"
     
@@ -432,10 +436,10 @@ async def handle_token_refresh(user_id: int, ad_code: str):
             
         add_token(user_id)
         logger.info(f"Token added for user {user_id} via refresh")
-        return True, "Congratulations! You got 1 token. Each token lasts 24 hours."
+        return True, "🎉 <b>Success!</b> You got 1 token. Each token lasts 24 hours."
     except Exception as e:
         logger.error(f"Token refresh failed for user {user_id}: {e}")
-        return False, "Something went wrong with token refresh. Please try again."
+        return False, "❌ <b>Something went wrong!</b>\nPlease try again later."
 
 # --- Auto-Delete & Protect Content ---
 async def schedule_auto_delete(message: Message, delay: int = 1200):  # 20 minutes
@@ -466,15 +470,18 @@ async def send_video_with_auto_delete(client: Client, chat_id: int, video_data: 
         return True, sent # Return success and the sent message object
     except Exception as e:
         logger.error(f"Failed to send video to chat {chat_id}: {e}")
-        return False, "Failed to send video. Please try again later." # Return failure and an error message
+        return False, "❌ <b>Failed to send video.</b>\nPlease try again later." # Return failure and an error message
 
 # --- Rate Limiting ---
 # In-memory defaultdict for rate limiting (will be replaced by MongoDB)
 # rate_limits = defaultdict(list)
-RATE_LIMIT_WINDOW = 60  # 1 minute
-RATE_LIMIT_MAX = 5  # 5 requests per minute
+RATE_LIMIT_WINDOW = 120  # Increased to 2 minutes
+RATE_LIMIT_MAX = 20  # Increased to 20 requests per 2 minutes
 
 async def is_rate_limited(user_id: int) -> bool:
+    if is_admin(user_id):  # Skip rate limiting for admins
+        return False
+        
     now = datetime.utcnow()
     
     # Atomically remove old entries and get the current count
@@ -499,10 +506,10 @@ async def handle_error(client: Client, message: Message, error: Exception):
         return
     elif isinstance(error, FloodWait):
         logger.warning(f"FloodWait: {error.value} seconds")
-        await message.reply_text(f"⚠️ Too many requests. Please wait {error.value} seconds.")
+        await message.reply_text("⚠️ <b>Too Many Requests!</b>\nPlease wait <b>{error.value}</b> seconds before trying again.")
     else:
         logger.error(f"An error occurred: {error}", exc_info=True)
-        await message.reply_text(f"❌ An unexpected error occurred. Please try again later.")
+        await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later.")
 
 # --- Handlers ---
 @app.on_message(filters.command("start") & filters.private)
@@ -548,7 +555,7 @@ async def start_cmd(client, message: Message):
                 await message.reply(msg)
                 if success:
                     await message.reply(
-                        "Click on Get Video to watch spicy content.",
+                        "🎉 <b>Success!</b> Click on Get Video to watch spicy content.",
                         reply_markup=await get_main_keyboard(user_id)
                     )
                 return
@@ -592,7 +599,7 @@ async def start_cmd(client, message: Message):
                     if sent_success:
                         save_history(user_id, video['uuid'], video['category'])
                         set_active_menu(user_id, sent_message_or_error.id)
-                        await message.reply("Video updated in your active menu.")
+                        await message.reply("🎉 <b>Success!</b> Video updated in your active menu.")
                         logger.info(f"Updated menu with shared video {video_uuid} for user {user_id}")
                     else:
                         await message.reply(sent_message_or_error)
@@ -617,12 +624,12 @@ async def start_cmd(client, message: Message):
         
         if not user:
             await message.reply(
-                f"dear {message.from_user.mention} This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help.",
+                f"👤 <b>dear {message.from_user.mention}</b> This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help.",
                 reply_markup=await get_main_keyboard(user_id)
             )
         else:
             await message.reply(
-                "This is Spicy Nyraa Bot. Click on Get Video to watch spicy content.",
+                "👤 <b>This is Spicy Nyraa Bot.</b> Click on Get Video to watch spicy content.",
                 reply_markup=await get_main_keyboard(user_id)
             )
             
@@ -633,7 +640,7 @@ async def start_cmd(client, message: Message):
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client, message: Message):
     await message.reply(
-        f"dear {message.from_user.mention} this is how to use spicy nyraa.\n\n"
+        f"👤 <b>dear {message.from_user.mention}</b> this is how to use spicy nyraa.\n\n"
         "- Use Get Video to watch spicy content.\n"
         "- Each token gives you 24 hours access.\n"
         "- Earn tokens by referral, refresh, or buy.\n"
@@ -645,6 +652,11 @@ async def help_cmd(client, message: Message):
 @app.on_message(filters.command("profile") & filters.private)
 async def profile_cmd(client, message: Message):
     user_id = message.from_user.id
+    
+    if is_rate_limited(user_id):
+        await handle_error(client, message, FloodWait(10))
+        return
+
     user = users_collection.find_one({'user_id': user_id})
     tokens = get_valid_tokens(user_id)
     referral_count = user.get('referral_count', 0) if user else 0
@@ -657,25 +669,25 @@ async def profile_cmd(client, message: Message):
     sanitized_first_name = html.escape(message.from_user.first_name if message.from_user.first_name else '')
     sanitized_username = html.escape(message.from_user.username if message.from_user.username else '')
 
-    await message.reply(f"<b>Profile</b>\n\nTokens: <b>{len(tokens)}</b>\nVideo Views: <b>{view_count}</b>\nReferrals: <b>{referral_count}</b>\nReferral Link: <code>{ref_link}</code>\n{'Referred by: ' + str(referred_by) if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
+    await message.reply(f"👤 <b>Your Profile</b>\n\n<b>Tokens:</b> {len(tokens)}\n<b>Video Views:</b> {view_count}\n<b>Referrals:</b> {referral_count}\n<b>Referral Link:</b> <code>{ref_link}</code>\n{('Referred by: ' + str(referred_by)) if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
 
 @app.on_message(filters.regex("^Get Video$") & filters.private)
 async def get_video(client, message: Message):
     user_id = message.from_user.id
     if not await check_subscription_cached(client, user_id):
-        await message.reply("Join the channel to watch!", reply_markup=join_channel_keyboard())
+        await message.reply("📢 <b>Join our channel to watch videos!</b>", reply_markup=join_channel_keyboard())
         return
     if not user_has_token(user_id):
         await send_token_earning_options(client, message)
         return
     if await is_menu_active(client, user_id, message.chat.id):
-        await message.reply("Scroll up, your menu is already open.")
+        await message.reply("⚠️ <b>Menu Already Open</b>\nScroll up, your menu is already open.")
         return
     cats = get_categories()
     if not cats:
         add_category(config.DEFAULT_CATEGORY)
         cats = [config.DEFAULT_CATEGORY]
-    await message.reply("Choose a category:", reply_markup=category_keyboard())
+    await message.reply("🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)"))
 async def select_category(client, callback_query):
@@ -844,7 +856,7 @@ async def prev_video(client, callback_query):
 
 @app.on_callback_query(filters.regex(r"^change_cat$"))
 async def change_category(client, callback_query):
-    await callback_query.message.edit_text("Choose a category:", reply_markup=category_keyboard())
+    await callback_query.message.edit_text("🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
 
 @app.on_message(filters.regex("^Profile$") & filters.private)
 async def profile_btn(client, message: Message):
@@ -853,8 +865,13 @@ async def profile_btn(client, message: Message):
 @app.on_message(filters.regex("^Refer & Earn$") & filters.private)
 async def refer_btn(client, message: Message):
     user_id = message.from_user.id
+    
+    if is_rate_limited(user_id):
+        await handle_error(client, message, FloodWait(10))
+        return
+
     ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-    await message.reply(f"Share this link to earn tokens!\n<code>{ref_link}</code>", reply_markup=referral_keyboard(ref_link))
+    await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this link to earn tokens:\n<code>{ref_link}</code>", reply_markup=referral_keyboard(ref_link))
 
 @app.on_message(filters.regex("^Buy Token$") & filters.private)
 async def buy_token_btn(client, message: Message):
@@ -881,6 +898,7 @@ async def refresh_token_btn(client, message: Message):
         disable_preview = True # Disable preview for long Telegram links
 
     await message.reply_text(
+        f"💡 <b>Information</b>\nHere are the details you requested...\n\n"
         f"Hey 💕 <b>{message.from_user.mention}</b> \n\nYour Ads token is expired, refresh your token and try again. \n\n<b>Token Timeout:</b> 24 hour \n\n<b>What is token?</b> \nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad. \n\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
         disable_web_page_preview = disable_preview,
         reply_markup=token_earning_keyboard(ad_url)
@@ -903,7 +921,7 @@ async def send_token_earning_options(client: Client, message: Message):
         disable_preview = True
 
     await message.reply(
-        "You have no tokens left. Use any of these methods to gain tokens:",
+        "❌ <b>No Tokens Left!</b>\nUse any of these methods to gain tokens:",
         reply_markup=token_earning_keyboard(ad_url),
         disable_web_page_preview=disable_preview
     )
@@ -924,7 +942,7 @@ async def check_sub_callback(client, callback_query):
 
     if is_member:
         await callback_query.message.edit_text(
-            "✅ You are subscribed! You can now watch videos.",
+            "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
             reply_markup=await get_main_keyboard(user_id)
         )
     else:
@@ -939,7 +957,7 @@ async def share_callback(client, callback_query):
     share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start={video_uuid}"
     await callback_query.answer()
     await callback_query.message.reply(
-        f"Share this video with your friends!\n<code>{share_link}</code>",
+        f"🔗 <b>Share & Earn!</b>\nShare this video with your friends!\n<code>{share_link}</code>",
         quote=True
         )
 
@@ -949,7 +967,7 @@ async def broadcast_cmd(client, message: Message):
     replied_message = message.reply_to_message
     users = list(users_collection.find({}, {'user_id': 1}))
     total_users = len(users)
-    broadcast_msg = await message.reply(f"Broadcasting to {total_users} users...")
+    broadcast_msg = await message.reply(f"📣 <b>Broadcasting</b> to <b>{total_users}</b> users...")
     
     success = 0
     blocked = 0
@@ -1280,17 +1298,14 @@ async def toggle_protect(client, message):
 
 @app.on_message(filters.regex("^Join Channel$") & filters.private)
 async def join_channel_btn(client, message: Message):
-    await message.reply(
-        "Please join our channel to watch videos:",
-        reply_markup=join_channel_keyboard()
-    )
+    await message.reply("📢 <b>Join our channel to watch videos!</b>", reply_markup=join_channel_keyboard())
 
 @app.on_message(filters.regex("^Check Subscription$") & filters.private)
 async def check_sub_btn(client, message: Message):
     user_id = message.from_user.id
     if await check_subscription_cached(client, user_id):
         await message.reply(
-            "✅ You are subscribed! You can now watch videos.",
+            "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
             reply_markup=await get_main_keyboard(user_id)
         )
     else:
