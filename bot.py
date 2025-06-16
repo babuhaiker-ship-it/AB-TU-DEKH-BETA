@@ -28,27 +28,27 @@ logger = logging.getLogger(__name__)
 import os
 
 class BotConfig:
-    BOT_TOKEN = os.getenv('BOT_TOKEN') # Removed default value
-    API_ID = int(os.getenv('API_ID', 0)) # Set default to 0 for int conversion safety
-    API_HASH = os.getenv('API_HASH') # Removed default value
-    BOT_USERNAME = os.getenv('BOT_USERNAME') # Removed default value
-    MONGO_URI = os.getenv('MONGO_URI') # Removed default value
-    MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'spicybot')
-    CHANNEL_ID = int(os.getenv('CHANNEL_ID', -1001234567890))
-    CHANNEL_INVITE_LINK = os.getenv('CHANNEL_INVITE_LINK', 'https://t.me/SpicyNyraa')
-    VIDEO_CHANNEL_ID = int(os.getenv('VIDEO_CHANNEL_ID', -1002626689003))
-    BUY_BOT_URL = os.getenv('BUY_BOT_URL', 'https://t.me/hanielxsupportbot')
-    ADMIN_IDS = [int(i) for i in os.getenv('ADMIN_IDS', '').split(',') if i] # Removed default value, added check for empty split
-    URL_SHORTENER = os.getenv('URL_SHORTENER', 'https://api.linkshortify.com/st')
-    SHORTENER_API_KEY = os.getenv('SHORTENER_API_KEY') # Removed default value
-    TUTORIAL_LINK_2 = os.getenv('TUTORIAL_LINK_2', 'https://t.me/urlshortenertutorial')
-    TOKEN_EXPIRY = int(os.getenv('TOKEN_EXPIRY', 86400))  # 24 hours in seconds
-    DEFAULT_CATEGORY = os.getenv('DEFAULT_CATEGORY', 'default')
+    BOT_TOKEN = '7646433933:AAF5iWb7rngRe1Tpxkc252hL0wm-FtZJA4U'
+    API_ID = 29800015
+    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
+    BOT_USERNAME = '@SpicyNyraa_bot'
+    MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
+    MONGO_DB_NAME = 'spicybot'
+    CHANNEL_ID = -1001234567890
+    CHANNEL_INVITE_LINK = 'https://t.me/SpicyNyraa'
+    VIDEO_CHANNEL_ID = -1002626689003
+    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
+    ADMIN_IDS = [6612030110]
+    URL_SHORTENER = 'https://api.linkshortify.com/st'
+    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
+    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
+    TOKEN_EXPIRY = 86400  # 24 hours in seconds
+    DEFAULT_CATEGORY = 'default'
     # Customization options
-    NEW_USER_TOKENS = int(os.getenv('NEW_USER_TOKENS', 3))
-    REFERRAL_BONUS = int(os.getenv('REFERRAL_BONUS', 1))
-    REFRESH_BONUS = int(os.getenv('REFRESH_BONUS', 1))
-    MENU_TIMEOUT = int(os.getenv('MENU_TIMEOUT', 1800)) # Added MENU_TIMEOUT config
+    NEW_USER_TOKENS = 3
+    REFERRAL_BONUS = 1
+    REFRESH_BONUS = 1
+    MENU_TIMEOUT = 1800 # Added MENU_TIMEOUT config
 
 try:
     config = BotConfig()
@@ -75,8 +75,8 @@ media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
-history_collection.create_index([("user_id", ASCENDING)], unique=True)
 history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
+history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
@@ -425,7 +425,7 @@ async def handle_shared_video(client, user_id, video_uuid, message_id=None):
     if video.get('banned'): # Check for banned status
         logger.warning(f"User {user_id} attempted to view banned video {video_uuid}.")
         return False, "❌ This content is no longer available."
-
+    
     if not user_has_token(user_id):
         return False, await send_token_earning_options(client, message_id)
         
@@ -528,7 +528,7 @@ async def is_rate_limited(user_id: int) -> bool:
             {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
             upsert=True
         )
-
+    
         # Then, push the new timestamp
         tokens_collection.update_one(
             {'user_id': user_id},
@@ -555,10 +555,10 @@ async def handle_error(client: Client, message: Message, error: Exception):
         return
     elif isinstance(error, FloodWait):
         logger.warning(f"FloodWait: {error.value} seconds")
-        await message.reply_text(f"⚠️ <b>Too Many Requests!</b>\nPlease wait <b>{error.value}</b> seconds before trying again.")
+        await message.reply_text(f"⚠️ <b>Too Many Requests!</b>\\nPlease wait <b>{error.value}</b> seconds before trying again.")
     else:
         logger.error(f"An error occurred: {error}", exc_info=True)
-        await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later.")
+        await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\\nPlease try again later.")
 
 # --- Handlers ---
 @app.on_message(filters.command("start") & filters.private)
@@ -567,9 +567,9 @@ async def start_cmd(client, message: Message):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            if is_rate_limited(user_id):
+            if await is_rate_limited(user_id):
                 raise FloodWait(10) # Default value, actual will come from Telegram
-            
+    
             user = users_collection.find_one({'user_id': user_id})
             args = message.text.split()
             
@@ -611,7 +611,7 @@ async def start_cmd(client, message: Message):
                 # Handle video share
                 video_uuid = arg
                 logger.info(f"User {user_id} attempting to view shared video {video_uuid}")
-                
+                    
                 # Ensure the video_uuid is a valid UUID format
                 try:
                     uuid.UUID(video_uuid)
@@ -619,7 +619,7 @@ async def start_cmd(client, message: Message):
                     logger.warning(f"User {user_id} attempted to view shared video with invalid UUID format: {video_uuid}.")
                     await handle_error(client, message, ValueError("Invalid video link format."))
                     return # Exit if video UUID format is invalid
-
+                
                 if not media_collection.find_one({'uuid': video_uuid}):
                     logger.warning(f"User {user_id} attempted to view non-existent shared video UUID {video_uuid}.")
                     await handle_error(client, message, ValueError("Invalid video link"))
@@ -635,8 +635,8 @@ async def start_cmd(client, message: Message):
                         await message.reply(result_or_msg)
                     return # Exit if shared video handling failed
                     
-                video = result_or_msg # Now `result` is the video object if successful
-                
+                video = result_or_or_msg # Now `result` is the video object if successful
+                    
                 if await is_menu_active(client, user_id, message.chat.id):
                     try:
                         # Delete old menu first
@@ -695,7 +695,7 @@ async def start_cmd(client, message: Message):
                     reply_markup=await get_main_keyboard(user_id)
                 )
             break  # Exit the retry loop on successful execution
-        
+            
         except FloodWait as e:
             wait_time = e.value
             logger.warning(f"User {user_id} hit FloodWait: Waiting for {wait_time} seconds (attempt {attempt + 1}/{max_retries}).")
@@ -717,11 +717,11 @@ async def help_cmd(client, message: Message):
     # Sanitize message.from_user.mention explicitly
     user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
     await message.reply(
-        f"👤 <b>dear {user_mention_safe}</b> this is how to use spicy nyraa.\n\n"
-        "- Use Get Video to watch spicy content.\n"
-        "- Each token gives you 24 hours access.\n"
-        "- Earn tokens by referral, refresh, or buy.\n"
-        "- Join the channel to access videos.\n"
+        f"👤 <b>dear {user_mention_safe}</b> this is how to use spicy nyraa.\\n\\n"
+        "- Use Get Video to watch spicy content.\\n"
+        "- Each token gives you 24 hours access.\\n"
+        "- Earn tokens by referral, refresh, or buy.\\n"
+        "- Join the channel to access videos.\\n"
         "- Use /profile to check your stats.",
         reply_markup=await get_main_keyboard(user_id)
     )
@@ -730,7 +730,7 @@ async def help_cmd(client, message: Message):
 async def profile_cmd(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested profile.")
-    if is_rate_limited(user_id):
+    if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
         logger.warning(f"User {user_id} hit rate limit in profile_cmd.")
         return
@@ -747,14 +747,14 @@ async def profile_cmd(client, message: Message):
     sanitized_first_name = html.escape(message.from_user.first_name if message.from_user.first_name else '')
     sanitized_username = html.escape(message.from_user.username if message.from_user.username else '')
 
-    await message.reply(f"👤 <b>Your Profile</b>\n\n<b>Tokens:</b> {len(tokens)}\n<b>Video Views:</b> {view_count}\n<b>Referrals:</b> {referral_count}\n<b>Referral Link:</b> <code>{ref_link}</code>\n{(f'Referred by: {referred_by}') if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
+    await message.reply(f"👤 <b>Your Profile</b>\\n\\n<b>Tokens:</b> {len(tokens)}\\n<b>Video Views:</b> {view_count}\\n<b>Referrals:</b> {referral_count}\\n<b>Referral Link:</b> <code>{ref_link}</code>\\n{(f'Referred by: {referred_by}') if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
 
 @app.on_message(filters.regex("^Get Video$") & filters.private)
 async def get_video(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested Get Video.")
     
-    if is_rate_limited(user_id):
+    if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
         logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
@@ -771,7 +771,7 @@ async def get_video(client, message: Message):
     chat_id = message.chat.id # Get chat_id here
     if await is_menu_active(client, user_id, chat_id): # Pass chat_id to is_menu_active
         logger.warning(f"User {user_id} tried to open new menu but active menu already open.")
-        await message.reply("⚠️ <b>Menu Already Open</b>\nScroll up, your menu is already open.")
+        await message.reply("⚠️ <b>Menu Already Open</b>\\nScroll up, your menu is already open.")
         return
     
     cats = get_categories()
@@ -789,7 +789,7 @@ async def select_category(client, callback_query):
     category = callback_query.data[4:] # Extract category from callback_data
     logger.info(f"User {user_id} selected category: {category}.")
     
-    if is_rate_limited(user_id):
+    if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ You're changing categories too quickly. Please wait a minute and try again.", show_alert=True)
         logger.warning(f"User {user_id} hit rate limit in select_category.")
         return
@@ -851,7 +851,7 @@ async def next_video(client, callback_query):
     try:
         _, current_uuid, category = callback_query.data.split('_')
         
-        if is_rate_limited(user_id):
+        if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ You're browsing too quickly. Please wait a minute and try again.", show_alert=True)
             logger.warning(f"User {user_id} hit rate limit in next_video.")
             return
@@ -919,7 +919,7 @@ async def prev_video(client, callback_query):
     try:
         _, current_uuid, category_hint = callback_query.data.split('_') # Use category_hint as it might not be the actual category of the prev video
         
-        if is_rate_limited(user_id):
+        if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ You're browsing too quickly. Please wait a minute and try again.", show_alert=True)
             logger.warning(f"User {user_id} hit rate limit in prev_video.")
             return
@@ -963,7 +963,7 @@ async def prev_video(client, callback_query):
                     found_video = video
                     found_category = entry['category'] # Use the category from history for navigation
                     break # Found a valid previous video
-
+        
         if not found_video:
             logger.warning(f"User {user_id} could not find any valid previous video in history after full scan.")
             await callback_query.answer(
@@ -977,7 +977,7 @@ async def prev_video(client, callback_query):
             logger.warning(f"User {user_id} tried to navigate previous but menu expired or not active.")
             await callback_query.message.reply("Menu expired. Please click Get Video to restart.")
             return
-
+            
         # Delete old menu before sending new one
         try:
             await callback_query.message.delete()
@@ -1027,13 +1027,13 @@ async def refer_btn(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Refer & Earn button.")
     
-    if is_rate_limited(user_id):
+    if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
         logger.warning(f"User {user_id} hit rate limit in refer_btn.")
         return
 
     ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-    await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this link to earn tokens:\n<code>{html.escape(ref_link)}</code>", reply_markup=referral_keyboard(ref_link))
+    await message.reply(f"🔗 <b>Share & Earn!</b>\\nShare this link to earn tokens:\\n<code>{html.escape(ref_link)}</code>", reply_markup=referral_keyboard(ref_link))
 
 @app.on_message(filters.regex("^Buy Token$") & filters.private)
 async def buy_token_btn(client, message: Message):
@@ -1046,7 +1046,7 @@ async def refresh_token_btn(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested token refresh.")
 
-    if is_rate_limited(user_id):
+    if await is_rate_limited(user_id):
         await message.reply_text("⚠️ You're refreshing too quickly. Please wait a minute and try again.")
         logger.warning(f"User {user_id} hit rate limit in refresh_token_btn.")
         return
@@ -1059,8 +1059,9 @@ async def refresh_token_btn(client, message: Message):
         logger.info(f"User {user_id} attempted token refresh but already has valid tokens.")
         return
 
-    ad_code = str_to_b64(f"{user_id}:{str(get_current_time() + config.TOKEN_EXPIRY)}")
-    ad_url = await shorten_url(f"https://telegram.dog/{client.username}?start=token_{ad_code}")
+    ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
+    long_url = f"https://telegram.dog/{client.username}?start=token_{ad_code}"
+    ad_url = await shorten_url(long_url)
     await temp_msg.delete()
 
     disable_preview = False
@@ -1071,8 +1072,8 @@ async def refresh_token_btn(client, message: Message):
     # Sanitize user mention
     user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
     await message.reply_text(
-        f"💡 <b>Information</b>\nHere are the details you requested...\n\n"
-        f"Hey 💕 <b>{user_mention_safe}</b> \n\nYour Ads token is expired, refresh your token and try again. \n\n<b>Token Timeout:</b> 24 hour \n\n<b>What is token?</b> \nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad. \n\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
+        f"💡 <b>Information</b>\\nHere are the details you requested...\\n\\n"
+        f"Hey 💕 <b>{user_mention_safe}</b> \\n\\nYour Ads token is expired, refresh your token and try again. \\n\\n<b>Token Timeout:</b> 24 hour \\n\\n<b>What is token?</b> \\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad. \\n\\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
         disable_web_page_preview = disable_preview,
         reply_markup=token_earning_keyboard(ad_url)
     )
@@ -1080,7 +1081,7 @@ async def refresh_token_btn(client, message: Message):
 async def send_token_earning_options(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} is being sent token earning options.")
-    if is_rate_limited(user_id):
+    if await is_rate_limited(user_id):
         await message.reply_text("⚠️ You're requesting token options too quickly. Please wait a minute and try again.")
         logger.warning(f"User {user_id} hit rate limit in send_token_earning_options.")
         return
@@ -1097,7 +1098,7 @@ async def send_token_earning_options(client: Client, message: Message):
         disable_preview = True
 
     await message.reply(
-        "❌ <b>No Tokens Left!</b>\nUse any of these methods to gain tokens:",
+        "❌ <b>No Tokens Left!</b>\\nUse any of these methods to gain tokens:",
         reply_markup=token_earning_keyboard(ad_url),
         disable_web_page_preview=disable_preview
     )
@@ -1106,7 +1107,7 @@ async def send_token_earning_options(client: Client, message: Message):
 async def check_sub_callback(client, callback_query):
     user_id = callback_query.from_user.id
     logger.info(f"User {user_id} clicked Check Subscription button.")
-    if is_rate_limited(user_id):
+    if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ You're checking too quickly. Please wait a minute and try again.", show_alert=True)
         logger.warning(f"User {user_id} hit rate limit in check_sub_callback.")
         return
@@ -1147,7 +1148,7 @@ async def share_callback(client, callback_query):
     await callback_query.answer()
     logger.info(f"User {user_id} requested share link for video {video_uuid}.")
     await callback_query.message.reply(
-        f"🔗 <b>Share & Earn!</b>\nShare this video with your friends!\n<code>{html.escape(share_link)}</code>",
+        f"🔗 <b>Share & Earn!</b>\\nShare this video with your friends!\\n<code>{html.escape(share_link)}</code>",
         quote=True
         )
 
@@ -1178,27 +1179,31 @@ async def broadcast_cmd(client, message: Message):
         except FloodWait as e:
             logger.warning(f"User {user['user_id']} hit FloodWait during broadcast: {e.value} seconds. Pausing broadcast.")
             await asyncio.sleep(e.value + 1)  # Wait a bit longer than required
-            await replied_message.copy(user['user_id']) # Retry after waiting
-            success += 1
+            try: # Nested try for retry
+                await replied_message.copy(user['user_id']) # Retry after waiting
+                success += 1
+            except Exception as retry_e:
+                failed += 1
+                logger.error(f"Broadcast retry failed for user {user['user_id']}: {retry_e}")
         except Exception as e:
             failed += 1
             logger.error(f"Broadcast failed for user {user['user_id']}: {e}")
         
         if (success + blocked + failed) % 25 == 0:
             await broadcast_msg.edit_text(
-                f"Broadcasting...\n\n"
-                f"Progress: {success + blocked + failed}/{total_users}\n"
-                f"Successful: {success}\n"
-                f"Blocked Users: {blocked}\n"
+                f"Broadcasting...\\n\\n"
+                f"Progress: {success + blocked + failed}/{total_users}\\n"
+                f"Successful: {success}\\n"
+                f"Blocked Users: {blocked}\\n"
                 f"Unsuccessful: {failed}"
             )
         await asyncio.sleep(0.5) # Increased delay to 0.5 seconds
     
     await broadcast_msg.edit_text(
-        f"Broadcast Completed\n\n"
-        f"Total Users: {total_users}\n"
-        f"Successful: {success}\n"
-        f"Blocked Users: {blocked}\n"
+        f"Broadcast Completed\\n\\n"
+        f"Total Users: {total_users}\\n"
+        f"Successful: {success}\\n"
+        f"Blocked Users: {blocked}\\n"
         f"Unsuccessful: {failed}"
     )
     logger.info(f"Broadcast completed. Success: {success}, Blocked: {blocked}, Failed: {failed}.")
@@ -1211,7 +1216,7 @@ async def addcategory_cmd(client, message: Message):
     if len(args) < 2:
         logger.warning(f"Admin {user_id} used addcategory with insufficient arguments.")
         await message.reply(
-            "Usage: /addcategory <category_name>\n"
+            "Usage: /addcategory <category_name>\\n"
             "Category name can only contain letters, numbers, underscores, and hyphens."
         )
         return
@@ -1245,7 +1250,7 @@ async def deletecategory_cmd(client, message: Message):
         # Sanitize category name for callback data and display
         sanitized_category = html.escape(category)
         buttons.append([InlineKeyboardButton(sanitized_category, callback_data=f"confirmdelcat_{category}")] ) # Pass original category name for logic
-        
+
     await message.reply_text(
         """Select a category to delete:
 
@@ -1361,7 +1366,7 @@ async def batchadd_cmd(client, message: Message):
     }
     
     await message.reply(
-        "Send me videos to add. Type /done when finished.\n"
+        "Send me videos to add. Type /done when finished.\\n"
         "Current category: " + config.DEFAULT_CATEGORY
     )
 
@@ -1427,7 +1432,7 @@ async def handle_video(client, message: Message):
         forwarded_message = await client.send_video(
             chat_id=config.VIDEO_CHANNEL_ID,
             video=file_id,
-            caption=f"Category: {category}\nSize: {format_size(file_size)}\nUUID: {video_uuid}", # Use actual video_uuid
+            caption=f"Category: {category}\\nSize: {format_size(file_size)}\\nUUID: {video_uuid}", # Use actual video_uuid
             protect_content=protect_content # Get protect_content from settings
         )
         message_id_in_channel = forwarded_message.id
@@ -1445,9 +1450,9 @@ async def handle_video(client, message: Message):
         media_collection.insert_one(video_data)
         logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}.")
         await message.reply_text(
-            f"✅ File {html.escape(message.video.file_name)} Added to {html.escape(category)}\n"\
-            f"📁 Category: {html.escape(category)}\n"
-            f"📊 Size: {format_size(file_size)}\n"
+            f"✅ File {html.escape(message.video.file_name)} Added to {html.escape(category)}\\n"\
+            f"📁 Category: {html.escape(category)}\\n"
+            f"📊 Size: {format_size(file_size)}\\n"
             f"🆔 File ID: {file_id}"
         )
     except Exception as e:
@@ -1522,7 +1527,7 @@ async def stats_cmd(client, message: Message):
     total_users = users_collection.count_documents({})
     total_videos = media_collection.count_documents({})
     total_categories = categories_collection.count_documents({})
-    await message.reply(f"Total Users: {total_users}\nTotal Videos: {total_videos}\nTotal Categories: {total_categories}")
+    await message.reply(f"Total Users: {total_users}\\nTotal Videos: {total_videos}\\nTotal Categories: {total_categories}")
     logger.info(f"Admin {user_id} retrieved stats: Users={total_users}, Videos={total_videos}, Categories={total_categories}.")
 
 # --- Auto-Delete & Protect Content ---
@@ -1643,7 +1648,7 @@ if __name__ == '__main__':
 
                 logger.info("Media verification and cleanup completed.")
             except Exception as e:
-                logger.error(f"Error in media verification cleanup task: {e}")
+                logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
             
             # Run every 6 hours
             await asyncio.sleep(6 * 3600)
