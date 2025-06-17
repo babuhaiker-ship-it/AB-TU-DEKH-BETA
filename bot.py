@@ -1662,6 +1662,27 @@ async def stats_cmd(client, message: Message):
         logger.error(f"Admin {user_id} failed to retrieve stats: {e}", exc_info=True)
         await message.reply("❌ An error occurred while fetching stats. Please try again.")
 
+@app.on_message(filters.command("checkchannel") & filters.private & filters.user(config.ADMIN_IDS))
+async def check_channel_cmd(client, message: Message):
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} requested channel check for ID: {config.CHANNEL_ID}")
+    try:
+        channel = await client.get_chat(config.CHANNEL_ID)
+        bot_member = await client.get_chat_member(config.CHANNEL_ID, client.me.id)
+
+        status_text = (
+            f"✅ Channel accessible!\n"
+            f"Title: {channel.title}\n"
+            f"ID: {channel.id}\n"
+            f"Bot Status: {bot_member.status}"
+        )
+        await message.reply(status_text)
+        logger.info(f"Admin {user_id} channel check successful for {config.CHANNEL_ID}. Bot status: {bot_member.status}.")
+    except Exception as e:
+        error_message = f"❌ Error checking channel {config.CHANNEL_ID}: {e}"
+        logger.error(f"Admin {user_id} channel check failed: {error_message}", exc_info=True)
+        await message.reply(error_message)
+
 # --- Auto-Delete & Protect Content ---
 @app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.user(config.ADMIN_IDS))
 async def toggle_auto_delete(client, message):
