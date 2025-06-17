@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAFXA8VJemIdCJT02WmvKpk3gz0VgA1L_Cw'
+    BOT_TOKEN = '7213744072:AAGMCqo0OhNaCHFya8M0aETz3rn-eIwyFQ8'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot'
@@ -50,7 +50,7 @@ class BotConfig:
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     MENU_TIMEOUT = 1800
-    FORCE_MSG = "<b>To use this bot, you must join our channel first!</b>"
+    FORCE_MSG = "🚨 Important! 🚨\nTo unlock all the spicy content and features, you must join our Telegram Channel first! 👇"
     JOIN_REQUEST_ENABLE = False
     START_MSG = "👋 Welcome! Use the menu below."
     START_PIC = None
@@ -631,7 +631,7 @@ async def start_command(client, message: Message):
                     await message.reply(msg)
                     if success:
                         await message.reply(
-                            "🎉 <b>Success!</b> Click on Get Video to watch spicy content.",
+                            "🎉 Success! You got {config.REFRESH_BONUS} token. Each token lasts 24 hours.",
                             reply_markup=await get_main_keyboard(user_id)
                         )
                     return
@@ -697,12 +697,12 @@ async def start_command(client, message: Message):
             if not user:
                 user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
                 await message.reply(
-                    f"👋 dear {user_mention_safe} This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help.",
+                    f"👋 Welcome, {user_mention_safe}! 🎉\nI'm your Spicy Nyraa Bot! To dive into our exclusive content, simply tap the 'Get Video' button below. If you need any assistance, just type /help.",
                     reply_markup=await get_main_keyboard(user_id)
                 )
             else:
                 await message.reply(
-                    "👋 This is Spicy Nyraa Bot. Click on Get Video to watch spicy content.",
+                    "👋 Welcome back! 🎉\nReady for more spicy content? Just hit the 'Get Video' button below to continue the fun!",
                     reply_markup=await get_main_keyboard(user_id)
                 )
             break
@@ -746,12 +746,13 @@ async def help_cmd(client, message: Message):
     # Sanitize message.from_user.mention explicitly
     user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
     await message.reply(
-        f"👋 dear {user_mention_safe} this is how to use spicy nyraa.\n\n"
-        "- Use Get Video to watch spicy content.\n"
-        "- Each token gives you 24 hours access.\n"
-        "- Earn tokens by referral, refresh, or buy.\n"
-        "- Join the channel to access videos.\n"
-        "- Use /profile to check your stats.",
+        f"👋 Hello, {user_mention_safe}! Here's a quick guide on how to use Spicy Nyraa Bot:\n\n"
+        "🎬 Get Video: Tap this button to discover and watch our exclusive spicy content!\n"
+        "🔑 Tokens: Each token provides you with 24 hours of unlimited access.\n"
+        "💰 Earn Tokens: Get more tokens by referring friends, refreshing your token, or purchasing them.\n"
+        "📢 Join Channel: Make sure you're subscribed to our official channel to access videos.\n"
+        "📊 Your Profile: Use /profile to check your token balance, video views, and referral stats.\n\n"
+        "Enjoy your experience! ✨",
         reply_markup=await get_main_keyboard(user_id)
     )
 
@@ -776,7 +777,7 @@ async def profile_cmd(client, message: Message):
     sanitized_first_name = html.escape(message.from_user.first_name if message.from_user.first_name else '')
     sanitized_username = html.escape(message.from_user.username if message.from_user.username else '')
 
-    await message.reply(f"👤 <b>Your Profile</b>\n\n<b>Tokens:</b> {len(tokens)}\n<b>Video Views:</b> {view_count}\n<b>Referrals:</b> {referral_count}\n<b>Referral Link:</b> <code>{ref_link}</code>\n{(f'Referred by: {referred_by}') if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
+    await message.reply(f"👤 Your Profile\n\nTokens: {len(tokens)}\nVideo Views: {view_count}\nReferrals: {referral_count}\nReferral Link: <code>{ref_link}</code>\n{(f'Referred by: {referred_by}') if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
 
 @app.on_message(filters.regex("^Get Video$") & filters.private)
 async def get_video(client, message: Message):
@@ -790,7 +791,7 @@ async def get_video(client, message: Message):
 
     if not await check_subscription_cached(client, user_id):
         logger.info(f"User {user_id} not subscribed, prompting to join channel.")
-        await message.reply("📢 <b>Join our channel to watch videos!</b>", reply_markup=join_channel_keyboard())
+        await message.reply("📢 Join our channel to watch videos!", reply_markup=join_channel_keyboard())
         return
     if not user_has_token(user_id):
         logger.info(f"User {user_id} has no tokens, prompting earning options.")
@@ -800,7 +801,7 @@ async def get_video(client, message: Message):
     chat_id = message.chat.id # Get chat_id here
     if await is_menu_active(client, user_id, chat_id): # Pass chat_id to is_menu_active
         logger.warning(f"User {user_id} tried to open new menu but active menu already open.")
-        await message.reply("⚠️ <b>Menu Already Open</b>\nScroll up, your menu is already open.")
+        await message.reply("⚠️ Menu Already Open\nScroll up, your menu is already open.")
         return
     
     cats = get_categories()
@@ -809,7 +810,7 @@ async def get_video(client, message: Message):
         cats = [config.DEFAULT_CATEGORY]
         logger.info(f"Default category '{config.DEFAULT_CATEGORY}' created for user {user_id}.")
     logger.info(f"User {user_id} prompted to choose category.")
-    await message.reply("🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
+    await message.reply("🎬 Choose a Category:", reply_markup=category_keyboard())
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)"))
 async def select_category(client, callback_query):
@@ -1126,8 +1127,8 @@ async def refresh_token_btn(client, message: Message):
         # Sanitize user mention
         user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
         await message.reply_text(
-            f"💡 <b>Information</b>\nHere are the details you requested...\n\n"
-            f"Hey 💕 <b>{user_mention_safe}</b>\n\nYour Ads token is expired, refresh your token and try again.\n\n<b>Token Timeout:</b> 24 hour\n\n<b>What is token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad.\n\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER</b>",
+            f"💡 Information\nHere are the details you requested...\n\n"
+            f"Hey 💕 {user_mention_safe}\n\nYour Ads token is expired, refresh your token and try again.\n\nToken Timeout: 24 hour\n\nWhat is token?\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hour after passing the ad.\n\nAPPLE/IPHONE USERS COPY TOKEN LINK AND OPEN IN CHROME BROWSER",
             disable_web_page_preview = disable_preview,
             reply_markup=token_earning_keyboard(ad_url)
         )
@@ -1163,7 +1164,7 @@ async def send_token_earning_options(client: Client, message: Message):
             disable_preview = True
 
         await message.reply(
-            "❌ <b>No Tokens Left!</b>\nUse any of these methods to gain tokens:",
+            "❌ No Tokens Left!\nUse any of these methods to gain tokens:",
             reply_markup=token_earning_keyboard(ad_url),
             disable_web_page_preview=disable_preview
         )
@@ -1191,7 +1192,7 @@ async def check_sub_callback(client, callback_query):
         current_text = callback_query.message.text
 
         if is_member:
-            expected_text = "🎉 <b>Success!</b> You are subscribed! You can now watch videos."
+            expected_text = "🎉 Success! You are subscribed! You can now watch videos."
             if current_text != expected_text:
                 await callback_query.message.edit_text(
                     expected_text,
@@ -1234,7 +1235,7 @@ async def share_callback(client, callback_query):
         await callback_query.answer()
         logger.info(f"User {user_id} requested share link for video {video_uuid}.")
         await callback_query.message.reply(
-            f"🔗 <b>Share & Earn!</b>\nShare this video with your friends!\n<code>{html.escape(share_link)}</code>",
+            f"🔗 Share & Earn!\nShare this video with your friends!\n<code>{html.escape(share_link)}</code>",
             quote=True
         )
         logger.info(f"User {user_id}: Share link for video {video_uuid} sent successfully.")
@@ -1251,7 +1252,7 @@ async def broadcast_cmd(client, message: Message):
     try:
         users = list(users_collection.find({}, {'user_id': 1}))
         total_users = len(users)
-        broadcast_msg = await message.reply(f"📣 <b>Broadcasting</b> to <b>{total_users}</b> users...")
+        broadcast_msg = await message.reply(f"📣 Broadcasting to {total_users} users...")
         logger.info(f"Admin {user_id} initiating broadcast to {total_users} users.")
         
         success = 0
@@ -1585,7 +1586,7 @@ async def handle_video(client, message: Message):
         )
     except Exception as e:
         logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
-        await message.reply("❌ Failed to add video. Please try again.")
+        await message.reply(f"❌ Failed to add video: {e}. Please check bot's permissions in the video channel or try again.")
 
 @app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_category_cmd(client, message: Message):
@@ -1732,7 +1733,7 @@ async def join_channel_btn(client, message: Message):
     user_id = message.from_user.id # Added user_id for logging
     logger.info(f"User {user_id} clicked Join Channel button.")
     try:
-        await message.reply("📢 <b>Join our channel to watch videos!</b>", reply_markup=join_channel_keyboard())
+        await message.reply("📢 Join our channel to watch videos!", reply_markup=join_channel_keyboard())
         logger.info(f"User {user_id}: Join channel message sent.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send join channel message: {e}", exc_info=True)
@@ -1748,7 +1749,7 @@ async def check_sub_btn(client, message: Message):
         current_text = message.text
 
         if is_member:
-            expected_text = "🎉 <b>Success!</b> You are subscribed! You can now watch videos."
+            expected_text = "🎉 Success! You are subscribed! You can now watch videos."
             if current_text != expected_text:
                 await message.reply(
                     expected_text,
