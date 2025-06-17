@@ -49,11 +49,12 @@ class BotConfig:
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     MENU_TIMEOUT = 1800
-    FORCE_SUB_CHANNEL = CHANNEL_ID
     FORCE_MSG = "<b>To use this bot, you must join our channel first!</b>"
     JOIN_REQUEST_ENABLE = False
     START_MSG = "👋 Welcome! Use the menu below."
     START_PIC = None
+    AUTO_DELETE_TIME = 1200 # 20 minutes
+    AUTO_DEL_SUCCESS_MSG = "✅ Message auto-deleted successfully!"
 
 try:
     config = BotConfig()
@@ -591,6 +592,16 @@ async def start_command(client, message: Message):
     # This is your main /start logic for subscribed users (copy from your current start_cmd)
     # ... existing start_cmd code here ...
     user_id = message.from_user.id
+    
+    # --- TEMPORARY DEBUGGING CODE --- START
+    logger.info(f"DEBUG: config.CHANNEL_ID is {config.CHANNEL_ID}")
+    try:
+        chat_info = await client.get_chat(config.CHANNEL_ID)
+        logger.info(f"DEBUG: Successfully got chat info for CHANNEL_ID: {chat_info.id} | Type: {chat_info.type} | Title: {chat_info.title}")
+    except Exception as debug_e:
+        logger.error(f"DEBUG: Failed to get chat info for CHANNEL_ID {config.CHANNEL_ID}: {debug_e}", exc_info=True)
+    # --- TEMPORARY DEBUGGING CODE --- END
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
