@@ -37,7 +37,7 @@ class BotConfig:
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     CHANNEL_ID = -1002622483638 # Corrected Channel ID
-    VIDEO_CHANNEL_ID = -1002544010342
+    VIDEO_CHANNEL_ID = -1002626689003
     CHANNEL_JOIN_LINK = 'https://t.me/spicynyraa' # New hardcoded join link
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
