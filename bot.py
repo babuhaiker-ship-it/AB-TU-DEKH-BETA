@@ -29,14 +29,13 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    BOT_TOKEN = '7646433933:AAF5iWb7rngRe1Tpxkc252hL0wm-FtZJA4U'
+    BOT_TOKEN = '7213744072:AAGMCqo0OhNaCHFya8M0aETz3rn-eIwyFQ8'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@SpicyNyraa_bot'
+    BOT_USERNAME = '@Spicynyraabot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     CHANNEL_ID = -1001234567890
-    CHANNEL_INVITE_LINK = 'https://t.me/SpicyNyraa'
     VIDEO_CHANNEL_ID = -1002626689003
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
@@ -389,8 +388,17 @@ async def is_menu_active(client: Client, user_id: int, chat_id: int = None) -> b
 
 # --- Keyboards ---
 def join_channel_keyboard():
+    # Dynamically generate invite link based on whether the channel has a username
+    if config.CHANNEL_USERNAME:
+        join_link = f"https://t.me/{config.CHANNEL_USERNAME}"
+    else:
+        # For private channels without a username, construct a direct link using channel ID
+        # Note: This assumes CHANNEL_ID is a full -100xxxxxxxxxx ID.
+        # If it's just the raw number (e.g., 1234567890), you might need to adjust.
+        join_link = f"https://t.me/c/{str(config.CHANNEL_ID).replace('-100', '')}"
+
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Join Channel", url=config.CHANNEL_INVITE_LINK)],
+        [InlineKeyboardButton("Join Channel", url=join_link)],
         [InlineKeyboardButton("Check Subscription", callback_data="check_sub")]
     ])
 
@@ -593,15 +601,6 @@ async def start_command(client, message: Message):
     # ... existing start_cmd code here ...
     user_id = message.from_user.id
     
-    # --- TEMPORARY DEBUGGING CODE --- START
-    logger.info(f"DEBUG: config.CHANNEL_ID is {config.CHANNEL_ID}")
-    try:
-        chat_info = await client.get_chat(config.CHANNEL_ID)
-        logger.info(f"DEBUG: Successfully got chat info for CHANNEL_ID: {chat_info.id} | Type: {chat_info.type} | Title: {chat_info.title}")
-    except Exception as debug_e:
-        logger.error(f"DEBUG: Failed to get chat info for CHANNEL_ID {config.CHANNEL_ID}: {debug_e}", exc_info=True)
-    # --- TEMPORARY DEBUGGING CODE --- END
-
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -730,9 +729,17 @@ async def not_joined(client, message: Message):
         await handle_error(client, message, FloodWait(10))
         logger.warning(f"User {user_id} hit rate limit in not_joined().")
         return
-    join_link = config.CHANNEL_INVITE_LINK
-    if getattr(config, 'JOIN_REQUEST_ENABLE', False):
-        join_link = f"https://t.me/+{str(config.FORCE_SUB_CHANNEL).replace('-100', '')}?join"
+
+    # Dynamically generate invite link based on whether the channel has a username
+    if config.CHANNEL_USERNAME:
+        join_link = f"https://t.me/{config.CHANNEL_USERNAME}"
+    else:
+        # For private channels without a username, construct a direct link using channel ID
+        join_link = f"https://t.me/c/{str(config.CHANNEL_ID).replace('-100', '')}"
+
+    # if getattr(config, 'JOIN_REQUEST_ENABLE', False):
+    #     join_link = f"https://t.me/+{str(config.FORCE_SUB_CHANNEL).replace('-100', '')}?join"
+
     buttons = [[InlineKeyboardButton("Join Channel", url=join_link)]]
     args = message.text.split()
     if len(args) > 1:
@@ -1787,6 +1794,25 @@ async def cleanup_expired_data():
 
 # --- Main ---
 if __name__ == '__main__':
+    # Dynamic Channel Username setup
+    async def set_channel_username():
+        try:
+            chat_info = await app.get_chat(config.CHANNEL_ID)
+            if chat_info.username:
+                config.CHANNEL_USERNAME = chat_info.username
+                logger.info(f"Configured channel username: @{config.CHANNEL_USERNAME}")
+            else:
+                # If private channel without a username, fall back to invite link from config (if exists)
+                logger.warning(f"Channel {config.CHANNEL_ID} does not have a public username. Using invite link for Join Channel button.")
+                # If you need to generate an invite link for private channels, it's more complex
+                # and usually involves chat.export_invite_link() if the bot has permissions.
+                config.CHANNEL_USERNAME = None # Indicate no public username
+        except Exception as e:
+            logger.error(f"Failed to get channel username for {config.CHANNEL_ID}: {e}", exc_info=True)
+            config.CHANNEL_USERNAME = None # Set to None on error
+
+    app.loop.run_until_complete(set_channel_username())
+
     # Start cleanup task
     app.loop.create_task(cleanup_expired_data())
     # Start media verification and cleanup task
