@@ -5,7 +5,7 @@ import uuid
 import base64
 import random
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 from typing import List
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -107,7 +107,7 @@ def b64_to_str(b64: str) -> str:
         return None
 
 def get_current_time() -> int:
-    return int(datetime.utcnow().timestamp())
+    return int(datetime.now(UTC).timestamp())
 
 async def shorten_url(long_url: str) -> str:
     logger.info(f"Attempting to shorten URL: {long_url}")
@@ -141,13 +141,13 @@ def get_valid_tokens(user_id: int) -> List[dict]:
     doc = tokens_collection.find_one({'user_id': user_id})
     if not doc:
         return []
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     return [t for t in doc['tokens'] if t['expires_at'] > now]
 
 def add_token(user_id: int, duration: int = None) -> dict:
     if duration is None:
         duration = config.TOKEN_EXPIRY
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     expires = now + timedelta(seconds=duration)
     token = {
         'token_id': str(uuid.uuid4()),
@@ -168,8 +168,8 @@ def add_token(user_id: int, duration: int = None) -> dict:
 
 def get_and_cleanup_tokens(user_id: int) -> List[dict]:
     if is_admin(user_id):
-        return [{'token_id': 'admin', 'created_at': datetime.utcnow(), 'expires_at': datetime.utcnow() + timedelta(days=365)}]
-    now = datetime.utcnow()
+        return [{'token_id': 'admin', 'created_at': datetime.now(UTC), 'expires_at': datetime.now(UTC) + timedelta(days=365)}]
+    now = datetime.now(UTC)
     try:
         tokens_collection.update_one(
             {'user_id': user_id},
@@ -286,7 +286,7 @@ def add_category(name: str) -> tuple[bool, str]:
         # Add category
         categories_collection.insert_one({
             'name': name,
-            'created_at': datetime.utcnow()
+            'created_at': datetime.now(UTC)
         })
         logger.info(f"Category '{name}' added")
         return True, f"Category '{name}' added successfully."
@@ -329,7 +329,7 @@ def get_video_by_uuid(uuid_: str):
     return media_collection.find_one({'uuid': uuid_})
 
 def save_history(user_id: int, video_uuid: str, category: str):
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
         history_collection.update_one(
@@ -549,7 +549,7 @@ async def is_rate_limited(user_id: int) -> bool:
     if is_admin(user_id):  # Skip rate limiting for admins
         return False
         
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
     
     # Use aggregation to count documents within the sliding window efficiently
@@ -613,7 +613,7 @@ async def start_command(client, message: Message):
                     'username': html.escape(message.from_user.username) if message.from_user.username else None,
                     'first_name': html.escape(message.from_user.first_name) if message.from_user.first_name else None,
                     'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-                    'joined_date': datetime.utcnow(),
+                    'joined_date': datetime.now(UTC),
                     'referral_count': 0
                 })
                 for _ in range(config.NEW_USER_TOKENS):
@@ -1458,34 +1458,36 @@ def format_size(size_bytes):
 @app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client, message: Message):
     user_id = message.from_user.id
+    logger.info(f"Admin {user_id} requested to enter batch add mode.")
     try:
-        await message.reply("DEBUG: Entered /batchadd handler")
         if user_id not in config.ADMIN_IDS:
-            await message.reply("DEBUG: Not an admin")
+            await message.reply("DEBUG: Not an admin (should not happen due to filter)")
             return
-        try:
-            db.command("ping")
-            await message.reply("DEBUG: MongoDB connection OK")
-        except Exception as db_exc:
-            await message.reply(f"DEBUG: MongoDB connection failed: {db_exc}")
-            return
-        if not get_categories():
-            await message.reply("DEBUG: No categories found, adding default")
+
+        categories = get_categories()
+        if not categories:
             add_category(config.DEFAULT_CATEGORY)
-        else:
-            await message.reply(f"DEBUG: Categories found: {get_categories()}")
+            categories = get_categories()
+            logger.info(f"Admin {user_id}: No categories found, added default category '{config.DEFAULT_CATEGORY}'.")
+
         batch_add_state[user_id] = {
             'batch_mode': True,
-            'current_category': config.DEFAULT_CATEGORY
+            'current_category': None  # Initialize to None, user needs to select
         }
-        await message.reply("DEBUG: batch_add_state set")
+
+        buttons = []
+        for category in categories:
+            buttons.append([InlineKeyboardButton(category, callback_data=f"setcat_{category}")])
+
         await message.reply(
-            "Send me videos to add. Type /done when finished.\n"
-            "Current category: " + config.DEFAULT_CATEGORY
+            "✅ Batch add mode enabled. Please select a category for the videos:",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
+        logger.info(f"Admin {user_id}: Prompted to select category for batch add.")
+
     except Exception as e:
-        tb = traceback.format_exc()
-        await message.reply(f"❌ Exception in /batchadd:\n<code>{tb}</code>")
+        logger.error(f"Admin {user_id} failed to enter batch add mode: {e}", exc_info=True)
+        await message.reply(f"❌ An error occurred while entering batch add mode. Please try again.")
 
 @app.on_message(filters.command("done") & filters.private & filters.user(config.ADMIN_IDS))
 async def done_cmd(client, message: Message):
@@ -1503,6 +1505,9 @@ async def done_cmd(client, message: Message):
                 del batch_add_state[user_id]
             await message.reply("Batch add mode disabled.")
             logger.info(f"Admin {user_id}: Batch add mode disabled.")
+        else:
+            await message.reply("Batch add mode is not currently active.")
+            logger.warning(f"Admin {user_id} tried to use /done but batch mode was not active.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again.")
@@ -1515,12 +1520,13 @@ async def handle_video(client, message: Message):
     try:
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
             logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
+            await message.reply_text("You are not in batch add mode. Use /batchadd to start.")
             return
 
-        category = batch_add_state[user_id].get('current_category', config.DEFAULT_CATEGORY)
+        category = batch_add_state[user_id].get('current_category')
         if not category:
-            logger.warning(f"Admin {user_id} tried to add video but no category set.")
-            await message.reply_text("⚠️ Please set a category first using /category.")
+            logger.warning(f"Admin {user_id} tried to add video but no category selected in batch mode.")
+            await message.reply_text("⚠️ Please select a category first using the inline keyboard provided after /batchadd, or use /category to set it.")
             return
 
         # Validate category name from batch_add_state
@@ -1591,10 +1597,11 @@ async def set_category_cmd(client, message: Message):
             await message.reply_text("❌ Only admins can use this command.")
             return
 
+        # This command is now primarily for setting category within batch mode.
+        # It can also be called outside batch mode, in which case it will just show categories.
         # Check if batch_mode is active
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode', False):
-            logger.warning(f"Admin {user_id} tried to set category outside of batch add mode.")
-            await message.reply_text("❌ Error: Start batch mode with /batchadd first.")
+            await message.reply_text("You are not in batch add mode. Use /batchadd to start and then select a category.")
             return
 
         categories = get_categories()
@@ -1771,7 +1778,7 @@ async def cleanup_expired_data():
     """Clean up expired tokens and old history entries."""
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(UTC)
             
             # Clean up expired tokens
             tokens_collection.update_many(
@@ -1850,8 +1857,8 @@ if __name__ == '__main__':
         app.loop.create_task(cleanup_expired_data())
         # Start media verification and cleanup task
         app.loop.create_task(verify_and_cleanup_media())
-        await app.idle()  # This will block until the bot is stopped
+        await app.run()  # This will block until the bot is stopped
         logger.info("Bot stopping...")
         await app.stop()
 
-    app.loop.run_until_complete(main()) 
+    app.run() 
