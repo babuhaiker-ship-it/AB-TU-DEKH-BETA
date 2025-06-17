@@ -1,0 +1,35 @@
+"fsub" in this code refers to Force Subscribe, a common feature in Telegram bots that requires users to join a specific channel before they can use the bot's main functionalities. This bot implements Force Subscribe to ensure users are part of a designated channel.
+Here's a breakdown of how the Force Subscribe mechanism works in this bot:
+How Force Subscribe (fsub) Is Implemented
+The bot uses a filter called subscribed to check a user's subscription status.
+ * subscribed Filter Definition (helper_func.py):
+   * The subscribed filter is custom-defined using filters.create(is_subscribed). This means it calls the is_subscribed asynchronous function to determine if a message should pass the filter.
+   * The is_subscribed function checks if FORCE_SUB_CHANNEL (a channel ID defined in config.py) is set. If not, it assumes no force subscribe is needed and returns True.
+   * It checks if the user is one of the ADMINS; if so, they bypass the force subscribe check.
+   * For other users, it attempts to get their ChatMember status from the FORCE_SUB_CHANNEL using client.get_chat_member().
+   * If UserNotParticipant is raised (meaning the user is not in the channel), it returns False.
+   * Otherwise, it checks if the user's status is OWNER, ADMINISTRATOR, or MEMBER. If any of these, it returns True (meaning they are subscribed); otherwise, False.
+ * @Bot.on_message(filters.command('start') & filters.private & subscribed):
+   * This decorator links the start_command function to handle /start commands sent in private chats.
+   * The key here is & subscribed. This ensures that start_command only executes if the subscribed filter returns True (i.e., the user is subscribed to the FORCE_SUB_CHANNEL).
+ * @Bot.on_message(filters.command('start') & filters.private):
+   * This decorator links the not_joined function to handle all /start commands in private chats.
+   * This filter is broader and doesn't include the subscribed check.
+   * The crucial interaction: When a user sends /start in private, pyrogram evaluates the filters. If the subscribed filter on start_command fails (because the user isn't subscribed), then start_command won't run. In this scenario, the not_joined function, with its less restrictive filters, will then execute.
+User Experience Based on Subscription Status
+1. If a User is Not Subscribed (not_joined function executes):
+ * The bot will send a message (FORCE_MSG) to the user, explaining that they need to join a channel.
+ * It provides an "Join Channel" inline button.
+   * If JOIN_REQUEST_ENABLE is True in config.py, it creates a join request link, meaning users will need approval to join.
+   * Otherwise, it provides a direct invite link (client.invitelink).
+ * An optional "Try Again" button is added if the /start command had an argument (e.g., /start some_data), allowing the user to retry accessing content after joining.
+ * This effectively blocks the user from proceeding with any bot functionality that requires subscription until they join the specified channel.
+2. If a User Is Subscribed (start_command function executes):
+ * The user's ID is added to the bot's database if they're a new user.
+ * The bot then checks the /start command for any arguments.
+   * Content Retrieval: If the command contains a base64-encoded string (e.g., /start get-xxxx), the bot decodes it to extract message IDs from its database channel (client.db_channel.id). It then fetches these messages and forwards them to the user's private chat.
+     * Messages can have custom captions (CUSTOM_CAPTION).
+     * Content protection (PROTECT_CONTENT) is applied if enabled.
+     * There's also logic for auto-deletion of forwarded messages after a set AUTO_DELETE_TIME, and a confirmation message (AUTO_DELETE_MSG) is sent.
+   * Default Welcome: If no content-retrieval argument is present, the bot sends a standard welcome message (START_MSG) to the user, potentially with an image (START_PIC) and inline buttons for "About Me" and "Close."
+In essence, "fsub" acts as a gateway. It ensures that only members of the designated FORCE_SUB_CHANNEL can access the bot's core features, primarily content delivery. Users who aren't subscribed are prompted to join the channel before they can proceed.
