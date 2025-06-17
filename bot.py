@@ -18,6 +18,7 @@ import re
 import html
 from pyrogram.enums import ChatMemberStatus
 import traceback
+import pyrogram.errors.exceptions.bad_request_400
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -202,9 +203,12 @@ def handle_referral(new_user_id: int, ref_code: str):
 async def check_subscription(client: Client, user_id: int) -> bool:
     logger.info(f"Checking subscription for user {user_id} in channel {config.CHANNEL_ID}")
     try:
-        member = await client.get_chat_member(config.CHANNEL_ID, user_id)
+        member = await client.get_chat_member(int(config.CHANNEL_ID), user_id)
         logger.info(f"User {user_id} subscription status in channel {config.CHANNEL_ID}: {member.status}")
         return member.status in ["member", "administrator", "creator"]
+    except pyrogram.errors.exceptions.bad_request_400.ChannelInvalid as e:
+        logger.error(f"ChannelInvalid error checking subscription for user {user_id} in channel {config.CHANNEL_ID}: {e}. Ensure bot is admin and CHANNEL_ID is correct.", exc_info=True)
+        return False
     except Exception as e:
         logger.error(f"Error checking subscription for user {user_id} in channel {config.CHANNEL_ID}: {e}", exc_info=True)
         # Added for more detailed logging of Pyrogram errors
@@ -1667,8 +1671,8 @@ async def check_channel_cmd(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested channel check for ID: {config.CHANNEL_ID}")
     try:
-        channel = await client.get_chat(config.CHANNEL_ID)
-        bot_member = await client.get_chat_member(config.CHANNEL_ID, client.me.id)
+        channel = await client.get_chat(int(config.CHANNEL_ID))
+        bot_member = await client.get_chat_member(int(config.CHANNEL_ID), client.me.id)
 
         status_text = (
             f"✅ Channel accessible!\n"
@@ -1678,6 +1682,10 @@ async def check_channel_cmd(client, message: Message):
         )
         await message.reply(status_text)
         logger.info(f"Admin {user_id} channel check successful for {config.CHANNEL_ID}. Bot status: {bot_member.status}.")
+    except pyrogram.errors.exceptions.bad_request_400.ChannelInvalid as e:
+        error_message = f"❌ ChannelInvalid error checking channel {config.CHANNEL_ID}: {e}. Ensure bot is admin and CHANNEL_ID is correct."
+        logger.error(f"Admin {user_id} channel check failed: {error_message}", exc_info=True)
+        await message.reply(error_message)
     except Exception as e:
         error_message = f"❌ Error checking channel {config.CHANNEL_ID}: {e}"
         logger.error(f"Admin {user_id} channel check failed: {error_message}", exc_info=True)
@@ -1801,41 +1809,49 @@ async def cleanup_expired_data():
         await asyncio.sleep(86400)
 
 # --- Main ---
+async def verify_and_cleanup_media():
+    """Periodically verifies if media files still exist in the channel and cleans up invalid entries."""
+    while True:
+        logger.info("Starting media verification and cleanup.")
+        try:
+            all_media = list(media_collection.find({}))
+            for media_item in all_media:
+                video_uuid = media_item.get('uuid')
+                message_id_in_channel = media_item.get('message_id')
+                
+                if not message_id_in_channel:
+                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting.")
+                    media_collection.delete_one({'uuid': video_uuid})
+                    continue
+
+                try:
+                    # Attempt to get the message from the channel
+                    await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                except (MessageIdInvalid, ValueError):
+                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
+                    media_collection.delete_one({'uuid': video_uuid})
+                except Exception as e:
+                    logger.error(f"Error verifying media {video_uuid}: {e}")
+
+            logger.info("Media verification and cleanup completed.")
+        except Exception as e:
+            logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
+        
+        # Run every 6 hours
+        await asyncio.sleep(6 * 3600)
+
 if __name__ == '__main__':
-    # Start cleanup task
-    app.loop.create_task(cleanup_expired_data())
-    # Start media verification and cleanup task
-    async def verify_and_cleanup_media():
-        """Periodically verifies if media files still exist in the channel and cleans up invalid entries."""
-        while True:
-            logger.info("Starting media verification and cleanup.")
-            try:
-                all_media = list(media_collection.find({}))
-                for media_item in all_media:
-                    video_uuid = media_item.get('uuid')
-                    message_id_in_channel = media_item.get('message_id')
-                    
-                    if not message_id_in_channel:
-                        logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting.")
-                        media_collection.delete_one({'uuid': video_uuid})
-                        continue
+    async def main():
+        await app.start()
+        logger.info("Bot started!")
+        # Add a small delay to ensure client is fully initialized
+        await asyncio.sleep(2) # Wait for 2 seconds
+        # Start cleanup task
+        app.loop.create_task(cleanup_expired_data())
+        # Start media verification and cleanup task
+        app.loop.create_task(verify_and_cleanup_media())
+        await app.idle()  # This will block until the bot is stopped
+        logger.info("Bot stopping...")
+        await app.stop()
 
-                    try:
-                        # Attempt to get the message from the channel
-                        await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
-                    except (MessageIdInvalid, ValueError):
-                        logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
-                        media_collection.delete_one({'uuid': video_uuid})
-                    except Exception as e:
-                        logger.error(f"Error verifying media {video_uuid}: {e}")
-
-                logger.info("Media verification and cleanup completed.")
-            except Exception as e:
-                logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
-            
-            # Run every 6 hours
-            await asyncio.sleep(6 * 3600)
-
-    app.loop.create_task(verify_and_cleanup_media())
-    # Start bot
-    app.run() 
+    app.loop.run_until_complete(main()) 
