@@ -33,10 +33,10 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    BOT_TOKEN = '7946785578:AAHuy03RVut3ogD13ukjI_obkl5wSTAAWQY'
+    BOT_TOKEN = '7646433933:AAFNr9GgfOPC84IsIkZQ7b0_2CHph9k0nfg'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@rosyrotibot'
+    BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -2621716446
@@ -569,6 +569,10 @@ async def handle_error(client: Client, message: Message, error: Exception):
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later.")
 
 # --- Handlers ---
+@app.on_message(filters.private)
+async def debug_message_handler(client, message: Message):
+    logger.info(f"DEBUG: Received private message from {message.from_user.id}: {message.text}")
+
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     user_id = message.from_user.id
@@ -1747,18 +1751,28 @@ async def verify_and_cleanup_media():
 
 # --- Main ---
 async def main_loop():
-    await app.start()
-    logger.info("Bot started!")
+    try:
+        logger.info("Attempting to start bot client...")
+        await app.start()
+        logger.info("Bot client started successfully!")
+        
+        # Log bot's own information after successful start
+        me = await app.get_me()
+        logger.info(f"Bot Info: ID={me.id}, Username={me.username}, First Name={me.first_name}")
 
-    # Schedule background tasks
-    asyncio.create_task(cleanup_expired_data())
-    asyncio.create_task(verify_and_cleanup_media())
-    
-    # Keep the bot running indefinitely
-    await idle()
+        logger.info("Scheduling background tasks...")
+        asyncio.create_task(cleanup_expired_data())
+        asyncio.create_task(verify_and_cleanup_media())
+        logger.info("Background tasks scheduled.")
+        
+        logger.info("Bot is now idle, listening for updates...")
+        # Keep the bot running indefinitely
+        await idle()
 
-    logger.info("Bot stopping...")
-    await app.stop()
+        logger.info("Bot stopping...")
+        await app.stop()
+    except Exception as e:
+        logger.critical(f"Critical error in main_loop: {e}", exc_info=True)
 
 if __name__ == '__main__':
     asyncio.run(main_loop())
