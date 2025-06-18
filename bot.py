@@ -33,10 +33,10 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    BOT_TOKEN = '7646433933:AAFNr9GgfOPC84IsIkZQ7b0_2CHph9k0nfg'
+    BOT_TOKEN = '7946785578:AAHuy03RVut3ogD13ukjI_obkl5wSTAAWQY'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@SpicyNyraa_bot'
+    BOT_USERNAME = '@rosyrotibot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -2621716446
