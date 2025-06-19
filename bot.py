@@ -36,7 +36,7 @@ class BotConfig:
     BOT_TOKEN = '7646433933:AAFNr9GgfOPC84IsIkZQ7b0_2CHph9k0nfg'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@SpicyNyraa_bot'
+    BOT_USERNAME = '@rosyroti_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -2621716446
@@ -51,14 +51,31 @@ class BotConfig:
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     MENU_TIMEOUT = 1800
-    JOIN_REQUEST_ENABLE = False
-    START_MSG = "👋 Welcome! Use the menu below."
-    START_PIC = None
-    AUTO_DELETE_TIME = 1200 # 20 minutes
+    AUTO_DELETE_TIME = 1200  # 20 minutes
     AUTO_DEL_SUCCESS_MSG = "✅ Message auto-deleted successfully!"
+    
+    # MongoDB connection retry settings
+    MONGO_MAX_RETRIES = 5
+    MONGO_RETRY_DELAY = 5  # seconds
+    MONGO_CONNECT_TIMEOUT = 30000  # 30 seconds
+    MONGO_SOCKET_TIMEOUT = 60000   # 1 minute
+    
+    # API client settings
+    API_MAX_RETRIES = 3
+    API_RETRY_DELAY = 1  # seconds
+    API_TIMEOUT = 30  # seconds for HTTP requests
+    
+    # Rate limiting settings - moved from global variables
+    RATE_LIMIT_WINDOW = 60  # 1 minute
+    RATE_LIMIT_MAX = 30    # requests per minute
+    
+    # Error handling settings
+    MAX_ERROR_RETRY = 3
+    ERROR_RETRY_DELAY = 5  # seconds
 
 try:
     config = BotConfig()
+    logger.info(f"DEBUG: Configured BOT_TOKEN: {config.BOT_TOKEN}") # Temporary debug line
     if not all([
         config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI,
         config.SHORTENER_API_KEY
@@ -198,29 +215,6 @@ def handle_referral(new_user_id: int, ref_code: str):
                 users_collection.update_one({'user_id': new_user_id}, {'$set': {'referred_by': referrer_id}}, upsert=True)
                 return referrer_id
     return None
-
-# --- Subscription Check ---
-async def check_subscription(client: Client, user_id: int) -> bool:
-    # Always return True to bypass force subscription
-    logger.info(f"Subscription check bypassed for user {user_id}. Always returning True.")
-    return True
-
-# Cache subscription status
-subscription_cache = {}
-SUBSCRIPTION_CACHE_TTL = 60  # 1 minutes
-
-async def check_subscription_cached(client: Client, user_id: int) -> bool:
-    """Check subscription status with caching (bypassed)"""
-    # Always return True to bypass force subscription
-    logger.info(f"Cached subscription check bypassed for user {user_id}. Always returning True.")
-    return True
-
-# Custom Filter for Subscribed Users
-# This filter will now always return True since check_subscription_cached is bypassed
-async def _subscribed_filter(_, client, message: Message):
-    return True # Always true since force subscription is removed
-
-subscribed = filters.create(_subscribed_filter)
 
 # --- Category Management ---
 def validate_category_name(name: str) -> tuple[bool, str]:
@@ -516,8 +510,8 @@ async def send_video_with_auto_delete(client: Client, chat_id: int, video_data: 
 # --- Rate Limiting ---
 # In-memory defaultdict for rate limiting (will be replaced by MongoDB)
 # rate_limits = defaultdict(list)
-RATE_LIMIT_WINDOW = 120  # Increased to 2 minutes
-RATE_LIMIT_MAX = 60  # Increased to 60 requests per 2 minutes
+RATE_LIMIT_WINDOW = 60  # 1 minute window
+RATE_LIMIT_MAX = 30  # 30 requests per minute - more reasonable for production
 
 async def is_rate_limited(user_id: int) -> bool:
     if is_admin(user_id):  # Skip rate limiting for admins
@@ -526,31 +520,30 @@ async def is_rate_limited(user_id: int) -> bool:
     now = datetime.now(UTC)
     window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
     
-    # Use aggregation to count documents within the sliding window efficiently
-    # This ensures only active rate limit entries are considered
     try:
-        # First, remove old entries to keep the array lean and accurate
-        tokens_collection.update_one(
+        # Use more efficient single update operation
+        result = tokens_collection.find_one_and_update(
             {'user_id': user_id},
-            {'$pull': {'rate_limits': {'expires_at': {'$lt': now}}}},
-            upsert=True
+            {
+                '$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}},
+                '$push': {'rate_limits': {'timestamp': now}}
+            },
+            upsert=True,
+            return_document=True
         )
-    
-        # Then, push the new timestamp
-        tokens_collection.update_one(
-            {'user_id': user_id},
-            {'$push': {'rate_limits': {'timestamp': now}}},
-            upsert=True
-        )
-
-        # Get the count after adding the new entry and cleaning up old ones
-        rate_limit_doc = tokens_collection.find_one({'user_id': user_id}, {'rate_limits': 1})
-        current_requests = len(rate_limit_doc.get('rate_limits', [])) if rate_limit_doc else 0
+        
+        if not result:
+            logger.error(f"Failed to update rate limits for user {user_id}")
+            return False
+            
+        current_requests = len(result.get('rate_limits', []))
         
         if current_requests > RATE_LIMIT_MAX:
-            logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
+            logger.warning(f"User {user_id} is rate limited. Requests in last {RATE_LIMIT_WINDOW}s: {current_requests}/{RATE_LIMIT_MAX}")
             return True
+            
         return False
+        
     except Exception as e:
         logger.error(f"Error in is_rate_limited for user {user_id}: {e}", exc_info=True)
         # Default to not rate-limiting if there's a database error to prevent bot from stopping
@@ -558,21 +551,42 @@ async def is_rate_limited(user_id: int) -> bool:
 
 # --- Error Handling ---
 async def handle_error(client: Client, message: Message, error: Exception):
-    if isinstance(error, UserNotParticipant):
-        return
-    elif isinstance(error, FloodWait):
-        logger.warning(f"FloodWait: {error.value} seconds")
-        wait_time = int(error.value) if isinstance(error.value, int) or (isinstance(error.value, str) and error.value.isdigit()) else 10
-        await message.reply_text(f"⚠️ <b>Too Many Requests!</b>\nPlease wait <b>{wait_time}</b> seconds before trying again.")
-    else:
-        logger.error(f"An error occurred: {error}", exc_info=True)
-        await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later.")
+    try:
+        if isinstance(error, UserNotParticipant):
+            return
+        elif isinstance(error, FloodWait):
+            logger.warning(f"FloodWait: {error.value} seconds")
+            wait_time = int(error.value) if isinstance(error.value, int) or (isinstance(error.value, str) and error.value.isdigit()) else 10
+            await message.reply_text(
+                f"⚠️ <b>Too Many Requests!</b>\n"
+                f"Please wait <b>{wait_time}</b> seconds before trying again.",
+                disable_notification=True
+            )
+        elif isinstance(error, ChatInvalid):
+            logger.error(f"ChatInvalid error for message {message.id}: {error}")
+            await message.reply_text(
+                "❌ <b>Unable to process request.</b>\n"
+                "Please make sure the bot has proper permissions.",
+                disable_notification=True
+            )
+        elif isinstance(error, MessageIdInvalid):
+            logger.error(f"MessageIdInvalid error for message {message.id}: {error}")
+            # Don't send a reply as the message likely doesn't exist
+            return
+        else:
+            error_id = str(uuid.uuid4())[:8]
+            logger.error(f"Error ID {error_id}: An error occurred: {error}", exc_info=True)
+            await message.reply_text(
+                f"❌ <b>An unexpected error occurred.</b>\n"
+                f"Error ID: {error_id}\n"
+                f"Please try again later or contact support with this Error ID if the problem persists.",
+                disable_notification=True
+            )
+    except Exception as e:
+        # Last resort error handling
+        logger.critical(f"Failed to handle error properly: Original error: {error}, Handler error: {e}", exc_info=True)
 
 # --- Handlers ---
-@app.on_message(filters.private)
-async def debug_message_handler(client, message: Message):
-    logger.info(f"DEBUG: Received private message from {message.from_user.id}: {message.text}")
-
 @app.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     user_id = message.from_user.id
@@ -1132,39 +1146,6 @@ async def send_token_earning_options(client: Client, user_id: int) -> Union[Inli
     except Exception as e:
         logger.error(f"User {user_id} failed to send token earning options: {e}", exc_info=True)
         return "❌ Failed to send token earning options." # Return error string
-
-@app.on_callback_query(filters.regex("^check_sub$"))
-async def check_sub_callback(client, callback_query):
-    user_id = callback_query.from_user.id
-    logger.info(f"User {user_id} clicked Check Subscription button (callback). ")
-    try:
-        if await is_rate_limited(user_id):
-            await callback_query.answer("⚠️ You're checking too quickly. Please wait a minute and try again.", show_alert=True)
-            logger.warning(f"User {user_id} hit rate limit in check_sub_callback.")
-            return
-
-        is_member = await check_subscription_cached(client, user_id)  # Use cached version
-        
-        # Invalidate cache after explicit check
-        if f"{user_id}" in subscription_cache:
-            del subscription_cache[f"{user_id}"]
-
-        current_text = callback_query.message.text
-
-        if is_member:
-            expected_text = "🎉 Success! You are subscribed! You can now watch videos."
-            if current_text != expected_text:
-                await callback_query.message.edit_text(
-                    expected_text,
-                    reply_markup=await get_main_keyboard(user_id)
-                )
-                logger.info(f"User {user_id} confirmed subscription (callback). ")
-            else:
-                await callback_query.answer("You are already subscribed!", show_alert=False)
-                logger.info(f"User {user_id} clicked Check Subscription but already subscribed (no change needed). ")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to check subscription (callback): {e}", exc_info=True)
-        await callback_query.answer("❌ Something went wrong. Please try again.", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client, callback_query):
@@ -1750,29 +1731,63 @@ async def verify_and_cleanup_media():
         await asyncio.sleep(6 * 3600)
 
 # --- Main ---
+async def background_task_wrapper(task_func, task_name):
+    """Wrapper to ensure background tasks keep running and are restarted on failure"""
+    while True:
+        try:
+            await task_func()
+        except Exception as e:
+            logger.error(f"Error in {task_name}, restarting in 60 seconds: {e}", exc_info=True)
+            await asyncio.sleep(60)  # Wait before restarting
+
 async def main_loop():
-    try:
-        logger.info("Attempting to start bot client...")
-        await app.start()
-        logger.info("Bot client started successfully!")
-        
-        # Log bot's own information after successful start
-        me = await app.get_me()
-        logger.info(f"Bot Info: ID={me.id}, Username={me.username}, First Name={me.first_name}")
+    restart_delay = 1
+    max_restart_delay = 300  # 5 minutes
+    
+    while True:
+        try:
+            logger.info("Attempting to start bot client...")
+            await app.start()
+            logger.info("Bot client started successfully!")
+            
+            # Log bot's own information after successful start
+            me = await app.get_me()
+            logger.info(f"Bot Info: ID={me.id}, Username={me.username}, First Name={me.first_name}")
 
-        logger.info("Scheduling background tasks...")
-        asyncio.create_task(cleanup_expired_data())
-        asyncio.create_task(verify_and_cleanup_media())
-        logger.info("Background tasks scheduled.")
-        
-        logger.info("Bot is now idle, listening for updates...")
-        # Keep the bot running indefinitely
-        await idle()
-
-        logger.info("Bot stopping...")
-        await app.stop()
-    except Exception as e:
-        logger.critical(f"Critical error in main_loop: {e}", exc_info=True)
+            # Schedule background tasks with wrapper for resilience
+            logger.info("Scheduling background tasks...")
+            cleanup_task = asyncio.create_task(background_task_wrapper(cleanup_expired_data, "cleanup_expired_data"))
+            media_verify_task = asyncio.create_task(background_task_wrapper(verify_and_cleanup_media, "verify_and_cleanup_media"))
+            logger.info("Background tasks scheduled with auto-restart wrapper.")
+            
+            logger.info("Bot is now idle, listening for updates...")
+            await idle()
+            
+            # If we get here, it means idle() completed normally
+            logger.info("Bot stopping gracefully...")
+            await app.stop()
+            
+            # Cancel background tasks gracefully
+            cleanup_task.cancel()
+            media_verify_task.cancel()
+            try:
+                await cleanup_task
+                await media_verify_task
+            except asyncio.CancelledError:
+                pass
+                
+            break  # Exit the loop if everything shut down gracefully
+            
+        except Exception as e:
+            logger.critical(f"Critical error in main_loop, attempting restart in {restart_delay} seconds: {e}", exc_info=True)
+            try:
+                await app.stop()
+            except Exception:
+                pass
+            
+            await asyncio.sleep(restart_delay)
+            # Exponential backoff for restart delays
+            restart_delay = min(restart_delay * 2, max_restart_delay)
 
 if __name__ == '__main__':
     asyncio.run(main_loop())
