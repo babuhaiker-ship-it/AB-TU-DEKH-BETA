@@ -33,25 +33,48 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    BOT_TOKEN = '7946785578:AAHuy03RVut3ogD13ukjI_obkl5wSTAAWQY'
+    # Bot Configuration
+    BOT_TOKEN = '7646433933:AAHv7rtBPta5AVrxjpd-xh7zeyoSPmSQKSI'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@rosyrotibot'
+    
+    # MongoDB Configuration
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    VIDEO_CHANNEL_ID = -2621716446
-    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
-    ADMIN_IDS = {6612030110}
-    URL_SHORTENER = 'https://api.linkshortify.com/st'
+    
+    # Channel and Admin Configuration
+    VIDEO_CHANNEL_ID = -2621716446  # Channel where videos are stored
+    ADMIN_IDS = {6612030110}  # Set of admin user IDs
+    
+    # External Services
+    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'  # URL for buying tokens
+    URL_SHORTENER = 'https://api.linkshortify.com/st'  # URL shortener service
     SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
-    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 86400  # 24 hours in seconds
-    DEFAULT_CATEGORY = 'default'
-    NEW_USER_TOKENS = 3
-    REFERRAL_BONUS = 1
-    REFRESH_BONUS = 1
-    MENU_TIMEOUT = 1800
-    AUTO_DELETE_TIME = 1200  # 20 minutes
+    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'  # Tutorial link
+    
+    # Token System Configuration
+    TOKEN_EXPIRY = 86400  # Token expiry in seconds (24 hours)
+    DEFAULT_CATEGORY = 'default'  # Default video category
+    NEW_USER_TOKENS = 3  # Number of tokens for new users
+    REFERRAL_BONUS = 1  # Bonus tokens for referrals
+    REFRESH_BONUS = 1  # Bonus tokens for refresh
+    
+    # UI and Interaction Settings
+    MENU_TIMEOUT = 1800  # Menu timeout in seconds (30 minutes)
+    AUTO_DELETE_TIME = 1200  # Auto-delete time in seconds (20 minutes)
+    
+    # Welcome Messages
+    WELCOME_NEW_USER = "👋 Welcome, {}! 🎉\nI'm your Bot! To dive into our exclusive content, simply tap the 'Get Video' button below. If you need any assistance, just type /help."
+    WELCOME_BACK = "👋 Welcome back! 🎉\nReady for more content? Just hit the 'Get Video' button below to continue the fun!"
+    
+    # Button Labels
+    BUTTONS = {
+        'GET_VIDEO': 'Get Video',
+        'PROFILE': 'Profile',
+        'REFER_EARN': 'Refer & Earn',
+        'BUY_TOKEN': 'Buy Token',
+        'REFRESH_TOKEN': 'Refresh Token'
+    }
     AUTO_DEL_SUCCESS_MSG = "✅ Message auto-deleted successfully!"
     
     # MongoDB connection retry settings
@@ -699,12 +722,12 @@ async def start_command(client, message: Message):
             if not user:
                 user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
                 await message.reply(
-                    f"👋 Welcome, {user_mention_safe}! 🎉\nI'm your Spicy Nyraa Bot! To dive into our exclusive content, simply tap the 'Get Video' button below. If you need any assistance, just type /help.",
+                    config.WELCOME_NEW_USER.format(user_mention_safe),
                     reply_markup=await get_main_keyboard(user_id)
                 )
             else:
                 await message.reply(
-                    "👋 Welcome back! 🎉\nReady for more spicy content? Just hit the 'Get Video' button below to continue the fun!",
+                    config.WELCOME_BACK,
                     reply_markup=await get_main_keyboard(user_id)
                 )
             break
@@ -753,7 +776,7 @@ async def profile_cmd(client, message: Message):
     referred_by = user.get('referred_by', None) if user else None
     views = history_collection.find_one({'user_id': user_id})
     view_count = len(views['history']) if views and 'history' in views else 0
-    ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
+    ref_link = f"https://t.me/{(await client.get_me()).username}?start=ref_{user_id}"
     
     # Sanitize user's first name and username for HTML (already present, verifying and ensuring usage)
     sanitized_first_name = html.escape(message.from_user.first_name if message.from_user.first_name else '')
@@ -761,7 +784,7 @@ async def profile_cmd(client, message: Message):
 
     await message.reply(f"👤 Your Profile\n\nTokens: {len(tokens)}\nVideo Views: {view_count}\nReferrals: {referral_count}\nReferral Link: <code>{ref_link}</code>\n{(f'Referred by: {referred_by}') if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
 
-@app.on_message(filters.regex("^Get Video$") & filters.private)
+@app.on_message(filters.regex(f"^{config.BUTTONS['GET_VIDEO']}$") & filters.private)
 async def get_video(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested Get Video.")
@@ -1033,7 +1056,7 @@ async def change_category(client, callback_query):
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again.", show_alert=True)
 
-@app.on_message(filters.regex("^Profile$") & filters.private)
+@app.on_message(filters.regex(f"^{config.BUTTONS['PROFILE']}$") & filters.private)
 async def profile_btn(client, message: Message):
     user_id = message.from_user.id # Added user_id for logging
     logger.info(f"User {user_id} clicked Profile button.")
@@ -1044,7 +1067,7 @@ async def profile_btn(client, message: Message):
         logger.error(f"User {user_id} failed to trigger profile command from button: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex("^Refer & Earn$") & filters.private)
+@app.on_message(filters.regex(f"^{config.BUTTONS['REFER_EARN']}$") & filters.private)
 async def refer_btn(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Refer & Earn button.")
@@ -1055,14 +1078,14 @@ async def refer_btn(client, message: Message):
             logger.warning(f"User {user_id} hit rate limit in refer_btn.")
             return
 
-        ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
+        ref_link = f"https://t.me/{(await client.get_me()).username}?start=ref_{user_id}"
         await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this video with your friends!\n<code>{html.escape(ref_link)}</code>", reply_markup=referral_keyboard(ref_link))
         logger.info(f"User {user_id}: Referral link sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex("^Buy Token$") & filters.private)
+@app.on_message(filters.regex(f"^{config.BUTTONS['BUY_TOKEN']}$") & filters.private)
 async def buy_token_btn(client, message: Message):
     user_id = message.from_user.id # Added user_id for logging
     logger.info(f"User {user_id} clicked Buy Token button.")
@@ -1073,7 +1096,7 @@ async def buy_token_btn(client, message: Message):
         logger.error(f"User {user_id} failed to send buy token message: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex("^Refresh Token$") & filters.private)
+@app.on_message(filters.regex(f"^{config.BUTTONS['REFRESH_TOKEN']}$") & filters.private)
 async def refresh_token_btn(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested token refresh. Handler entered.")
@@ -1132,7 +1155,7 @@ async def send_token_earning_options(client: Client, user_id: int) -> Union[Inli
             return "⚠️ You're requesting token options too quickly. Please wait a minute and try again."
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-        long_url = f"https://telegram.dog/{client.me.username if client.me and client.me.username else config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        long_url = f"https://telegram.dog/{(await client.get_me()).username}?start=token_{ad_code}"
         ad_url = await shorten_url(long_url)
         
         disable_preview = False
@@ -1563,7 +1586,7 @@ async def setcat_callback(client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     logger.info(f"Admin {user_id} selected category for batch adding: {callback_query.data[7:]}.")
     try:
-        # Extract category name, handling potential spaces or special characters safely
+               # Extract category name, handling potential spaces or special characters safely
         # The regex in the filter ensures it matches the format, this just extracts the group
         category_name = callback_query.data[7:]
 
