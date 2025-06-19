@@ -1,27 +1,36 @@
 # Spicy Nyraa Bot - Main Script
 import os
+import sys
+import time
 import asyncio
 import uuid
 import base64
 import random
 import logging
 from datetime import datetime, timedelta, UTC
-from typing import List, Union
+from typing import List, Union, Dict, Optional, Any, Tuple
+from dotenv import load_dotenv
 from pyrogram.client import Client
 from pyrogram import filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, CallbackQuery
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, 
+    KeyboardButton, Message, CallbackQuery, User
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, UserNotParticipant, FloodWait
+from pyrogram.errors import (
+    UserIsBlocked, ChatInvalid, MessageIdInvalid, UserNotParticipant,
+    FloodWait, MessageTooLong, MessageIdInvalid, MessageNotModified,
+    PeerIdInvalid, RPCError
+)
 from pymongo import MongoClient, ASCENDING
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 import aiohttp
-from aiohttp import ClientTimeout
+from aiohttp import ClientTimeout, ClientError, ClientConnectionError
 import re
 import html
-from pyrogram.enums import ChatMemberStatus
+from pyrogram.enums import ChatMemberStatus, ParseMode
 import traceback
-import pyrogram.errors.exceptions.bad_request_400
-from pyrogram.sync import idle # Corrected import for idle
+import json
+from functools import wraps
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -33,48 +42,25 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    # Bot Configuration
-    BOT_TOKEN = '7646433933:AAHv7rtBPta5AVrxjpd-xh7zeyoSPmSQKSI'
-    API_ID = 29800015
-    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    
-    # MongoDB Configuration
-    MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
+    BOT_TOKEN = os.getenv('7646433933:AAHv7rtBPta5AVrxjpd-xh7zeyoSPmSQKSI')
+    API_ID = int(os.getenv('29800015', '0'))
+    API_HASH = os.getenv('c8f37108be31ab9ea2818bfe533fbb6f')
+    MONGO_URI = os.getenv('mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0')
     MONGO_DB_NAME = 'spicybot'
-    
-    # Channel and Admin Configuration
-    VIDEO_CHANNEL_ID = -2621716446  # Channel where videos are stored
-    ADMIN_IDS = {6612030110}  # Set of admin user IDs
-    
-    # External Services
-    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'  # URL for buying tokens
-    URL_SHORTENER = 'https://api.linkshortify.com/st'  # URL shortener service
-    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
-    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'  # Tutorial link
-    
-    # Token System Configuration
-    TOKEN_EXPIRY = 86400  # Token expiry in seconds (24 hours)
-    DEFAULT_CATEGORY = 'default'  # Default video category
-    NEW_USER_TOKENS = 3  # Number of tokens for new users
-    REFERRAL_BONUS = 1  # Bonus tokens for referrals
-    REFRESH_BONUS = 1  # Bonus tokens for refresh
-    
-    # UI and Interaction Settings
-    MENU_TIMEOUT = 1800  # Menu timeout in seconds (30 minutes)
-    AUTO_DELETE_TIME = 1200  # Auto-delete time in seconds (20 minutes)
-    
-    # Welcome Messages
-    WELCOME_NEW_USER = "👋 Welcome, {}! 🎉\nI'm your Bot! To dive into our exclusive content, simply tap the 'Get Video' button below. If you need any assistance, just type /help."
-    WELCOME_BACK = "👋 Welcome back! 🎉\nReady for more content? Just hit the 'Get Video' button below to continue the fun!"
-    
-    # Button Labels
-    BUTTONS = {
-        'GET_VIDEO': 'Get Video',
-        'PROFILE': 'Profile',
-        'REFER_EARN': 'Refer & Earn',
-        'BUY_TOKEN': 'Buy Token',
-        'REFRESH_TOKEN': 'Refresh Token'
-    }
+    VIDEO_CHANNEL_ID = int(os.getenv('-2621716446', '0'))
+    BUY_BOT_URL = os.getenv('BUY_BOT_URL', 'https://t.me/hanielxsupportbot')
+    ADMIN_IDS = {int(id_) for id_ in os.getenv('6612030110', '').split(',') if id_}
+    URL_SHORTENER = os.getenv('URL_SHORTENER', 'https://api.linkshortify.com/st')
+    SHORTENER_API_KEY = os.getenv('5cd923c490f64017cffa6e3bb6cc724560a8cfc6')
+    BOT_USERNAME = os.getenv('SpicyNyraa_bot')
+    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
+    TOKEN_EXPIRY = 86400  # 24 hours in seconds
+    DEFAULT_CATEGORY = 'default'
+    NEW_USER_TOKENS = 3
+    REFERRAL_BONUS = 1
+    REFRESH_BONUS = 1
+    MENU_TIMEOUT = 1800
+    AUTO_DELETE_TIME = 1200  # 20 minutes
     AUTO_DEL_SUCCESS_MSG = "✅ Message auto-deleted successfully!"
     
     # MongoDB connection retry settings
@@ -107,21 +93,63 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
-# --- MongoDB Setup ---
-client = MongoClient(config.MONGO_URI)
-db = client[config.MONGO_DB_NAME]
-users_collection = db['users']
-tokens_collection = db['tokens']
-media_collection = db['media']
-history_collection = db['history']
-categories_collection = db['categories']
-settings_collection = db['settings']
+# --- MongoDB Setup with Retry Logic ---
+def setup_mongodb():
+    retries = 0
+    while retries < config.MONGO_MAX_RETRIES:
+        try:
+            client = MongoClient(
+                config.MONGO_URI,
+                serverSelectionTimeoutMS=config.MONGO_CONNECT_TIMEOUT,
+                socketTimeoutMS=config.MONGO_SOCKET_TIMEOUT
+            )
+            # Test the connection
+            client.admin.command('ping')
+            db = client[config.MONGO_DB_NAME]
+            
+            # Initialize collections
+            collections = {
+                'users': db['users'],
+                'tokens': db['tokens'],
+                'media': db['media'],
+                'history': db['history'],
+                'categories': db['categories'],
+                'settings': db['settings']
+            }
+            
+            # Create indexes
+            collections['users'].create_index([("user_id", ASCENDING)], unique=True)
+            collections['tokens'].create_index([("user_id", ASCENDING)], unique=True)
+            collections['media'].create_index([("uuid", ASCENDING)], unique=True)
+            collections['media'].create_index([("category", ASCENDING)])
+            
+            logger.info("Successfully connected to MongoDB")
+            return client, db, collections
+            
+        except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+            retries += 1
+            if retries < config.MONGO_MAX_RETRIES:
+                logger.warning(f"MongoDB connection attempt {retries} failed: {e}. Retrying in {config.MONGO_RETRY_DELAY} seconds...")
+                time.sleep(config.MONGO_RETRY_DELAY)
+            else:
+                logger.error("Failed to connect to MongoDB after maximum retries", exc_info=True)
+                raise
+        except Exception as e:
+            logger.error(f"Unexpected error while connecting to MongoDB: {e}", exc_info=True)
+            raise
 
-# Create indexes
-users_collection.create_index([("user_id", ASCENDING)], unique=True)
-tokens_collection.create_index([("user_id", ASCENDING)], unique=True)
-media_collection.create_index([("uuid", ASCENDING)], unique=True)
-media_collection.create_index([("category", ASCENDING)])
+# Initialize MongoDB connection
+try:
+    mongo_client, db, collections = setup_mongodb()
+    users_collection = collections['users']
+    tokens_collection = collections['tokens']
+    media_collection = collections['media']
+    history_collection = collections['history']
+    categories_collection = collections['categories']
+    settings_collection = collections['settings']
+except Exception as e:
+    logger.error("Failed to initialize MongoDB", exc_info=True)
+    raise
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
@@ -722,12 +750,12 @@ async def start_command(client, message: Message):
             if not user:
                 user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
                 await message.reply(
-                    config.WELCOME_NEW_USER.format(user_mention_safe),
+                    f"👋 Welcome, {user_mention_safe}! 🎉\nI'm your Spicy Nyraa Bot! To dive into our exclusive content, simply tap the 'Get Video' button below. If you need any assistance, just type /help.",
                     reply_markup=await get_main_keyboard(user_id)
                 )
             else:
                 await message.reply(
-                    config.WELCOME_BACK,
+                    "👋 Welcome back! 🎉\nReady for more spicy content? Just hit the 'Get Video' button below to continue the fun!",
                     reply_markup=await get_main_keyboard(user_id)
                 )
             break
@@ -784,7 +812,7 @@ async def profile_cmd(client, message: Message):
 
     await message.reply(f"👤 Your Profile\n\nTokens: {len(tokens)}\nVideo Views: {view_count}\nReferrals: {referral_count}\nReferral Link: <code>{ref_link}</code>\n{(f'Referred by: {referred_by}') if referred_by else ''}", reply_markup=referral_keyboard(ref_link))
 
-@app.on_message(filters.regex(f"^{config.BUTTONS['GET_VIDEO']}$") & filters.private)
+@app.on_message(filters.regex("^Get Video$") & filters.private)
 async def get_video(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested Get Video.")
@@ -1056,7 +1084,7 @@ async def change_category(client, callback_query):
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again.", show_alert=True)
 
-@app.on_message(filters.regex(f"^{config.BUTTONS['PROFILE']}$") & filters.private)
+@app.on_message(filters.regex("^Profile$") & filters.private)
 async def profile_btn(client, message: Message):
     user_id = message.from_user.id # Added user_id for logging
     logger.info(f"User {user_id} clicked Profile button.")
@@ -1067,7 +1095,7 @@ async def profile_btn(client, message: Message):
         logger.error(f"User {user_id} failed to trigger profile command from button: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex(f"^{config.BUTTONS['REFER_EARN']}$") & filters.private)
+@app.on_message(filters.regex("^Refer & Earn$") & filters.private)
 async def refer_btn(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Refer & Earn button.")
@@ -1085,7 +1113,7 @@ async def refer_btn(client, message: Message):
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex(f"^{config.BUTTONS['BUY_TOKEN']}$") & filters.private)
+@app.on_message(filters.regex("^Buy Token$") & filters.private)
 async def buy_token_btn(client, message: Message):
     user_id = message.from_user.id # Added user_id for logging
     logger.info(f"User {user_id} clicked Buy Token button.")
@@ -1096,7 +1124,7 @@ async def buy_token_btn(client, message: Message):
         logger.error(f"User {user_id} failed to send buy token message: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex(f"^{config.BUTTONS['REFRESH_TOKEN']}$") & filters.private)
+@app.on_message(filters.regex("^Refresh Token$") & filters.private)
 async def refresh_token_btn(client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested token refresh. Handler entered.")
