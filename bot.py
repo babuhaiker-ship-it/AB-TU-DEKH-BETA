@@ -174,7 +174,14 @@ app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_t
 
 # --- Startup Checks ---
 def check_startup():
-    if not all([users_collection, tokens_collection, media_collection, history_collection, categories_collection, settings_collection]):
+    if not (
+        users_collection is not None and
+        tokens_collection is not None and
+        media_collection is not None and
+        history_collection is not None and
+        categories_collection is not None and
+        settings_collection is not None
+    ):
         logger.critical("One or more MongoDB collections are not initialized. Exiting.")
         sys.exit(1)
     logger.info("All MongoDB collections initialized successfully.")
