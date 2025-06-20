@@ -55,7 +55,6 @@ class BotConfig:
     ADMIN_IDS = {6612030110}
     URL_SHORTENER = 'https://api.linkshortify.com/st'
     SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
-    BOT_USERNAME = '@SpicyNyraa_bot'
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     DEFAULT_CATEGORY = 'default'
@@ -1252,7 +1251,8 @@ async def share_callback(client, callback_query):
             await callback_query.answer("❌ Invalid video ID.", show_alert=True)
             return
 
-        share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start={video_uuid}"
+        me = await client.get_me()
+        share_link = f"https://t.me/{me.username}?start={video_uuid}"
         await callback_query.answer()
         logger.info(f"User {user_id} requested share link for video {video_uuid}.")
         await callback_query.message.reply(
