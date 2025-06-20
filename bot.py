@@ -49,9 +49,9 @@ class BotConfig:
     VIDEO_CHANNEL_ID = -2621716446
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = {6612030110}
-    URL_SHORTENER = 'https://api.linkshortify.com/'
+    URL_SHORTENER = 'https://api.linkshortify.com/st'
     SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
-    BOT_USERNAME = '@SpicyNyraa_bot'
+    BOT_USERNAME = 'SpicyNyraaBot'
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     DEFAULT_CATEGORY = 'default'
