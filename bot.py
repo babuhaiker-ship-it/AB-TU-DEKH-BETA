@@ -9,7 +9,6 @@ import random
 import logging
 from datetime import datetime, timedelta, UTC
 from typing import List, Union, Dict, Optional, Any, Tuple
-from dotenv import load_dotenv
 from pyrogram.client import Client
 from pyrogram import filters
 from pyrogram.types import (
@@ -42,17 +41,17 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    BOT_TOKEN = os.getenv('7646433933:AAHv7rtBPta5AVrxjpd-xh7zeyoSPmSQKSI')
-    API_ID = int(os.getenv('29800015', '0'))
-    API_HASH = os.getenv('c8f37108be31ab9ea2818bfe533fbb6f')
-    MONGO_URI = os.getenv('mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0')
+    BOT_TOKEN = '7946785578:AAHuy03RVut3ogD13ukjI_obkl5wSTAAWQY'
+    API_ID = 29800015
+    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
+    MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    VIDEO_CHANNEL_ID = int(os.getenv('-2621716446', '0'))
-    BUY_BOT_URL = os.getenv('BUY_BOT_URL', 'https://t.me/hanielxsupportbot')
-    ADMIN_IDS = {int(id_) for id_ in os.getenv('6612030110', '').split(',') if id_}
-    URL_SHORTENER = os.getenv('URL_SHORTENER', 'https://api.linkshortify.com/st')
-    SHORTENER_API_KEY = os.getenv('5cd923c490f64017cffa6e3bb6cc724560a8cfc6')
-    BOT_USERNAME = os.getenv('SpicyNyraa_bot')
+    VIDEO_CHANNEL_ID = -2621716446
+    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
+    ADMIN_IDS = {6612030110}
+    URL_SHORTENER = 'https://api.linkshortify.com/st'
+    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
+    BOT_USERNAME = 'SpicyNyraaBot'
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     DEFAULT_CATEGORY = 'default'
@@ -1163,14 +1162,14 @@ async def refresh_token_btn(client, message: Message):
 
         logger.info(f"User {user_id}: User does not have valid token. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-        long_url = f"https://telegram.dog/{client.me.username if client.me and client.me.username else config.BOT_USERNAME[1:]}?start=token_{ad_code}" # Use client.me.username safely
+        long_url = f"https://telegram.dog/{client.me.username}?start=token_{ad_code}" # Use client.me.username safely
         ad_url = await shorten_url(long_url)
         logger.info(f"User {user_id}: shorten_url call completed. Result: {ad_url}")
         
         await temp_msg.delete()
 
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{client.me.username if client.me and client.me.username else config.BOT_USERNAME[1:]}"): # Use client.me.username safely
+        if ad_url.startswith(f"https://telegram.dog/{client.me.username}"): # Use client.me.username safely
             logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
             disable_preview = True # Disable preview for long Telegram links
 
@@ -1204,7 +1203,7 @@ async def send_token_earning_options(client: Client, user_id: int) -> Union[Inli
         ad_url = await shorten_url(long_url)
         
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{client.me.username if client.me and client.me.username else config.BOT_USERNAME[1:]}"): # Use client.me.username safely
+        if ad_url.startswith(f"https://telegram.dog/{client.me.username}"): # Use client.me.username safely
             logger.warning(f"User {user_id} URL shortening failed for send_token_earning_options. Using long URL: {ad_url}")
             disable_preview = True
 
