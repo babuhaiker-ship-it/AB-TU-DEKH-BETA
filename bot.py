@@ -81,6 +81,9 @@ class BotConfig:
     # Error handling settings
     MAX_ERROR_RETRY = 3
     ERROR_RETRY_DELAY = 5  # seconds
+    
+    # Operational mode
+    LIMITED_MODE = False  # Set to True when MongoDB is unavailable
 
 try:
     config = BotConfig()
@@ -148,13 +151,27 @@ try:
     categories_collection = collections['categories']
     settings_collection = collections['settings']
 except Exception as e:
-    logger.error("Failed to initialize MongoDB", exc_info=True)
-    raise
-media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
-media_collection.create_index([("size_bytes", ASCENDING)])
-history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
-history_collection.create_index([("user_id", ASCENDING)], unique=True)
-categories_collection.create_index([("name", ASCENDING)], unique=True)
+    logger.critical("Failed to initialize MongoDB. Running in LIMITED MODE with reduced functionality.", exc_info=True)
+    # Set limited mode flag
+    config.LIMITED_MODE = True
+    # Initialize empty collections to allow limited functionality
+    users_collection = {}
+    tokens_collection = {}
+    media_collection = {}
+    history_collection = {}
+    categories_collection = {}
+    settings_collection = {}
+# Only create indexes if we're not in LIMITED_MODE
+if not hasattr(config, 'LIMITED_MODE') or not config.LIMITED_MODE:
+    try:
+        media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
+        media_collection.create_index([("size_bytes", ASCENDING)])
+        history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
+        history_collection.create_index([("user_id", ASCENDING)], unique=True)
+        categories_collection.create_index([("name", ASCENDING)], unique=True)
+        logger.info("MongoDB indexes created successfully")
+    except Exception as e:
+        logger.error(f"Failed to create MongoDB indexes: {e}", exc_info=True)
 
 # --- Pyrogram Client ---
 app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
