@@ -1810,36 +1810,57 @@ async def background_task_wrapper(task_func, task_name):
 async def main_loop():
     restart_delay = 1
     max_restart_delay = 300  # 5 minutes
+    client_is_running = False
+    cleanup_task = None
+    media_verify_task = None
     
     while True:
         try:
-            logger.info("Attempting to start bot client...")
-            await app.start()
-            logger.info("Bot client started successfully!")
-            
-            # Log bot's own information after successful start
-            me = await app.get_me()
-            logger.info(f"Bot Info: ID={me.id}, Username={me.username}, First Name={me.first_name}")
+            # Check if client is already connected before starting
+            if not client_is_running:
+                logger.info("Attempting to start bot client...")
+                try:
+                    await app.start()
+                    client_is_running = True
+                    logger.info("Bot client started successfully!")
+                except ConnectionError as ce:
+                    if "Client is already connected" in str(ce):
+                        logger.warning("Client is already connected. Setting client_is_running flag to True.")
+                        client_is_running = True
+                    else:
+                        raise
+                
+                # Log bot's own information after successful start
+                me = await app.get_me()
+                logger.info(f"Bot Info: ID={me.id}, Username={me.username}, First Name={me.first_name}")
 
-            # Schedule background tasks with wrapper for resilience
-            logger.info("Scheduling background tasks...")
-            cleanup_task = asyncio.create_task(background_task_wrapper(cleanup_expired_data, "cleanup_expired_data"))
-            media_verify_task = asyncio.create_task(background_task_wrapper(verify_and_cleanup_media, "verify_and_cleanup_media"))
-            logger.info("Background tasks scheduled with auto-restart wrapper.")
+                # Schedule background tasks with wrapper for resilience
+                logger.info("Scheduling background tasks...")
+                cleanup_task = asyncio.create_task(background_task_wrapper(cleanup_expired_data, "cleanup_expired_data"))
+                media_verify_task = asyncio.create_task(background_task_wrapper(verify_and_cleanup_media, "verify_and_cleanup_media"))
+                logger.info("Background tasks scheduled with auto-restart wrapper.")
+            else:
+                logger.info("Bot client is already running, skipping start...")
             
             logger.info("Bot is now idle, listening for updates...")
             await idle()
             
             # If we get here, it means idle() completed normally
             logger.info("Bot stopping gracefully...")
-            await app.stop()
+            if client_is_running:
+                await app.stop()
+                client_is_running = False
             
             # Cancel background tasks gracefully
-            cleanup_task.cancel()
-            media_verify_task.cancel()
+            if cleanup_task:
+                cleanup_task.cancel()
+            if media_verify_task:
+                media_verify_task.cancel()
             try:
-                await cleanup_task
-                await media_verify_task
+                if cleanup_task:
+                    await cleanup_task
+                if media_verify_task:
+                    await media_verify_task
             except asyncio.CancelledError:
                 pass
                 
@@ -1847,10 +1868,14 @@ async def main_loop():
             
         except Exception as e:
             logger.critical(f"Critical error in main_loop, attempting restart in {restart_delay} seconds: {e}", exc_info=True)
-            try:
-                await app.stop()
-            except Exception:
-                pass
+            
+            # Only try to stop if we think it's running
+            if client_is_running:
+                try:
+                    await app.stop()
+                    client_is_running = False
+                except Exception as stop_error:
+                    logger.warning(f"Error stopping client: {stop_error}")
             
             await asyncio.sleep(restart_delay)
             # Exponential backoff for restart delays
