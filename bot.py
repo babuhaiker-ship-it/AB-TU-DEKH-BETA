@@ -11,17 +11,16 @@ from datetime import datetime, timedelta, UTC
 from typing import List, Union, Dict, Optional, Any, Tuple
 from pyrogram.client import Client
 from pyrogram import filters
+from pyrogram.sync import idle
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, 
     KeyboardButton, Message, CallbackQuery, User
 )
 from pyrogram.errors import (
     UserIsBlocked, ChatInvalid, MessageIdInvalid, UserNotParticipant,
-    FloodWait, MessageTooLong, MessageIdInvalid, MessageNotModified,
-    PeerIdInvalid, RPCError
+    FloodWait, MessageTooLong, MessageNotModified, PeerIdInvalid, RPCError,
+    ChannelInvalid
 )
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 import aiohttp
 from aiohttp import ClientTimeout, ClientError, ClientConnectionError
 import re
@@ -30,11 +29,16 @@ from pyrogram.enums import ChatMemberStatus, ParseMode
 import traceback
 import json
 from functools import wraps
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout) # Ensure logs go to stdout
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -82,7 +86,7 @@ class BotConfig:
     ERROR_RETRY_DELAY = 5  # seconds
     
     # Operational mode
-    LIMITED_MODE = False  # Set to True when MongoDB is unavailable
+    # Removed LIMITED_MODE
 
 try:
     config = BotConfig()
@@ -134,11 +138,11 @@ def setup_mongodb():
                 logger.warning(f"MongoDB connection attempt {retries} failed: {e}. Retrying in {config.MONGO_RETRY_DELAY} seconds...")
                 time.sleep(config.MONGO_RETRY_DELAY)
             else:
-                logger.error("Failed to connect to MongoDB after maximum retries", exc_info=True)
-                raise
+                logger.critical("Failed to connect to MongoDB after maximum retries", exc_info=True)
+                raise RuntimeError("MongoDB setup failed")
         except Exception as e:
-            logger.error(f"Unexpected error while connecting to MongoDB: {e}", exc_info=True)
-            raise
+            logger.critical(f"Unexpected error while connecting to MongoDB: {e}", exc_info=True)
+            raise RuntimeError("MongoDB setup failed")
 
 # Initialize MongoDB connection
 try:
@@ -150,30 +154,32 @@ try:
     categories_collection = collections['categories']
     settings_collection = collections['settings']
 except Exception as e:
-    logger.critical("Failed to initialize MongoDB. Running in LIMITED MODE with reduced functionality.", exc_info=True)
-    # Set limited mode flag
-    config.LIMITED_MODE = True
-    # Initialize empty collections to allow limited functionality
-    users_collection = {}
-    tokens_collection = {}
-    media_collection = {}
-    history_collection = {}
-    categories_collection = {}
-    settings_collection = {}
-# Only create indexes if we're not in LIMITED_MODE
-if not hasattr(config, 'LIMITED_MODE') or not config.LIMITED_MODE:
-    try:
-        media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
-        media_collection.create_index([("size_bytes", ASCENDING)])
-        history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
-        history_collection.create_index([("user_id", ASCENDING)], unique=True)
-        categories_collection.create_index([("name", ASCENDING)], unique=True)
-        logger.info("MongoDB indexes created successfully")
-    except Exception as e:
-        logger.error(f"Failed to create MongoDB indexes: {e}", exc_info=True)
+    logger.critical("Failed to initialize MongoDB. Bot will attempt to restart.", exc_info=True)
+    # Re-raise the exception to be caught by the main_loop's restart mechanism
+    raise
+# Only create indexes if MongoDB setup was successful
+try:
+    media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
+    media_collection.create_index([("size_bytes", ASCENDING)])
+    history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
+    history_collection.create_index([("user_id", ASCENDING)], unique=True)
+    categories_collection.create_index([("name", ASCENDING)], unique=True)
+    tokens_collection.create_index([("rate_limits.timestamp", ASCENDING)])  # Added missing index
+    logger.info("MongoDB indexes created successfully")
+except Exception as e:
+    logger.error(f"Failed to create MongoDB indexes: {e}", exc_info=True)
 
 # --- Pyrogram Client ---
 app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+
+# --- Startup Checks ---
+def check_startup():
+    if not all([users_collection, tokens_collection, media_collection, history_collection, categories_collection, settings_collection]):
+        logger.critical("One or more MongoDB collections are not initialized. Exiting.")
+        sys.exit(1)
+    logger.info("All MongoDB collections initialized successfully.")
+
+check_startup()
 
 # --- Admin Check Utility ---
 def is_admin(user_id: int) -> bool:
@@ -262,6 +268,7 @@ def get_and_cleanup_tokens(user_id: int) -> List[dict]:
         )
     except Exception as e:
         logger.error(f"Error cleaning up expired tokens for user {user_id}: {e}", exc_info=True)
+    # Always re-fetch after cleanup
     doc = tokens_collection.find_one({'user_id': user_id})
     return doc.get('tokens', []) if doc else []
 
@@ -353,10 +360,12 @@ def delete_category(name: str) -> tuple[bool, str, int]:
 
 # --- Video Navigation ---
 def get_random_video(category: str):
-    videos = list(media_collection.find({'category': category}))
-    if not videos:
-        return None
-    return random.choice(videos)
+    pipeline = [
+        {"$match": {"category": category}},
+        {"$sample": {"size": 1}}
+    ]
+    result = list(media_collection.aggregate(pipeline))
+    return result[0] if result else None
 
 def get_video_by_uuid(uuid_: str):
     return media_collection.find_one({'uuid': uuid_})
@@ -376,8 +385,8 @@ def save_history(user_id: int, video_uuid: str, category: str):
 
 def get_last_video(user_id: int):
     doc = history_collection.find_one({'user_id': user_id})
-    if doc and doc.get('history'):
-        return doc['history'][-2] if len(doc['history']) > 1 else None
+    if doc and doc.get('history') and len(doc['history']) > 1:
+        return doc['history'][-2]
     return None
 
 # --- Menu State Management ---
@@ -397,11 +406,13 @@ def clear_active_menu(user_id: int):
     if user_id in active_menus:
         del active_menus[user_id]
 
-async def cleanup_expired_menu(client: Client, user_id: int, chat_id: Union[int, None] = None):
+async def cleanup_expired_menu(client: Client, user_id: Union[int, None] = None, chat_id: Union[int, None] = None):
     """Clean up an expired menu by deleting the message."""
     try:
+        if user_id is None:
+            return # Cannot clean up without a user_id
         menu = active_menus.get(user_id)
-        if menu and chat_id:
+        if menu and chat_id: # Only attempt to delete message if chat_id is known
             try:
                 await client.delete_messages(chat_id, menu['message_id'])
                 logger.info(f"Deleted expired menu message {menu['message_id']} for user {user_id}")
@@ -868,6 +879,13 @@ async def select_category(client, callback_query):
     category = callback_query.data[4:] # Extract category from callback_data
     logger.info(f"User {user_id} selected category: {category}.")
     
+    # Input sanitization and validation
+    valid, error = validate_category_name(category)
+    if not valid:
+        await callback_query.answer(f"Invalid category: {error}", show_alert=True)
+        logger.warning(f"User {user_id} tried to select invalid category: {category} ({error})")
+        return
+    
     if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ You're changing categories too quickly. Please wait a minute and try again.", show_alert=True)
         logger.warning(f"User {user_id} hit rate limit in select_category.")
@@ -970,7 +988,7 @@ async def next_video(client, callback_query):
             else:
                 logger.error(f"User {user_id} failed to send next video: {sent_message_or_error}")
                 await callback_query.answer(str(sent_message_or_error), show_alert=True)
-        except pyrogram.errors.MessageIdInvalid:
+        except MessageIdInvalid: # Corrected exception usage
             logger.warning(f"User {user_id} encountered MessageIdInvalid while sending next video, sending as new message.")
             # If edit fails, send as new message
             sent_success, sent_message_or_error = await send_video_with_auto_delete(
@@ -1162,18 +1180,18 @@ async def refresh_token_btn(client, message: Message):
 
         logger.info(f"User {user_id}: User does not have valid token. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-        long_url = f"https://telegram.dog/{client.me.username}?start=token_{ad_code}" # Use client.me.username safely
+        me = await client.get_me()
+        long_url = f"https://telegram.dog/{me.username}?start=token_{ad_code}"
         ad_url = await shorten_url(long_url)
         logger.info(f"User {user_id}: shorten_url call completed. Result: {ad_url}")
         
         await temp_msg.delete()
 
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{client.me.username}"): # Use client.me.username safely
+        if ad_url.startswith(f"https://telegram.dog/{me.username}"):
             logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
-            disable_preview = True # Disable preview for long Telegram links
+            disable_preview = True
 
-        # Sanitize user mention
         user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
         await message.reply_text(
             f"💡 Information\nHere are the details you requested...\n\n"
@@ -1184,7 +1202,6 @@ async def refresh_token_btn(client, message: Message):
         logger.info(f"User {user_id}: Refresh token message sent. Handler finished.")
     except Exception as e:
         logger.error(f"User {user_id} failed in refresh_token_btn: {e}", exc_info=True)
-        # Ensure temp_msg is deleted even on error
         try:
             await temp_msg.delete()
             logger.info(f"User {user_id}: Deleted 'Please wait...' message due to error.")
@@ -1199,20 +1216,20 @@ async def send_token_earning_options(client: Client, user_id: int) -> Union[Inli
             return "⚠️ You're requesting token options too quickly. Please wait a minute and try again."
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-        long_url = f"https://telegram.dog/{(await client.get_me()).username}?start=token_{ad_code}"
+        me = await client.get_me()
+        long_url = f"https://telegram.dog/{me.username}?start=token_{ad_code}"
         ad_url = await shorten_url(long_url)
         
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{client.me.username}"): # Use client.me.username safely
+        if ad_url.startswith(f"https://telegram.dog/{me.username}"):
             logger.warning(f"User {user_id} URL shortening failed for send_token_earning_options. Using long URL: {ad_url}")
             disable_preview = True
 
-        # Construct and return the keyboard. The calling handler will send it.
         keyboard = token_earning_keyboard(ad_url)
         return keyboard
     except Exception as e:
         logger.error(f"User {user_id} failed to send token earning options: {e}", exc_info=True)
-        return "❌ Failed to send token earning options." # Return error string
+        return "❌ Failed to send token earning options."
 
 @app.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client, callback_query):
@@ -1686,7 +1703,7 @@ async def check_channel_cmd(client, message: Message):
         )
         await message.reply(status_text)
         logger.info(f"Admin {user_id} channel check successful for {config.VIDEO_CHANNEL_ID}. Bot status: {bot_member.status}.")
-    except pyrogram.errors.exceptions.bad_request_400.ChannelInvalid as e:
+    except ChannelInvalid as e: # Corrected exception usage
         error_message = f"❌ ChannelInvalid error checking channel {config.VIDEO_CHANNEL_ID}: {e}. Ensure bot is admin and VIDEO_CHANNEL_ID is correct."
         logger.error(f"Admin {user_id} channel check failed: {error_message}", exc_info=True)
         await message.reply(error_message)
@@ -1882,4 +1899,5 @@ async def main_loop():
             restart_delay = min(restart_delay * 2, max_restart_delay)
 
 if __name__ == '__main__':
+    logger.info("Starting bot application...")
     asyncio.run(main_loop())
