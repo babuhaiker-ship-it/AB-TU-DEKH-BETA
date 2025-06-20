@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 class BotConfig:
-    BOT_TOKEN = '7646433933:AAHv7rtBPta5AVrxjpd-xh7zeyoSPmSQKSI'
+    BOT_TOKEN = '7646433933:AAHWR5sSuyTrAendlSJwKV-WeM4rEIyDHaE'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
@@ -51,7 +51,7 @@ class BotConfig:
     ADMIN_IDS = {6612030110}
     URL_SHORTENER = 'https://api.linkshortify.com/st'
     SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
-    BOT_USERNAME = 'SpicyNyraaBot'
+    BOT_USERNAME = '@SpicyNyraa_bot'
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     DEFAULT_CATEGORY = 'default'
