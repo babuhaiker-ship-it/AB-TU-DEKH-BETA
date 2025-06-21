@@ -1786,21 +1786,28 @@ async def verify_and_cleanup_media():
 # --- Main ---
 if __name__ == '__main__':
     logger.info("Bot starting...")
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(app.start())
-        logger.info("Pyrogram client started successfully.")
-        
-        # Now schedule the tasks since the client is connected
-        loop.create_task(cleanup_expired_data())
-        loop.create_task(verify_and_cleanup_media())
-        
-        app.idle() # This keeps the bot running
-    except Exception as e:
-        logger.critical(f"Fatal error during bot startup: {e}", exc_info=True)
-    finally:
-        if app.is_connected:
-            loop.run_until_complete(app.stop())
-            logger.info("Pyrogram client stopped.")
-        loop.close()
-        logger.info("Event loop closed. Bot stopped.")
+    # It's better to run Pyrogram client inside an async function
+    # and then use asyncio.run() or loop.run_until_complete()
+    # to run that async function.
+
+    async def main():
+        try:
+            await app.start()
+            logger.info("Pyrogram client started successfully.")
+            
+            # Now schedule the tasks since the client is connected
+            asyncio.create_task(cleanup_expired_data())
+            asyncio.create_task(verify_and_cleanup_media())
+            
+            # Keep the bot running indefinitely
+            await app.idle() 
+        except Exception as e:
+            logger.critical(f"Fatal error during bot startup: {e}", exc_info=True)
+        finally:
+            if app.is_connected:
+                await app.stop()
+                logger.info("Pyrogram client stopped.")
+            logger.info("Bot stopped.")
+
+    # Run the main asynchronous function
+    asyncio.run(main())
