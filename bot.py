@@ -1589,7 +1589,7 @@ async def set_category_cmd(client: Client, message: Message):
     """Admin command to set the current category for batch adding."""
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested to set category for batch add.")
-    try:
+    try: # Added try block here
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode', False):
             logger.warning(f"Admin {user_id} tried to set category outside of batch add mode.")
             await message.reply_text("❌ Error: Start batch mode with /batchadd first.")
@@ -1610,7 +1610,7 @@ async def set_category_cmd(client: Client, message: Message):
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         logger.info(f"Admin {user_id}: Set category options sent.")
-    except Exception as e:
+    except Exception as e: # Corresponding except block
         logger.error(f"Admin {user_id} failed to send set category options: {e}", exc_info=True)
         await message.reply("❌ An error occurred while preparing set category options. Please try again.")
 
@@ -1800,4 +1800,3 @@ if __name__ == '__main__':
             logger.info("Pyrogram client stopped.")
         loop.close()
         logger.info("Event loop closed. Bot stopped.")
-
