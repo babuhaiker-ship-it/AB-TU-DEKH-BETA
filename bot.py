@@ -1435,7 +1435,7 @@ def format_size(size_bytes: int) -> str:
 
 @app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client: Client, message: Message):
-    """Admin command to enter batch video adding mode."""
+    """Admin command to enter batch video adding mode and select category."""
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated batch add mode.")
     try:
@@ -1446,15 +1446,25 @@ async def batchadd_cmd(client: Client, message: Message):
         
         batch_add_state[user_id] = {
             'batch_mode': True,
-            'current_category': config.DEFAULT_CATEGORY,
+            'current_category': None, # No default category set initially
             'count': 0
         }
         
-        await message.reply(
-            "Send me videos to add. Type /done when finished.\n"
-            f"Current category for batch adding: <b>{html.escape(config.DEFAULT_CATEGORY)}</b>"
+        # Immediately prompt for category selection
+        categories = get_categories()
+        if not categories:
+            await message.reply_text("⚠️ No categories available. Use /addcategory to create one before adding videos.")
+            return
+            
+        buttons = []
+        for category in categories:
+            buttons.append([InlineKeyboardButton(html.escape(category), callback_data=f"setcat_{category}")])
+
+        await message.reply_text(
+            "Welcome to Batch Add Mode!\n\nPlease select a category to add videos to:",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
-        logger.info(f"Admin {user_id}: Batch add mode enabled.")
+        logger.info(f"Admin {user_id}: Batch add mode enabled, prompting category selection.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to initiate batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while starting batch add mode. Please try again.")
@@ -1486,12 +1496,12 @@ async def handle_video_batch_add(client: Client, message: Message):
     try:
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
             logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
-            return
+            return # Ignore if not in batch mode
 
-        category = batch_add_state[user_id].get('current_category', config.DEFAULT_CATEGORY)
-        if not category: # Should not happen with default category logic, but safety check
-            logger.warning(f"Admin {user_id} tried to add video but no category set in batch state.")
-            await message.reply_text("⚠️ Please set a category first using /category.")
+        category = batch_add_state[user_id].get('current_category')
+        if not category:
+            logger.warning(f"Admin {user_id} tried to add video but no category selected in batch mode.")
+            await message.reply_text("⚠️ No category selected for batch adding. Please select one using /category or start /batchadd again.")
             return
 
         is_valid_category, validation_msg = validate_category_name(category)
@@ -1753,4 +1763,3 @@ if __name__ == '__main__':
     app.loop.create_task(verify_and_cleanup_media())
     # Run the bot
     app.run()
-
