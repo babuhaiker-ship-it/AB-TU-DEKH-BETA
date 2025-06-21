@@ -9,7 +9,7 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, RPCError, BadRequest, PeerIdInvalid, ChannelInvalid
 from pymongo import MongoClient, ASCENDING, ReturnDocument
 import aiohttp
 from aiohttp import ClientTimeout
@@ -32,7 +32,7 @@ class BotConfig:
     BOT_USERNAME = '@Testingnyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    VIDEO_CHANNEL_ID = -1002621716446
+    VIDEO_CHANNEL_ID = -1002621716446 # Ensure this is correct and bot is admin with posting rights
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     URL_SHORTENER = 'https://api.linkshortify.com/st'
@@ -1084,7 +1084,7 @@ async def refer_btn(client: Client, message: Message):
             return
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this link to earn tokens:\n<code>{html.escape(ref_link)}</code>", reply_markup=referral_keyboard(ref_link))
+        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token.\n\n<code>{html.escape(ref_link)}</code>", reply_markup=referral_keyboard(ref_link))
         logger.info(f"User {user_id}: Referral link sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
@@ -1533,37 +1533,56 @@ async def handle_video_batch_add(client: Client, message: Message):
         settings = settings_collection.find_one({'_id': 'settings'}) or {'protect_content': True, 'auto_delete': True}
         protect_content = settings.get('protect_content', True)
 
-        forwarded_message = await client.send_video(
-            chat_id=config.VIDEO_CHANNEL_ID,
-            video=file_id,
-            caption=f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}",
-            protect_content=protect_content
-        )
-        message_id_in_channel = forwarded_message.id
+        try:
+            forwarded_message = await client.send_video(
+                chat_id=config.VIDEO_CHANNEL_ID,
+                video=file_id,
+                caption=f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}",
+                protect_content=protect_content
+            )
+            message_id_in_channel = forwarded_message.id
 
-        video_data = {
-            "uuid": video_uuid,
-            "file_id": file_id,
-            "file_unique_id": file_unique_id,
-            "category": category,
-            "size_bytes": file_size,
-            "timestamp": get_current_time(),
-            "message_id": message_id_in_channel,
-            "banned": False
-        }
-        media_collection.insert_one(video_data)
-        batch_add_state[user_id]['count'] = batch_add_state[user_id].get('count', 0) + 1
-        logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}.")
-        await message.reply_text(
-            f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>\n"
-            f"📁 Category: {html.escape(category)}\n"
-            f"📊 Size: {format_size(file_size)}\n"
-            f"🆔 File ID: <code>{file_id}</code>\n"
-            f"Videos added in this batch: {batch_add_state[user_id]['count']}"
-        )
-    except Exception as e:
-        logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
-        await message.reply("❌ Failed to add video. Please try again.")
+            video_data = {
+                "uuid": video_uuid,
+                "file_id": file_id,
+                "file_unique_id": file_unique_id,
+                "category": category,
+                "size_bytes": file_size,
+                "timestamp": get_current_time(),
+                "message_id": message_id_in_channel,
+                "banned": False
+            }
+            media_collection.insert_one(video_data)
+            batch_add_state[user_id]['count'] = batch_add_state[user_id].get('count', 0) + 1
+            logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}.")
+            await message.reply_text(
+                f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>\n"
+                f"📁 Category: {html.escape(category)}\n"
+                f"📊 Size: {format_size(file_size)}\n"
+                f"🆔 File ID: <code>{file_id}</code>\n"
+                f"Videos added in this batch: {batch_add_state[user_id]['count']}"
+            )
+        except (ChannelInvalid, PeerIdInvalid) as e:
+            logger.error(f"Admin {user_id} failed to send video to channel {config.VIDEO_CHANNEL_ID} due to invalid chat ID or permissions: {e}", exc_info=True)
+            await message.reply_text(f"❌ Failed to send video to the channel. Error: Invalid channel ID or bot lacks permissions. Please check the `VIDEO_CHANNEL_ID` in config and ensure the bot is an admin with 'Post Messages' and 'Send Media' rights. Details: `{e}`")
+        except BadRequest as e:
+            logger.error(f"Admin {user_id} failed to send video due to bad request (e.g., file too large, invalid file, content protection issues): {e}", exc_info=True)
+            error_message = str(e)
+            if "file too large" in error_message.lower():
+                await message.reply_text(f"❌ Failed to add video: The video file is too large. Telegram's limit is 2 GB. Details: `{error_message}`")
+            elif "content protection" in error_message.lower():
+                await message.reply_text(f"❌ Failed to add video: Issue with content protection. Ensure bot has necessary admin rights in the channel (e.g., 'Add Admins') or try disabling `protect_content`. Details: `{error_message}`")
+            else:
+                await message.reply_text(f"❌ Failed to add video due to a bad request. This might be an invalid file type or other Telegram API limitation. Details: `{error_message}`")
+        except FloodWait as e:
+            logger.warning(f"Admin {user_id} hit FloodWait while sending video: {e.value} seconds. Advising to wait.")
+            await message.reply_text(f"⚠️ Telegram is asking me to slow down. Please wait {e.value} seconds before sending more videos.")
+        except RPCError as e:
+            logger.error(f"Admin {user_id} encountered an RPC error while sending video: {e}", exc_info=True)
+            await message.reply_text(f"❌ Failed to add video due to a Telegram API (RPC) error. This is usually a temporary issue. Details: `{e}`")
+        except Exception as e:
+            logger.error(f"Admin {user_id} unhandled error adding video: {e}", exc_info=True)
+            await message.reply_text(f"❌ Failed to add video due to an unexpected error. Please check logs and try again. Details: `{e}`")
 
 @app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_category_cmd(client: Client, message: Message):
@@ -1730,7 +1749,6 @@ async def verify_and_cleanup_media():
         logger.info("Starting media verification and cleanup task.")
         try:
             # Wait until the client is started before proceeding
-            # A simple loop with a small delay can ensure this
             while not app.is_connected:
                 logger.info("Waiting for Pyrogram client to connect...")
                 await asyncio.sleep(5) # Wait for 5 seconds before checking again
@@ -1763,26 +1781,6 @@ async def verify_and_cleanup_media():
 
 # --- Main ---
 if __name__ == '__main__':
-    logger.info("Bot starting...")
-    # It's better to schedule these tasks within Pyrogram's `on_ready` or similar,
-    # but for simple scripts, ensuring the client is connected within the task itself is a quick fix.
-    # Pyrogram's `idle()` method keeps the bot running and handles the asyncio loop.
-    app.run() # This will block until the bot stops.
-
-    # Schedule the cleanup tasks after the app is presumed to have started its event loop.
-    # A more robust solution would be to use app.on_message(filters.me & filters.private & filters.command("start_cleanup_tasks"))
-    # or to integrate them within the app's event loop management if Pyrogram provides a direct hook for "client connected".
-    # For now, the while loop inside the async function waiting for `app.is_connected` will work.
-    async def start_all_tasks():
-        # Start background cleanup tasks
-        asyncio.create_task(cleanup_expired_data())
-        asyncio.create_task(verify_and_cleanup_media())
-
-    # This part needs to be handled carefully. `app.run()` already starts the event loop.
-    # You can't just call `app.loop.create_task()` outside an already running loop.
-    # A common pattern is to use `app.start()` and then run your custom tasks, then `app.idle()`.
-
-    # Revised main block
     logger.info("Bot starting...")
     loop = asyncio.get_event_loop()
     try:
