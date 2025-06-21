@@ -41,10 +41,10 @@ class BotConfig:
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     DEFAULT_CATEGORY = 'default'
     # Customization options
-    NEW_USER_TOKENS = 3
+    NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
-    MENU_TIMEOUT = 1800 # Added MENU_TIMEOUT config
+    MENU_TIMEOUT = 3600 # Added MENU_TIMEOUT config
 
 try:
     config = BotConfig()
