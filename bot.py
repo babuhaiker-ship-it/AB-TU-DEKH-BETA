@@ -5,17 +5,17 @@ import base64
 import random
 import logging
 from datetime import datetime, timedelta
-from pyrogram import Client, filters # Corrected import for filters
+from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, UserNotParticipant, FloodWait
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait
 from pymongo import MongoClient, ASCENDING, ReturnDocument
 import aiohttp
-from aiohttp import ClientTimeout # Added ClientTimeout
+from aiohttp import ClientTimeout
 from collections import defaultdict
 import re
-import html # Import the html module
+import html
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -26,14 +26,13 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic'
+    BOT_TOKEN = '7965872423:AAHkSMHJVveN_GcLb8iNvCic' # Removed AAHkSMHJVveM1ROKlPJGgsP
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Testingnyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002626689003
-    CHANNEL_ID = -1002237072535 # IMPORTANT: Replace with your actual channel ID for subscription check
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     URL_SHORTENER = 'https://api.linkshortify.com/st'
@@ -50,8 +49,8 @@ class BotConfig:
 try:
     config = BotConfig()
     # Basic validation for essential configs
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.SHORTENER_API_KEY, config.BOT_USERNAME, config.CHANNEL_ID]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME, CHANNEL_ID in your environment variables.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.SHORTENER_API_KEY, config.BOT_USERNAME]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME in your environment variables.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -72,7 +71,7 @@ media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
-history_collection.create_index([("history.viewed_at", ASCENDING)]) # Added index for history viewed_at
+history_collection.create_index([("history.viewed_at", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
@@ -200,18 +199,6 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
                 logger.info(f"User {new_user_id} successfully referred by {referrer_id}.")
                 return referrer_id
     return None
-
-# --- Subscription Check ---
-async def check_subscription(client: Client, user_id: int) -> bool:
-    """Checks if a user is a member of the configured channel."""
-    logger.info(f"Checking subscription for user {user_id} in channel {config.CHANNEL_ID}")
-    try:
-        member = await client.get_chat_member(config.CHANNEL_ID, user_id)
-        logger.info(f"User {user_id} subscription status in channel {config.CHANNEL_ID}: {member.status}")
-        return member.status in ["member", "administrator", "creator"]
-    except Exception as e:
-        logger.error(f"Error checking subscription for user {user_id} in channel {config.CHANNEL_ID}: {e}", exc_info=True)
-        return False
 
 # --- Category Management ---
 def validate_category_name(name: str) -> tuple[bool, str]:
@@ -369,11 +356,6 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton("Refer & Earn"), KeyboardButton("Buy Token")],
         [KeyboardButton("Refresh Token")]
     ]
-    
-    # Check subscription status and add a "Join Channel" button if not subscribed
-    # if not await check_subscription(app, user_id): # Removed check here, handled in handler
-    #     buttons.append([KeyboardButton("Join Channel"), KeyboardButton("Check Subscription")])
-    
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
@@ -557,10 +539,7 @@ async def is_rate_limited(user_id: int) -> bool:
 # --- Error Handling ---
 async def handle_error(client: Client, message: Message, error: Exception):
     """Generic error handler for bot commands."""
-    if isinstance(error, UserNotParticipant):
-        # This error is handled by the subscription check
-        return
-    elif isinstance(error, FloodWait):
+    if isinstance(error, FloodWait):
         logger.warning(f"FloodWait: {error.value} seconds for user {message.from_user.id}")
         await message.reply_text(f"⚠️ <b>Too Many Requests!</b>\nPlease wait <b>{error.value}</b> seconds before trying again.")
     else:
@@ -574,8 +553,8 @@ async def start_cmd(client: Client, message: Message):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            if await is_rate_limited(user_id): # Await the function call
-                raise FloodWait(10) # Raise FloodWait to trigger retry logic
+            if await is_rate_limited(user_id):
+                raise FloodWait(10)
         
             user = users_collection.find_one({'user_id': user_id})
             args = message.text.split()
@@ -643,16 +622,6 @@ async def start_cmd(client: Client, message: Message):
                         
                 video = result_or_msg # Now `result_or_msg` is the video object if successful
                             
-                # Check subscription (important for video access)
-                is_subscribed = await check_subscription(client, user_id)
-                if not is_subscribed:
-                    await message.reply(
-                        "❌ You are not subscribed yet. Please join our channel:",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Join Channel", url=f"https://t.me/{config.CHANNEL_ID}"),
-                                                           InlineKeyboardButton("Check Subscription", callback_data="check_sub")]])
-                    )
-                    return # Stop here if not subscribed
-
                 # If subscribed and has token, proceed to send video
                 if await is_menu_active(client, user_id, message.chat.id):
                     try:
@@ -733,7 +702,6 @@ async def help_cmd(client: Client, message: Message):
         "- Use Get Video to watch spicy content.\n"
         "- Each token gives you 24 hours access.\n"
         "- Earn tokens by referral, refresh, or buy.\n"
-        "- Join the channel to access videos.\n"
         "- Use /profile to check your stats.",
         reply_markup=await get_main_keyboard(user_id)
     )
@@ -777,16 +745,6 @@ async def get_video(client: Client, message: Message):
     if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
         logger.warning(f"User {user_id} hit rate limit in get_video.")
-        return
-
-    # Check subscription first
-    is_subscribed = await check_subscription(client, user_id)
-    if not is_subscribed:
-        await message.reply(
-            "❌ You are not subscribed yet. Please join our channel to access videos:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Join Channel", url=f"https://t.me/{config.CHANNEL_ID}"),
-                                               InlineKeyboardButton("Check Subscription", callback_data="check_sub")]])
-        )
         return
         
     if not user_has_token(user_id):
@@ -1161,31 +1119,6 @@ async def send_token_earning_options(client: Client, message: Message):
         logger.error(f"User {user_id} failed to send token earning options: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_callback_query(filters.regex("^check_sub$"))
-async def check_sub_callback(client: Client, callback_query: CallbackQuery):
-    """Handles 'Check Subscription' callback from inline keyboard."""
-    user_id = callback_query.from_user.id
-    logger.info(f"User {user_id} clicked Check Subscription button (callback). ")
-    try:
-        if await is_rate_limited(user_id):
-            await callback_query.answer("⚠️ You're checking too quickly. Please wait a minute and try again.", show_alert=True)
-            logger.warning(f"User {user_id} hit rate limit in check_sub_callback.")
-            return
-
-        is_member = await check_subscription(client, user_id)
-        
-        if is_member:
-            await callback_query.message.edit_text(
-                "🎉 <b>Success!</b> You are subscribed! You can now watch videos.",
-                reply_markup=await get_main_keyboard(user_id) # Await the call
-            )
-            logger.info(f"User {user_id} confirmed subscription (callback). ")
-        else:
-            await callback_query.answer("You are still not subscribed. Please join the channel.", show_alert=True)
-            logger.info(f"User {user_id} is still not subscribed (callback). ")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to check subscription (callback): {e}", exc_info=True)
-        await callback_query.answer("❌ Something went wrong. Please try again.", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client: Client, callback_query: CallbackQuery):
@@ -1663,49 +1596,6 @@ async def toggle_protect(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Admin {user_id} failed to toggle content protection: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling content protection. Please try again.")
-
-@app.on_message(filters.regex("^Join Channel$") & filters.private)
-async def join_channel_btn(client: Client, message: Message):
-    """Handles 'Join Channel' button click. This button's visibility is tied to subscription status."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked Join Channel button.")
-    try:
-        await message.reply(
-            "📢 <b>Join our channel to watch videos!</b>",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Join Channel", url=f"https://t.me/{config.CHANNEL_ID}"),
-                                               InlineKeyboardButton("Check Subscription", callback_data="check_sub")]])
-        )
-        logger.info(f"User {user_id}: Join channel message sent.")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to send join channel message: {e}", exc_info=True)
-        await handle_error(client, message, e)
-
-@app.on_message(filters.regex("^Check Subscription$") & filters.private)
-async def check_sub_btn(client: Client, message: Message):
-    """Handles 'Check Subscription' button click from main keyboard."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked Check Subscription button (from main keyboard). ")
-    
-    try:
-        if await is_rate_limited(user_id):
-            await message.reply_text("⚠️ You're checking too quickly. Please wait a minute and try again.")
-            logger.warning(f"User {user_id} hit rate limit in check_sub_btn.")
-            return
-
-        is_member = await check_subscription(client, user_id)
-        if is_member:
-            await message.reply("🎉 <b>Success!</b> You are subscribed! You can now watch videos.", reply_markup=await get_main_keyboard(user_id))
-            logger.info(f"User {user_id}: Subscription confirmed (from main keyboard).")
-        else:
-            await message.reply(
-                "❌ You are not subscribed yet. Please join our channel:",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Join Channel", url=f"https://t.me/{config.CHANNEL_ID}"),
-                                                   InlineKeyboardButton("Check Subscription", callback_data="check_sub")]])
-            )
-            logger.info(f"User {user_id}: Subscription not confirmed (from main keyboard).")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to check subscription from button: {e}", exc_info=True)
-        await handle_error(client, message, e)
 
 # --- Database Cleanup ---
 async def cleanup_expired_data():
