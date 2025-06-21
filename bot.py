@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic' # Removed AAHkSMHJVveM1ROKlPJGgsP
+    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Testingnyraa_bot'
@@ -592,7 +592,6 @@ async def start_cmd(client: Client, message: Message):
             user = users_collection.find_one({'user_id': user_id})
             args = message.text.split()
             
-            # Check if it's a first-time user
             is_new_user = False
             if not user:
                 is_new_user = True
@@ -607,109 +606,110 @@ async def start_cmd(client: Client, message: Message):
                 add_token(user_id, config.NEW_USER_TOKENS * 86400) # Give new user initial token
                 logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
 
-            # Handle deep links (referral, token refresh, or video share)
+            # Variables to track deep link type and associated data
+            deep_link_type = None
+            deep_link_data = None
+            video_uuid_from_link = None
+            referrer_id_from_video_link = None
+
             if len(args) > 1:
                 deep_link_arg = args[1]
-                
-                # --- Handle Token Refresh Deep Link ---
                 if deep_link_arg.startswith('token_'):
-                    success, msg = await handle_token_refresh(user_id, deep_link_arg[6:])
-                    await message.reply(msg)
-                    if success:
-                        await message.reply(
-                            "🎉 <b>Success!</b> Click on Get Video to watch spicy content.",
-                            reply_markup=await get_main_keyboard(user_id)
-                        )
-                    return # Exit after handling token refresh
-                
-                # --- Handle Video Share Deep Link ---
-                # Expected format: video_[video_id]_[referrer_id] OR just [video_id]
-                video_uuid_from_link = None
-                referrer_id_from_video_link = None
-
-                if deep_link_arg.startswith('video_'):
+                    deep_link_type = 'token_refresh'
+                    deep_link_data = deep_link_arg[6:]
+                elif deep_link_arg.startswith('video_'):
+                    deep_link_type = 'video_share'
                     parts = deep_link_arg.split('_')
                     if len(parts) >= 2:
                         video_uuid_from_link = parts[1]
-                    if len(parts) == 3: # video_UUID_REFERRER_ID
+                    if len(parts) == 3:
                         try:
                             referrer_id_from_video_link = int(parts[2])
                         except ValueError:
                             logger.warning(f"Invalid referrer ID in video deep link for user {user_id}: {deep_link_arg}")
-                else: # Assume it's just a video_uuid (less common, but handled for robustness)
-                    video_uuid_from_link = deep_link_arg
-                
-                if video_uuid_from_link:
-                    logger.info(f"User {user_id} attempting to view shared video {video_uuid_from_link}")
-                                
-                    try:
-                        uuid.UUID(video_uuid_from_link) # Validate UUID format
-                    except ValueError:
-                        logger.warning(f"User {user_id} attempted to view shared video with invalid UUID format: {video_uuid_from_link}.")
-                        await message.reply("Invalid video link format.")
-                        return
+                    deep_link_data = video_uuid_from_link # Store the UUID for later use
+                elif deep_link_arg.startswith('ref_'):
+                    deep_link_type = 'referral'
+                    deep_link_data = deep_link_arg # Store the whole ref code
 
-                    # Check if video exists
-                    video_found_in_db = media_collection.find_one({'uuid': video_uuid_from_link})
-                    if not video_found_in_db:
-                        logger.warning(f"User {user_id} attempted to view non-existent shared video UUID {video_uuid_from_link}.")
-                        await message.reply("Invalid video link.")
-                        return
-
-                    # --- New Logic for Shared Video Links ---
-                    # Reward referrer if new user joined via shared video link
-                    if is_new_user and referrer_id_from_video_link and referrer_id_from_video_link != user_id:
-                        referrer_user_obj = users_collection.find_one({'user_id': referrer_id_from_video_link})
-                        if referrer_user_obj:
-                            add_token(referrer_id_from_video_link, config.REFERRAL_BONUS * 86400)
-                            users_collection.update_one({'user_id': referrer_id_from_video_link}, {'$inc': {'referral_count': 1}}, upsert=True)
-                            logger.info(f"Referral bonus given to {referrer_id_from_video_link} for new user {user_id} via video share.")
-                            await client.send_message(referrer_id_from_video_link, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your shared video link! You've received {config.REFERRAL_BONUS} token.")
-                        else:
-                            logger.warning(f"Referrer {referrer_id_from_video_link} not found for new user {user_id} via video share.")
-
-                    if not user_has_token(user_id):
-                        # User needs a token. Prompt to get token, then tell them to click Get Video.
-                        await message.reply("You need a token to watch this video. Please get a token first!", reply_markup=await get_main_keyboard(user_id))
-                        await send_token_earning_options(client, message)
-                        return # Exit, don't try to send video now
+            # Handle welcome/referral messages for new users first, regardless of deep link type
+            if is_new_user:
+                if deep_link_type == 'referral':
+                    referrer_id = handle_referral(user_id, deep_link_data)
+                    if referrer_id:
+                        await message.reply(f"🥳 **Congratulations {first_name_safe}!** You have received {config.NEW_USER_TOKENS} token to continue.")
+                        await client.send_message(referrer_id, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your link! You've received {config.REFERRAL_BONUS} token.")
+                elif deep_link_type == 'video_share' and referrer_id_from_video_link and referrer_id_from_video_link != user_id:
+                    # Referral bonus for new user via video share (already handled in handle_referral but also included here for direct messaging)
+                    referrer_user_obj = users_collection.find_one({'user_id': referrer_id_from_video_link})
+                    if referrer_user_obj:
+                        # handle_referral (called below if deep_link_type is 'video_share') already adds token and updates count
+                        await message.reply(f"🥳 **Congratulations {first_name_safe}!** You have received {config.NEW_USER_TOKENS} token to continue.")
+                        await client.send_message(referrer_id_from_video_link, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your shared video link! You've received {config.REFERRAL_BONUS} token.")
                     else:
-                        # User has token, proceed to send the video.
-                        success, result_or_msg = await handle_shared_video(client, user_id, video_uuid_from_link)
-                        if not success:
-                            await message.reply(result_or_msg, reply_markup=await get_main_keyboard(user_id))
-                            return
+                        logger.warning(f"Referrer {referrer_id_from_video_link} not found for new user {user_id} via video share. Still sending new user welcome.")
+                        await message.reply(f"🥳 **Congratulations {first_name_safe}!** You have received {config.NEW_USER_TOKENS} token to continue.")
+                else: # New user, but no specific referral deep link or video link referral
+                    await message.reply(f"👋 dear {first_name_safe} This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help.", reply_markup=await get_main_keyboard(user_id))
+            elif not deep_link_type: # Returning user, no deep link
+                await message.reply(f"👋 dear {first_name_safe} This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help.", reply_markup=await get_main_keyboard(user_id))
 
-                        video = result_or_msg # Now `result_or_msg` is the video object if successful
-                        
-                        if await is_menu_active(client, user_id, message.chat.id):
-                            try:
-                                old_menu = active_menus.get(user_id)
-                                if old_menu and old_menu.get('chat_id'):
-                                    try:
-                                        await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
-                                        logger.info(f"User {user_id} deleted old menu message {old_menu['message_id']} for shared video update.")
-                                    except Exception as e:
-                                        logger.warning(f"User {user_id} failed to delete old menu message {old_menu['message_id']}: {e}")
-                                    
-                                sent_success, sent_message_or_error = await send_video_with_auto_delete(
-                                    client,
-                                    message.chat.id,
-                                    video,
-                                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id) # Pass user_id for share button
-                                )
-                                if sent_success:
-                                    set_active_menu(user_id, sent_message_or_error.id, message.chat.id)
-                                    await message.reply("🎉 <b>Success!</b> Video updated in your active menu.")
-                                    logger.info(f"User {user_id} updated menu with shared video {video_uuid_from_link}.")
-                                else:
-                                    await message.reply(sent_message_or_error)
+            # Now, handle the specific deep link action for both new and returning users
+            if deep_link_type == 'token_refresh':
+                success, msg = await handle_token_refresh(user_id, deep_link_data)
+                await message.reply(msg)
+                if success:
+                    await message.reply(
+                        "🎉 <b>Success!</b> Click on Get Video to watch spicy content.",
+                        reply_markup=await get_main_keyboard(user_id)
+                    )
+                # No return here, as we already handled new user message.
+                # The user will get the token refresh message and then can use the bot.
+            elif deep_link_type == 'video_share':
+                logger.info(f"User {user_id} attempting to view shared video {video_uuid_from_link}")
+                            
+                try:
+                    uuid.UUID(video_uuid_from_link) # Validate UUID format
+                except ValueError:
+                    logger.warning(f"User {user_id} attempted to view shared video with invalid UUID format: {video_uuid_from_link}.")
+                    await message.reply("Invalid video link format.", reply_markup=await get_main_keyboard(user_id))
+                    break # Exit retry loop
 
-                            except Exception as e:
-                                logger.error(f"User {user_id} failed to update menu with shared video: {e}", exc_info=True)
-                                await handle_error(client, message, e)
-                        else:
-                            # Send as new message
+                # Check if video exists
+                video_found_in_db = media_collection.find_one({'uuid': video_uuid_from_link})
+                if not video_found_in_db:
+                    logger.warning(f"User {user_id} attempted to view non-existent shared video UUID {video_uuid_from_link}.")
+                    await message.reply("Invalid video link.", reply_markup=await get_main_keyboard(user_id))
+                    break # Exit retry loop
+
+                # Process video referral if applicable (already done for new users above, but good to call for robustness)
+                if is_new_user and referrer_id_from_video_link:
+                    handle_referral(user_id, deep_link_arg) # Use the original deep_link_arg for handle_referral
+                
+                if not user_has_token(user_id):
+                    # User needs a token. Prompt to get token, then tell them to click Get Video.
+                    await message.reply("You need a token to watch this video. Please get a token first!", reply_markup=await get_main_keyboard(user_id))
+                    await send_token_earning_options(client, message)
+                    break # Exit retry loop, don't try to send video now
+                else:
+                    # User has token, proceed to send the video.
+                    success, result_or_msg = await handle_shared_video(client, user_id, video_uuid_from_link)
+                    if not success:
+                        await message.reply(result_or_msg, reply_markup=await get_main_keyboard(user_id))
+                        break # Exit retry loop
+
+                    video = result_or_msg # Now `result_or_msg` is the video object if successful
+                    
+                    if await is_menu_active(client, user_id, message.chat.id):
+                        try:
+                            old_menu = active_menus.get(user_id)
+                            if old_menu and old_menu.get('chat_id'):
+                                try:
+                                    await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
+                                    logger.info(f"User {user_id} deleted old menu message {old_menu['message_id']} for shared video update.")
+                                except Exception as e:
+                                    logger.warning(f"User {user_id} failed to delete old menu message {old_menu['message_id']}: {e}")
+                                
                             sent_success, sent_message_or_error = await send_video_with_auto_delete(
                                 client,
                                 message.chat.id,
@@ -718,25 +718,29 @@ async def start_cmd(client: Client, message: Message):
                             )
                             if sent_success:
                                 set_active_menu(user_id, sent_message_or_error.id, message.chat.id)
-                                logger.info(f"User {user_id} sent shared video {video_uuid_from_link} as new menu.")
+                                await message.reply("🎉 <b>Success!</b> Video updated in your active menu.")
+                                logger.info(f"User {user_id} updated menu with shared video {video_uuid_from_link}.")
                             else:
                                 await message.reply(sent_message_or_error)
-                        return # Exit after handling shared video
 
-                # --- Handle Generic Referral Deep Link (if not token or video) ---
-                # This ensures ref_ links are processed for referral bonus for new users
-                if deep_link_arg.startswith('ref_') and is_new_user:
-                    referrer_id = handle_referral(user_id, deep_link_arg)
-                    if referrer_id:
-                        await message.reply(f"🥳 **Congratulations {first_name_safe}!** You have received {config.NEW_USER_TOKENS} token to continue.")
-                        await client.send_message(referrer_id, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your link! You've received {config.REFERRAL_BONUS} token.")
-
-            # Send initial welcome/returning user message
-            welcome_message = f"👋 dear {first_name_safe} This is Spicy Nyraa Bot. To watch spicy content, click on the Get Video button. Need help? Tap /help."
-            if is_new_user: # Only send welcome if newly referred
-                await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
-            elif not len(args) > 1: # Only send this if no deep link was processed
-                await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
+                        except Exception as e:
+                            logger.error(f"User {user_id} failed to update menu with shared video: {e}", exc_info=True)
+                            await handle_error(client, message, e)
+                    else:
+                        # Send as new message
+                        sent_success, sent_message_or_error = await send_video_with_auto_delete(
+                            client,
+                            message.chat.id,
+                            video,
+                            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id) # Pass user_id for share button
+                        )
+                        if sent_success:
+                            set_active_menu(user_id, sent_message_or_error.id, message.chat.id)
+                            logger.info(f"User {user_id} sent shared video {video_uuid_from_link} as new menu.")
+                        else:
+                            await message.reply(sent_message_or_error)
+                break # Exit retry loop after handling shared video
+            
             break  # Exit the retry loop on successful execution
             
         except FloodWait as e:
@@ -1749,3 +1753,4 @@ if __name__ == '__main__':
     app.loop.create_task(verify_and_cleanup_media())
     # Run the bot
     app.run()
+
