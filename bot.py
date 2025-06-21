@@ -1217,6 +1217,14 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
 
 
 # --- Admin Commands ---
+def format_size(size_bytes: int) -> str:
+    """Converts bytes to a human-readable format (e.g., KB, MB, GB)."""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_bytes < 1024:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.2f} PB" # For extremely large files
+
 @app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
     """Admin command to broadcast a replied message to all users."""
@@ -1425,14 +1433,6 @@ async def addtoken_cmd(client: Client, message: Message):
 # --- Batch Add Videos ---
 batch_add_state = {}
 
-def format_size(size_bytes: int) -> str:
-    """Converts bytes to a human-readable format (e.g., KB, MB, GB)."""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_bytes < 1024:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.2f} PB" # For extremely large files
-
 @app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and select category."""
@@ -1493,7 +1493,7 @@ async def handle_video_batch_add(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} sent a video for batch adding.")
 
-    try:
+    try: 
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
             logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
             return # Ignore if not in batch mode
@@ -1583,6 +1583,10 @@ async def handle_video_batch_add(client: Client, message: Message):
         except Exception as e:
             logger.error(f"Admin {user_id} unhandled error adding video: {e}", exc_info=True)
             await message.reply_text(f"❌ Failed to add video due to an unexpected error. Please check logs and try again. Details: `{e}`")
+
+    except Exception as e: # This is the missing except block for the outer try in handle_video_batch_add
+        logger.error(f"Admin {user_id} error in handle_video_batch_add: {e}", exc_info=True)
+        await message.reply("❌ An unexpected error occurred while processing your video. Please try again.")
 
 @app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_category_cmd(client: Client, message: Message):
