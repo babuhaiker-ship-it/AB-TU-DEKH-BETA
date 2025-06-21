@@ -1729,6 +1729,12 @@ async def verify_and_cleanup_media():
     while True:
         logger.info("Starting media verification and cleanup task.")
         try:
+            # Wait until the client is started before proceeding
+            # A simple loop with a small delay can ensure this
+            while not app.is_connected:
+                logger.info("Waiting for Pyrogram client to connect...")
+                await asyncio.sleep(5) # Wait for 5 seconds before checking again
+
             all_media = list(media_collection.find({}))
             for media_item in all_media:
                 video_uuid = media_item.get('uuid')
@@ -1758,8 +1764,42 @@ async def verify_and_cleanup_media():
 # --- Main ---
 if __name__ == '__main__':
     logger.info("Bot starting...")
-    # Start background cleanup tasks
-    app.loop.create_task(cleanup_expired_data())
-    app.loop.create_task(verify_and_cleanup_media())
-    # Run the bot
-    app.run()
+    # It's better to schedule these tasks within Pyrogram's `on_ready` or similar,
+    # but for simple scripts, ensuring the client is connected within the task itself is a quick fix.
+    # Pyrogram's `idle()` method keeps the bot running and handles the asyncio loop.
+    app.run() # This will block until the bot stops.
+
+    # Schedule the cleanup tasks after the app is presumed to have started its event loop.
+    # A more robust solution would be to use app.on_message(filters.me & filters.private & filters.command("start_cleanup_tasks"))
+    # or to integrate them within the app's event loop management if Pyrogram provides a direct hook for "client connected".
+    # For now, the while loop inside the async function waiting for `app.is_connected` will work.
+    async def start_all_tasks():
+        # Start background cleanup tasks
+        asyncio.create_task(cleanup_expired_data())
+        asyncio.create_task(verify_and_cleanup_media())
+
+    # This part needs to be handled carefully. `app.run()` already starts the event loop.
+    # You can't just call `app.loop.create_task()` outside an already running loop.
+    # A common pattern is to use `app.start()` and then run your custom tasks, then `app.idle()`.
+
+    # Revised main block
+    logger.info("Bot starting...")
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(app.start())
+        logger.info("Pyrogram client started successfully.")
+        
+        # Now schedule the tasks since the client is connected
+        loop.create_task(cleanup_expired_data())
+        loop.create_task(verify_and_cleanup_media())
+        
+        app.idle() # This keeps the bot running
+    except Exception as e:
+        logger.critical(f"Fatal error during bot startup: {e}", exc_info=True)
+    finally:
+        if app.is_connected:
+            loop.run_until_complete(app.stop())
+            logger.info("Pyrogram client stopped.")
+        loop.close()
+        logger.info("Event loop closed. Bot stopped.")
+
