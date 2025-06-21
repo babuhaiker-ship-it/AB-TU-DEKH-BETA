@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7965872423:AAHkSMHJVveN_GcLb8iNvCic' # Removed AAHkSMHJVveM1ROKlPJGgsP
+    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic' # Removed AAHkSMHJVveM1ROKlPJGgsP
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Testingnyraa_bot'
