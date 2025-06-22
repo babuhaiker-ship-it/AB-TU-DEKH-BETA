@@ -4,7 +4,7 @@ import uuid
 import base64
 import random
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # Import timezone
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
@@ -115,7 +115,8 @@ def b64_to_str(b64: str) -> str:
 
 def get_current_time() -> int:
     """Returns the current UTC timestamp as an integer."""
-    return int(datetime.utcnow().timestamp())
+    # Use datetime.now(timezone.utc) for timezone-aware objects as recommended
+    return int(datetime.now(timezone.utc).timestamp())
 
 async def shorten_url(long_url: str) -> str:
     """Shortens a given URL using the configured URL shortener service."""
@@ -152,13 +153,13 @@ def get_valid_tokens(user_id: int) -> list:
     doc = tokens_collection.find_one({'user_id': user_id})
     if not doc or not doc.get('tokens'):
         return []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc) # Use timezone-aware object
     # Filter tokens that have not expired
     return [t for t in doc['tokens'] if t['expires_at'] > now]
 
 def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY):
     """Adds a new token for a user with a specified duration."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc) # Use timezone-aware object
     expires = now + timedelta(seconds=duration_seconds)
     token = {
         'token_id': str(uuid.uuid4()),
@@ -179,7 +180,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY):
 
 def get_and_cleanup_tokens(user_id: int) -> list:
     """Removes expired tokens from the database and returns the list of valid tokens."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc) # Use timezone-aware object
     
     try:
         # Atomically remove expired tokens and fetch the updated document
@@ -282,7 +283,7 @@ def add_category(name: str) -> tuple[bool, str]:
         # Add category to database
         categories_collection.insert_one({
             'name': name,
-            'created_at': datetime.utcnow()
+            'created_at': datetime.now(timezone.utc) # Use timezone-aware object
         })
         logger.info(f"Category '{name}' added successfully.")
         return True, f"✅ Category '<b>{html.escape(name)}</b>' added successfully."
@@ -331,7 +332,7 @@ def get_video_by_uuid(uuid_: str) -> dict | None:
 
 def save_history(user_id: int, video_uuid: str, category: str):
     """Saves a video viewing entry to a user's history, limiting to the last 100 entries."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc) # Use timezone-aware object
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
         # Use $push with $slice to keep only the last 100 entries
@@ -603,7 +604,7 @@ async def is_rate_limited(user_id: int) -> bool:
     if is_admin(user_id):  # Admins are exempt from rate limiting
         return False
         
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(timezone.utc).timestamp() # Use timezone-aware object
     
     # Clean up old timestamps outside the window
     user_request_timestamps[user_id] = [
@@ -664,7 +665,7 @@ async def start_cmd(client: Client, message: Message):
             'username': username_safe,
             'first_name': first_name_safe,
             'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-            'joined_date': datetime.utcnow(),
+            'joined_date': datetime.now(timezone.utc), # Use timezone-aware object
             'referral_count': 0
         })
         add_token(user_id, config.NEW_USER_TOKENS * 86400) # Give new user initial token (24 hours per token)
@@ -1939,7 +1940,7 @@ async def cleanup_expired_data():
     """Periodically cleans up expired tokens, old history entries, and expired active menus."""
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc) # Use timezone-aware object
             
             # 1. Clean up expired tokens: remove individual tokens that have expired
             tokens_collection.update_many(
@@ -2056,7 +2057,8 @@ if __name__ == '__main__':
             logger.info("Background tasks scheduled.")
             
             # Keep the bot running indefinitely, handling messages and callbacks
-            await app.idle() 
+            # Replaced app.idle() with asyncio.Event().wait()
+            await asyncio.Event().wait() 
         except Exception as e:
             logger.critical(f"Fatal error during bot startup or idle: {e}", exc_info=True)
         finally:
