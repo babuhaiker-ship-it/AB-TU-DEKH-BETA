@@ -864,7 +864,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     # Check for active menu - only allow if this callback comes from the *currently active* menu message
     current_active_menu = active_menus.get(user_id)
     if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
-        logger.warning(f"User {user_id} tried to select category but current menu expired or callback not from active menu.")
+        logger.warning(f"User {user_id} tried to select category but current menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
         await callback_query.answer("Menu expired or not active. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
         # Attempt to delete the old message if it's not the current active one, then clear state
         if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
@@ -923,7 +923,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for category selection: {sent_message_or_error}. Attempting to send new message.")
-            await callback_query.answer("❌ Failed to load video. Sending new message... 😥", show_alert=True)
+            await callback_query.answer(f"❌ Failed to load video: {sent_message_or_error}. Sending new message... 😥", show_alert=True)
             # If editing fails, fallback to sending a new message with the video
             fallback_success, fallback_msg = await send_video_message(
                 client,
@@ -963,7 +963,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         # Check if the current menu is still active and from the correct message
         current_active_menu = active_menus.get(user_id)
         if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
-            logger.warning(f"User {user_id} tried to navigate next but menu expired or callback not from active menu.")
+            logger.warning(f"User {user_id} tried to navigate next but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
             await callback_query.answer("Menu expired. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
                 try:
@@ -1010,7 +1010,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for next video: {sent_message_or_error}. Attempting to send new message.")
-            await callback_query.answer(sent_message_or_error, show_alert=True)
+            await callback_query.answer(f"❌ Failed to load next video: {sent_message_or_error}. Sending new message... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, video, reply_markup=video_nav_keyboard(video['uuid'], category, user_id))
             if fallback_success and isinstance(fallback_msg, Message):
@@ -1044,7 +1044,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         # Check if the current menu is still active and from the correct message
         current_active_menu = active_menus.get(user_id)
         if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
-            logger.warning(f"User {user_id} tried to navigate previous but menu expired or callback not from active menu.")
+            logger.warning(f"User {user_id} tried to navigate previous but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
             await callback_query.answer("Menu expired. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
                 try:
@@ -1088,7 +1088,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for previous video: {sent_message_or_error}. Attempting to send new message.")
-            await callback_query.answer(sent_message_or_error, show_alert=True)
+            await callback_query.answer(f"❌ Failed to load previous video: {sent_message_or_error}. Sending new message... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, found_video, reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id))
             if fallback_success and isinstance(fallback_msg, Message):
@@ -1118,7 +1118,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         # Before showing categories, ensure this callback comes from the *currently active* menu message
         current_active_menu = active_menus.get(user_id)
         if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
-            logger.warning(f"User {user_id} tried to change category but menu expired or callback not from active menu.")
+            logger.warning(f"User {user_id} tried to change category but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
             await callback_query.answer("Menu expired or not active. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
                 try:
@@ -1138,16 +1138,11 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             return
 
         try:
-            # Option 1: Edit only caption and reply_markup, KEEPING THE CURRENT VIDEO
+            # Edit only caption and reply_markup of the existing message
             await callback_query.message.edit_caption(
                 caption="🎬 <b>Choose a Category:</b>",
                 reply_markup=category_keyboard()
             )
-            # You might need to edit reply_markup separately if edit_caption doesn't support it directly in your Pyrogram version
-            # If the above fails, you can try:
-            # await callback_query.message.edit_reply_markup(reply_markup=category_keyboard())
-            # await callback_query.message.edit_caption(caption="🎬 <b>Choose a Category:</b>")
-
             logger.info(f"User {user_id} edited message to show change category menu (caption/markup only).")
             await callback_query.answer() # Answer the callback query
             # Update the timestamp of the active menu to reset its expiration
@@ -1229,7 +1224,7 @@ async def refresh_token_btn(client: Client, message: Message):
 
         logger.info(f"User {user_id}: User does not have valid token. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-        long_url = f"https://telegram.dog/{config.BOT_USERNAME[1:]}?start=token_{ad_code}" # Corrected URL format
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}" # Corrected URL format
         ad_url = await shorten_url(long_url)
         logger.info(f"User {user_id}: shorten_url call completed. Result: {ad_url}")
         
@@ -1237,7 +1232,7 @@ async def refresh_token_btn(client: Client, message: Message):
             await temp_msg.delete()
 
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{config.BOT_USERNAME[1:]}"): # Corrected URL format
+        if ad_url.startswith(f"https://t.me/{config.BOT_USERNAME[1:]}"): # Corrected URL format
             logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
             disable_preview = True # Disable preview for long Telegram links
 
@@ -1270,11 +1265,11 @@ async def send_token_earning_options(client: Client, message: Message):
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-        long_url = f"https://telegram.dog/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await shorten_url(long_url)
         
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{config.BOT_USERNAME[1:]}"):
+        if ad_url.startswith(f"https://t.me/{config.BOT_USERNAME[1:]}"):
             logger.warning(f"User {user_id} URL shortening failed for send_token_earning_options. Using long URL: {ad_url}")
             disable_preview = True
 
