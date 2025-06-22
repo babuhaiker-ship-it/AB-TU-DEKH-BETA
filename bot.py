@@ -923,7 +923,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for category selection: {sent_message_or_error}. Attempting to send new message.")
-            await callback_query.answer(f"❌ Failed to load video: {sent_message_or_error}. Sending new message... 😥", show_alert=True)
+            # **FIX: Shorten the error message sent to callback_query.answer**
+            await callback_query.answer("❌ Failed to load video. Sending new message... 😥", show_alert=True)
             # If editing fails, fallback to sending a new message with the video
             fallback_success, fallback_msg = await send_video_message(
                 client,
@@ -1010,7 +1011,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for next video: {sent_message_or_error}. Attempting to send new message.")
-            await callback_query.answer(f"❌ Failed to load next video: {sent_message_or_error}. Sending new message... 😥", show_alert=True)
+            # **FIX: Shorten the error message sent to callback_query.answer**
+            await callback_query.answer("❌ Failed to load next video. Sending new message... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, video, reply_markup=video_nav_keyboard(video['uuid'], category, user_id))
             if fallback_success and isinstance(fallback_msg, Message):
@@ -1088,7 +1090,8 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for previous video: {sent_message_or_error}. Attempting to send new message.")
-            await callback_query.answer(f"❌ Failed to load previous video: {sent_message_or_error}. Sending new message... 😥", show_alert=True)
+            # **FIX: Shorten the error message sent to callback_query.answer**
+            await callback_query.answer("❌ Failed to load previous video. Sending new message... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, found_video, reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id))
             if fallback_success and isinstance(fallback_msg, Message):
