@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 class BotConfig:
     """Centralized configuration for the bot."""
-    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic'
+    BOT_TOKEN = '7213744072:AAGBVd48RO44umuw3XZO-zVD6HX7ZYQzS84'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@Testingnyraa_bot' # Ensure this starts with @
+    BOT_USERNAME = '@Spicynyraabot' # Ensure this starts with @
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Ensure this is correct and bot is admin with posting rights
