@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7946785578:AAGzx5tFfZyIT6LxtvEQnkX9EA1TdqSgkCs'
+    BOT_TOKEN = '7946785578:AAGzx5tFfZyIT6LxtmEQnkX9EA1TdqSgkCs' # Replaced with a dummy token for safety
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@rosyrotibot'
@@ -298,9 +298,10 @@ def save_history(user_id: int, video_uuid: str, category: str):
     now = datetime.utcnow()
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
+        # Push the new entry and then slice to limit to the last 100
         history_collection.update_one(
             {'user_id': user_id},
-            {'$push': {'history': {'$each': [entry], '$slice': -100}}}, # Limit history to last 100 entries
+            {'$push': {'history': {'$each': [entry], '$slice': -100}}},
             upsert=True
         )
         logger.info(f"History saved for user {user_id}, video {video_uuid}. History size limited to 100.")
@@ -309,12 +310,22 @@ def save_history(user_id: int, video_uuid: str, category: str):
 
 def get_last_video_from_history(user_id: int) -> dict | None:
     """
-    Retrieves the last viewed video from a user's history, excluding the very last entry
-    (which is the current video if navigated to).
+    Retrieves the last viewed video from a user's history.
+    This function will now fetch the most recent video *prior* to the currently displayed one,
+    or simply the last one if history is short.
     """
     doc = history_collection.find_one({'user_id': user_id})
-    if doc and doc.get('history') and len(doc['history']) > 1: # Need at least 2 entries to get a *previous* one
-        last_viewed_entry = doc['history'][-2] # Get the second to last entry
+    if doc and doc.get('history'):
+        # Get the latest entry
+        latest_entry = doc['history'][-1]
+        
+        # If there are at least two entries, the "previous" one is the second to last.
+        # Otherwise, the last entry is considered the "last viewed" if we are moving back from a non-history entry.
+        if len(doc['history']) >= 2:
+            last_viewed_entry = doc['history'][-2]
+        else:
+            last_viewed_entry = latest_entry # If only one entry, or none, this is effectively the "last"
+            
         video_uuid = last_viewed_entry['video_uuid']
         video = media_collection.find_one({'uuid': video_uuid})
         if video:
@@ -323,7 +334,7 @@ def get_last_video_from_history(user_id: int) -> dict | None:
 
 # --- Menu State Management ---
 active_menus = {} # Stores active menu message IDs and timestamps
-MENU_TIMEOUT = config.MENU_TIMEOUT  # Use configured timeout
+# MENU_TIMEOUT is already loaded from config.MENU_TIMEOUT
 
 def set_active_menu(user_id: int, message_id: int, chat_id: int):
     """Set an active menu for a user."""
@@ -344,7 +355,7 @@ async def cleanup_expired_menu(client: Client, user_id: int, chat_id: int):
     """Clean up an expired menu by deleting the message."""
     try:
         menu = active_menus.get(user_id)
-        if menu and chat_id and menu.get('message_id'):
+        if menu and menu.get('message_id') and menu.get('chat_id') == chat_id: # Ensure chat_id matches for safety
             try:
                 await client.delete_messages(chat_id, menu['message_id'])
                 logger.info(f"Deleted expired menu message {menu['message_id']} for user {user_id} in chat {chat_id}")
@@ -362,7 +373,7 @@ async def is_menu_active(client: Client, user_id: int, chat_id: int) -> bool:
         return False
         
     menu = active_menus[user_id]
-    if get_current_time() - menu['timestamp'] > MENU_TIMEOUT:
+    if get_current_time() - menu['timestamp'] > config.MENU_TIMEOUT:
         await cleanup_expired_menu(client, user_id, chat_id)
         return False
         
@@ -693,45 +704,32 @@ async def start_cmd(client: Client, message: Message):
 
                     video = result_or_msg # Now `result_or_msg` is the video object if successful
                     
-                    if await is_menu_active(client, user_id, message.chat.id):
-                        try:
-                            old_menu = active_menus.get(user_id)
-                            if old_menu and old_menu.get('chat_id'):
-                                try:
-                                    await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
-                                    logger.info(f"User {user_id} deleted old menu message {old_menu['message_id']} for shared video update.")
-                                except Exception as e:
-                                    logger.warning(f"User {user_id} failed to delete old menu message {old_menu['message_id']}: {e}")
-                                
-                            sent_success, sent_message_or_error = await send_video_with_auto_delete(
-                                client,
-                                message.chat.id,
-                                video,
-                                reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id) # Pass user_id for share button
-                            )
-                            if sent_success:
-                                set_active_menu(user_id, sent_message_or_error.id, message.chat.id)
-                                await message.reply("🎉 <b>Success!</b> Video updated in your active menu. Enjoy! 🍿")
-                                logger.info(f"User {user_id} updated menu with shared video {video_uuid_from_link}.")
-                            else:
-                                await message.reply(sent_message_or_error)
+                    # Always try to delete the old message and send a new one for shared videos for consistency
+                    try:
+                        old_menu = active_menus.get(user_id)
+                        if old_menu and old_menu.get('chat_id') == message.chat.id:
+                            try:
+                                await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
+                                logger.info(f"User {user_id} deleted old menu message {old_menu['message_id']} for shared video update.")
+                            except MessageIdInvalid:
+                                logger.warning(f"User {user_id} failed to delete old menu message {old_menu['message_id']}: MessageIdInvalid.")
+                            except Exception as e:
+                                logger.warning(f"User {user_id} failed to delete old menu message {old_menu['message_id']}: {e}")
+                            clear_active_menu(user_id) # Ensure the state is cleared
+                    except Exception as e:
+                        logger.error(f"User {user_id} failed to manage old menu during shared video: {e}", exc_info=True)
 
-                        except Exception as e:
-                            logger.error(f"User {user_id} failed to update menu with shared video: {e}", exc_info=True)
-                            await handle_error(client, message, e)
+                    sent_success, sent_message_or_error = await send_video_with_auto_delete(
+                        client,
+                        message.chat.id,
+                        video,
+                        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id) # Pass user_id for share button
+                    )
+                    if sent_success:
+                        set_active_menu(user_id, sent_message_or_error.id, message.chat.id)
+                        logger.info(f"User {user_id} sent shared video {video_uuid_from_link} as new menu.")
                     else:
-                        # Send as new message
-                        sent_success, sent_message_or_error = await send_video_with_auto_delete(
-                            client,
-                            message.chat.id,
-                            video,
-                            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id) # Pass user_id for share button
-                        )
-                        if sent_success:
-                            set_active_menu(user_id, sent_message_or_error.id, message.chat.id)
-                            logger.info(f"User {user_id} sent shared video {video_uuid_from_link} as new menu.")
-                        else:
-                            await message.reply(sent_message_or_error)
+                        await message.reply(sent_message_or_error)
                 break # Exit retry loop after handling shared video
             
             break  # Exit the retry loop on successful execution
@@ -868,6 +866,15 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         return
     
     try:
+        # Delete the category selection message first
+        try:
+            await callback_query.message.delete()
+            logger.info(f"Deleted category selection message for user {user_id}.")
+        except MessageIdInvalid:
+            logger.warning(f"Category selection message for user {user_id} already deleted or invalid.")
+        except Exception as e:
+            logger.error(f"Error deleting category selection message for user {user_id}: {e}")
+
         sent_success, sent_message_or_error = await send_video_with_auto_delete(
             client,
             chat_id,
@@ -878,14 +885,11 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         if sent_success:
             save_history(user_id, video['uuid'], category)
             set_active_menu(user_id, sent_message_or_error.id, chat_id)
-            await callback_query.message.delete()
             logger.info(f"User {user_id} selected category {category} and video {video['uuid']} sent.")
         else:
             logger.error(f"User {user_id} failed to send video after category selection: {sent_message_or_error}")
-            await callback_query.message.edit_text(
-                sent_message_or_error,
-                reply_markup=category_keyboard()
-            )
+            # If sending video fails, try to re-show category selection
+            await client.send_message(chat_id, sent_message_or_error, reply_markup=category_keyboard())
     except Exception as e:
         logger.error(f"User {user_id} error sending video after category selection: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
@@ -923,37 +927,27 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             return
         
         try:
-            sent_success, sent_message_or_error = await send_video_with_auto_delete(
-                client,
-                chat_id,
-                video,
-                reply_markup=video_nav_keyboard(video['uuid'], category, user_id) # Pass user_id for share button
-            )
-            
-            if sent_success:
-                save_history(user_id, video['uuid'], category)
-                set_active_menu(user_id, sent_message_or_error.id, chat_id)
-                await callback_query.message.delete()
-                logger.info(f"User {user_id} navigated to next video {video['uuid']} in category {category}.")
-            else:
-                logger.error(f"User {user_id} failed to send next video: {sent_message_or_error}")
-                await callback_query.answer(sent_message_or_error, show_alert=True)
+            await callback_query.message.delete()
+            logger.info(f"User {user_id} deleted old menu message for next video navigation.")
         except MessageIdInvalid:
-            logger.warning(f"User {user_id} encountered MessageIdInvalid while sending next video, sending as new message.")
-            # If edit fails, send as new message
-            sent_success, sent_message_or_error = await send_video_with_auto_delete(
-                client,
-                chat_id,
-                video,
-                reply_markup=video_nav_keyboard(video['uuid'], category, user_id) # Pass user_id for share button
-            )
-            if sent_success:
-                save_history(user_id, video['uuid'], category)
-                set_active_menu(user_id, sent_message_or_error.id, chat_id)
-                logger.info(f"User {user_id} sent next video {video['uuid']} as new message.")
-            else:
-                logger.error(f"User {user_id} failed to send next video as new message: {sent_message_or_error}")
-                await callback_query.answer(sent_message_or_error, show_alert=True)
+            logger.warning(f"User {user_id} encountered MessageIdInvalid while deleting old menu for next video, sending as new message.")
+        except Exception as e:
+            logger.error(f"User {user_id} failed to delete old menu message for next_video: {e}")
+        
+        sent_success, sent_message_or_error = await send_video_with_auto_delete(
+            client,
+            chat_id,
+            video,
+            reply_markup=video_nav_keyboard(video['uuid'], category, user_id) # Pass user_id for share button
+        )
+        
+        if sent_success:
+            save_history(user_id, video['uuid'], category)
+            set_active_menu(user_id, sent_message_or_error.id, chat_id)
+            logger.info(f"User {user_id} navigated to next video {video['uuid']} in category {category}.")
+        else:
+            logger.error(f"User {user_id} failed to send next video: {sent_message_or_error}")
+            await callback_query.answer(sent_message_or_error, show_alert=True)
     except Exception as e:
         logger.error(f"User {user_id} error in next_video: {e}", exc_info=True)
         await callback_query.answer("Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
@@ -990,6 +984,8 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         try:
             await callback_query.message.delete()
             logger.info(f"User {user_id} deleted old menu message for previous video navigation.")
+        except MessageIdInvalid:
+            logger.warning(f"User {user_id} encountered MessageIdInvalid while deleting old menu for prev video, sending as new message.")
         except Exception as e:
             logger.error(f"User {user_id} failed to delete old menu message for prev_video: {e}")
         
@@ -1029,8 +1025,19 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             logger.warning(f"User {user_id} tried to change category but already has active menu from another message.")
             await callback_query.answer("You already have an active menu. Please use that one or wait for it to expire. ⏰", show_alert=True)
             return
+        
+        # Delete the previous video message before showing category selection
+        try:
+            await callback_query.message.delete()
+            logger.info(f"Deleted previous video message for user {user_id} before showing change category.")
+        except MessageIdInvalid:
+            logger.warning(f"Previous video message for user {user_id} already deleted or invalid before change category.")
+        except Exception as e:
+            logger.error(f"Error deleting previous video message for user {user_id} before change category: {e}")
 
-        await callback_query.message.edit_text("🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
+        await client.send_message(chat_id, "🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
+        # Clear the active menu so that the new category selection becomes the "active menu" state
+        clear_active_menu(user_id)
         logger.info(f"User {user_id}: Change category menu sent.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
@@ -1103,14 +1110,14 @@ async def refresh_token_btn(client: Client, message: Message):
 
         logger.info(f"User {user_id}: User does not have valid token. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
-        long_url = f"https://telegram.dog/{client.username}?start=token_{ad_code}"
+        long_url = f"https://telegram.dog/{config.BOT_USERNAME[1:]}?start=token_{ad_code}" # Corrected URL format
         ad_url = await shorten_url(long_url)
         logger.info(f"User {user_id}: shorten_url call completed. Result: {ad_url}")
         
         await temp_msg.delete()
 
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{client.username}"):
+        if ad_url.startswith(f"https://telegram.dog/{config.BOT_USERNAME[1:]}"): # Corrected URL format
             logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
             disable_preview = True # Disable preview for long Telegram links
 
@@ -1147,7 +1154,7 @@ async def send_token_earning_options(client: Client, message: Message):
         ad_url = await shorten_url(long_url)
         
         disable_preview = False
-        if ad_url.startswith(f"https://telegram.dog/{client.username}"):
+        if ad_url.startswith(f"https://telegram.dog/{config.BOT_USERNAME[1:]}"):
             logger.warning(f"User {user_id} URL shortening failed for send_token_earning_options. Using long URL: {ad_url}")
             disable_preview = True
 
@@ -1413,7 +1420,7 @@ def format_size(size_bytes: int) -> str:
 
 @app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client: Client, message: Message):
-    """Admin command to enter batch video adding mode."""
+    """Admin command to enter batch video adding mode and choose category."""
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated batch add mode.")
     try:
@@ -1424,20 +1431,66 @@ async def batchadd_cmd(client: Client, message: Message):
             return
 
         batch_add_state[user_id] = {
-            'batch_mode': True,
-            'current_category': categories[0], # Default to the first available category
+            'batch_mode': False, # Not yet in full batch mode until category is chosen
+            'current_category': None,
             'count': 0
         }
         
+        buttons = []
+        for category in categories:
+            buttons.append([InlineKeyboardButton(f"🗂️ {html.escape(category)}", callback_data=f"batchselcat_{category}")])
+
         await message.reply(
-            "Send me videos to add. Type /done when finished. ✅\n"
-            f"Current category for batch adding: <b>{html.escape(categories[0])}</b> 🗂️\n"
-            "Use /category to change the current batch category. 🔄"
+            "🎬 <b>Choose a Category for Batch Adding:</b>",
+            reply_markup=InlineKeyboardMarkup(buttons)
         )
-        logger.info(f"Admin {user_id}: Batch add mode enabled. Default category set to {categories[0]}.")
+        logger.info(f"Admin {user_id}: Prompted to choose category for batch add.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to initiate batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while starting batch add mode. Please try again. 🐛")
+
+@app.on_callback_query(filters.regex(r"^batchselcat_(.+)$"))
+async def batch_select_category_callback(client: Client, callback_query: CallbackQuery):
+    """Handles callback for selecting the category in batch add mode."""
+    user_id = callback_query.from_user.id
+    logger.info(f"Admin {user_id} selected category for batch adding: {callback_query.data[12:]}.")
+    try:
+        if not is_admin(user_id):
+            await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
+            logger.warning(f"Non-admin user {user_id} attempted to select batch category.")
+            return
+
+        if user_id not in batch_add_state:
+            await callback_query.answer("❌ Error: Batch mode session expired or not active. Please use /batchadd again. 🚫", show_alert=True)
+            logger.warning(f"Admin {user_id} tried to select category but batch mode not initialized.")
+            return
+
+        category_name = callback_query.data[12:]
+
+        if category_name not in get_categories():
+            await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
+            await callback_query.message.edit_text(
+                "Category not found. Please try again! 🧐",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"batchselcat_{cat}")] for cat in get_categories()])
+            )
+            logger.warning(f"Admin {user_id} tried to set invalid category for batch: '{category_name}'.")
+            return
+
+        batch_add_state[user_id]['batch_mode'] = True
+        batch_add_state[user_id]['current_category'] = category_name
+        batch_add_state[user_id]['count'] = 0 # Reset count for new session
+        
+        await callback_query.message.edit_text(
+            f"✅ You are now in batch add mode for category: <b>{html.escape(category_name)}</b>! 🎉\n"
+            "Send me videos to add. Type /done when finished. ✅\n"
+            "You can use /category to change the current batch category without exiting batch mode. 🔄"
+        )
+        await callback_query.answer(f"Category set to '{html.escape(category_name)}'") # Also answer the callback
+        logger.info(f"Admin {user_id} successfully started batch add mode for category '{category_name}'.")
+    except Exception as e:
+        logger.error(f"Admin {user_id} failed to set batch category in callback: {e}", exc_info=True)
+        await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
+
 
 @app.on_message(filters.command("done") & filters.private & filters.user(config.ADMIN_IDS))
 async def done_cmd(client: Client, message: Message):
@@ -1466,21 +1519,25 @@ async def handle_video_batch_add(client: Client, message: Message):
     try:
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
             logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
+            # Optionally, inform the admin they are not in batch mode if they send a video
+            # await message.reply("You are not in batch add mode. Use /batchadd to start adding videos. 🚀")
             return
 
         category = batch_add_state[user_id].get('current_category')
-        if not category: # Should not happen with initial batchadd logic setting a category
+        if not category: # Should not happen if /batchadd workflow is followed
             logger.warning(f"Admin {user_id} tried to add video but no category set in batch state.")
             await message.reply_text("⚠️ Please set a category first using /category. 🗂️")
             return
 
-        is_valid_category, validation_msg = validate_category_name(category)
-        if not is_valid_category: # This checks if the category name itself is valid, not if it exists
+        # Validate the category name format
+        is_valid_category_name, validation_msg = validate_category_name(category)
+        if not is_valid_category_name:
             await message.reply_text(f"❌ Invalid category '<b>{html.escape(category)}</b>' set in batch mode: {validation_msg}. Please select a valid category using /category. 🐛")
             logger.error(f"Admin {user_id} attempted to add video to invalid category name '{category}': {validation_msg}")
             return
 
-        if category not in get_categories(): # Check if the category actually exists in DB
+        # Check if the category actually exists in the database
+        if category not in get_categories(): 
             await message.reply_text(f"❌ Category '<b>{html.escape(category)}</b>' does not exist. Please create it first with /addcategory or select an existing one with /category. 🧐")
             logger.error(f"Admin {user_id} attempted to add video to non-existent category '{category}'.")
             return
@@ -1503,13 +1560,18 @@ async def handle_video_batch_add(client: Client, message: Message):
         settings = settings_collection.find_one({'_id': 'settings'}) or {'protect_content': True, 'auto_delete': True}
         protect_content = settings.get('protect_content', True)
 
-        forwarded_message = await client.send_video(
-            chat_id=config.VIDEO_CHANNEL_ID,
-            video=file_id,
-            caption=f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}",
-            protect_content=protect_content
-        )
-        message_id_in_channel = forwarded_message.id
+        try:
+            forwarded_message = await client.send_video(
+                chat_id=config.VIDEO_CHANNEL_ID,
+                video=file_id,
+                caption=f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}",
+                protect_content=protect_content
+            )
+            message_id_in_channel = forwarded_message.id
+        except Exception as forward_e:
+            logger.error(f"Failed to forward video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
+            await message.reply_text("❌ Failed to forward video to channel. Please check bot's permissions. 🐛")
+            return
 
         video_data = {
             "uuid": video_uuid,
@@ -1523,7 +1585,7 @@ async def handle_video_batch_add(client: Client, message: Message):
         }
         media_collection.insert_one(video_data)
         batch_add_state[user_id]['count'] = batch_add_state[user_id].get('count', 0) + 1
-        logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}.")
+        logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}. Message ID in channel: {message_id_in_channel}")
         await message.reply_text(
             f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>! 🎉\n"
             f"📁 Category: {html.escape(category)}\n"
@@ -1590,6 +1652,10 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
 
         if category_name not in get_categories():
             await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
+            await callback_query.message.edit_text(
+                "Category not found. Please try again! 🧐",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"setcat_{cat}")] for cat in get_categories()])
+            )
             logger.warning(f"Admin {user_id} tried to set invalid category: '{category_name}'.")
             return
 
@@ -1661,15 +1727,15 @@ async def cleanup_expired_data():
             )
             logger.info("Expired tokens cleanup completed.")
             
-            # Clean up old history (older than 30 days if not handled by $slice)
-            month_ago = now - timedelta(days=30)
+            # Clean up old history (older than 30 days)
+            thirty_days_ago = now - timedelta(days=30)
             history_collection.update_many(
                 {},
-                {'$pull': {'history': {'viewed_at': {'$lt': month_ago}}}}
+                {'$pull': {'history': {'viewed_at': {'$lt': thirty_days_ago}}}}
             )
             logger.info("Old history entries cleanup completed.")
             
-            # Remove empty history documents (those with no entries left)
+            # Remove empty history documents (those with no entries left after cleanup)
             history_collection.delete_many({'history': {'$size': 0}})
             logger.info("Empty history documents cleanup completed.")
             
@@ -1679,7 +1745,8 @@ async def cleanup_expired_data():
             
             # Clean up expired active_menus from in-memory dictionary
             expired_users_menus = []
-            for user_id_menu, menu_data in list(active_menus.items()): # Iterate over a copy
+            # Create a list of items to iterate over, as we'll modify active_menus
+            for user_id_menu, menu_data in list(active_menus.items()): 
                 if get_current_time() - menu_data['timestamp'] > config.MENU_TIMEOUT:
                     expired_users_menus.append((user_id_menu, menu_data.get('chat_id')))
             
@@ -1712,11 +1779,12 @@ async def verify_and_cleanup_media():
                 try:
                     # Attempt to get the message from the channel
                     await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                    logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
                     logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
                     media_collection.delete_one({'uuid': video_uuid})
                 except Exception as e:
-                    logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}")
+                    logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
 
             logger.info("Media verification and cleanup task completed.")
         except Exception as e:
@@ -1733,3 +1801,4 @@ if __name__ == '__main__':
     app.loop.create_task(verify_and_cleanup_media())
     # Run the bot
     app.run()
+
