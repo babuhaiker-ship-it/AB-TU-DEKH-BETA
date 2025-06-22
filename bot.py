@@ -509,7 +509,7 @@ async def send_video_message(client: Client, chat_id: int, video_data: dict, rep
             video_data['file_id'],
             caption=f"Category: {html.escape(video_data['category'])}",
             reply_markup=reply_markup,
-            protect_content=protect_content
+            protect_content=protect_content # Pass protect_content directly to send_video
         )
         return True, sent
     except Exception as e:
@@ -522,21 +522,22 @@ async def edit_video_message(client: Client, chat_id: int, message_id: int, vide
     Returns (success: bool, edited_message: Message | error_message: str)
     """
     settings = settings_collection.find_one({'_id': 'settings'}) or {}
-    protect_content = settings.get('protect_content', True) # apply protection setting if editing is allowed to change it.
+    protect_content = settings.get('protect_content', True)
     
     try:
-        # Use InputMediaVideo to specify the new video file, caption, and protection.
+        # Use InputMediaVideo to specify the new video file and caption.
+        # protect_content is passed directly to edit_message_media, not inside InputMediaVideo.
         media = InputMediaVideo(
             media=video_data['file_id'],
-            caption=f"Category: {html.escape(video_data['category'])}",
-            protect_content=protect_content
+            caption=f"Category: {html.escape(video_data['category'])}"
         )
         
         edited = await client.edit_message_media(
             chat_id=chat_id,
             message_id=message_id,
             media=media,
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            protect_content=protect_content # Pass protect_content directly to edit_message_media
         )
         return True, edited
     except MessageIdInvalid:
