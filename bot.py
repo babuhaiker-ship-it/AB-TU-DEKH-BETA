@@ -4,7 +4,8 @@ import uuid
 import base64
 import random
 import logging
-from datetime import datetime, timedelta, timezone # Import timezone
+import sys # Import sys for exiting on critical errors
+from datetime import datetime, timedelta, timezone 
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
@@ -20,19 +21,24 @@ import re
 import html
 
 # --- Logging Setup ---
+# Set the logging level for the root logger to INFO, and for pyrogram/asyncio to DEBUG
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# Configure Pyrogram's internal logger to DEBUG for more detailed connection/API logs
+logging.getLogger("pyrogram").setLevel(logging.DEBUG)
+logging.getLogger("asyncio").setLevel(logging.DEBUG) # Helps debug asyncio related issues
+
 # --- Configuration ---
 class BotConfig:
     """Centralized configuration for the bot."""
-    BOT_TOKEN = '7213744072:AAGBVd48RO44umuw3XZO-zVD6HX7ZYQzS84'
+    BOT_TOKEN = '7770483831:AAE2zVM2n4B4o1FnTipudnrQeb8k2k1t_1Y'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@Spicynyraabot' # Ensure this starts with @
+    BOT_USERNAME = '@Pyasirandbot' # Ensure this starts with @
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Ensure this is correct and bot is admin with posting rights
@@ -64,7 +70,7 @@ try:
 except Exception as e:
     logger.critical(f"Failed to load bot configuration: {e}")
     # Re-raise to prevent bot from starting with invalid config
-    raise RuntimeError(f"Bot configuration error: {e}")
+    sys.exit(1) # Exit with an error code
 
 # --- MongoDB Setup ---
 try:
@@ -90,7 +96,7 @@ try:
     logger.info("MongoDB collections and indexes initialized.")
 except Exception as e:
     logger.critical(f"Failed to connect to MongoDB or create indexes: {e}")
-    raise RuntimeError(f"MongoDB connection error: {e}")
+    sys.exit(1) # Exit with an error code
 
 # --- Pyrogram Client ---
 app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
@@ -1994,6 +2000,7 @@ async def verify_and_cleanup_media():
             if not app.is_connected:
                 logger.info("Waiting for Pyrogram client to connect before media verification...")
                 await asyncio.sleep(5) # Wait for 5 seconds and re-check
+                continue # Skip current iteration and re-check connection status
 
             all_media = list(media_collection.find({}))
             total_media_items = len(all_media)
@@ -2047,9 +2054,27 @@ if __name__ == '__main__':
     async def main_startup():
         """Main asynchronous function to start the Pyrogram client and schedule tasks."""
         try:
+            # Added a startup check for Pyrogram
+            @app.on_raw_update()
+            async def check_startup(client, update, users, chats):
+                # This raw update listener will trigger once the bot connects and receives any update.
+                # It's a simple way to confirm Pyrogram client is connected.
+                if not hasattr(client, '_startup_confirmed'):
+                    client._startup_confirmed = True
+                    logger.info("Pyrogram client connected and received first update.")
+
             await app.start()
-            logger.info("Pyrogram client started successfully.")
+            logger.info("Pyrogram client started attempting connection.")
             
+            # Give a small moment for initial connection status to propagate
+            await asyncio.sleep(2) 
+
+            if not app.is_connected:
+                logger.critical("Pyrogram client failed to connect after startup call. Check API_ID, API_HASH, BOT_TOKEN, and network.")
+                sys.exit(1) # Exit if connection truly fails
+
+            logger.info("Pyrogram client successfully connected.") # This log is now more reliable
+
             # Schedule periodic background tasks
             asyncio.create_task(cleanup_expired_data())
             asyncio.create_task(verify_and_cleanup_media())
@@ -2057,10 +2082,10 @@ if __name__ == '__main__':
             logger.info("Background tasks scheduled.")
             
             # Keep the bot running indefinitely, handling messages and callbacks
-            # Replaced app.idle() with asyncio.Event().wait()
             await asyncio.Event().wait() 
         except Exception as e:
             logger.critical(f"Fatal error during bot startup or idle: {e}", exc_info=True)
+            sys.exit(1) # Ensure graceful exit with error code
         finally:
             if app.is_connected:
                 await app.stop()
@@ -2068,5 +2093,10 @@ if __name__ == '__main__':
             logger.info("Bot execution finished.")
 
     # Run the main asynchronous function
-    asyncio.run(main_startup())
-
+    try:
+        asyncio.run(main_startup())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by KeyboardInterrupt.")
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main asyncio.run: {e}", exc_info=True)
+        sys.exit(1)
