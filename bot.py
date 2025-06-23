@@ -37,7 +37,7 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     URL_SHORTENER = 'https://api.linkshortify.com/st'
-    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
+    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc4' # Dummy key, ensure it's correct
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     # Customization options
@@ -1851,8 +1851,10 @@ async def startup_tasks(client: Client):
     """
     This function will be called automatically once the Pyrogram client has started successfully.
     All startup logic that requires the client to be active should be placed here.
+    It currently initiates the background tasks for cleanup and media verification.
     """
     logger.info("Pyrogram client is ready. Starting background tasks.")
+    # Schedule these tasks to run in the background
     app.loop.create_task(cleanup_expired_data())
     app.loop.create_task(verify_and_cleanup_media())
     logger.info("Background cleanup and media verification tasks initiated.")
@@ -1861,5 +1863,10 @@ async def startup_tasks(client: Client):
 # --- Main ---
 if __name__ == '__main__':
     logger.info("Bot starting...")
-    # Run the bot
+    # The app.run() method is a blocking call that starts the Pyrogram event loop.
+    # It internally handles the execution of @app.on_client_ready() decorated functions
+    # once the client is successfully connected.
+    # Therefore, app.run(startup()) is not the correct syntax if 'startup' is meant
+    # to be a custom async function to be run *after* the client starts.
+    # Instead, @app.on_client_ready() handles this as demonstrated by startup_tasks.
     app.run()
