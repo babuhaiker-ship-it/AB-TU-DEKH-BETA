@@ -994,7 +994,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         video = get_random_video(category)
         
         if not video:
-            logger.warning(f"No next video found in category '{category}' for user {user_id}.")
+            logger.warning(f"No more videos found in category '{category}' for user {user_id}.")
             await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
             return
         
