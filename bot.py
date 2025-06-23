@@ -501,7 +501,8 @@ async def send_video_message(client: Client, chat_id: int, video_data: dict, rep
     Returns (success: bool, sent_message: Message | error_message: str)
     """
     settings = settings_collection.find_one({'_id': 'settings'}) or {}
-    protect_content = settings.get('protect_content', True)
+    # Default to True for user-facing videos
+    protect_content_for_user = settings.get('protect_content', True) 
     
     try:
         sent = await client.send_video(
@@ -509,7 +510,7 @@ async def send_video_message(client: Client, chat_id: int, video_data: dict, rep
             video_data['file_id'],
             caption=f"Category: {html.escape(video_data['category'])}",
             reply_markup=reply_markup,
-            protect_content=protect_content
+            protect_content=protect_content_for_user
         )
         return True, sent
     except Exception as e:
@@ -1613,15 +1614,14 @@ async def handle_video_batch_add(client: Client, message: Message):
             return
 
         video_uuid = str(uuid.uuid4())
-        settings = settings_collection.find_one({'_id': 'settings'}) or {'protect_content': True, 'auto_delete': True}
-        protect_content = settings.get('protect_content', True)
-
+        
         try:
+            # When uploading to the VIDEO_CHANNEL_ID, set protect_content=False
             forwarded_message = await client.send_video(
                 chat_id=config.VIDEO_CHANNEL_ID,
                 video=file_id,
                 caption=f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}",
-                protect_content=protect_content
+                protect_content=False # IMPORTANT: Set to False for channel storage
             )
             message_id_in_channel = forwarded_message.id
         except Exception as forward_e:
@@ -1830,6 +1830,7 @@ async def verify_and_cleanup_media():
 
                 try:
                     # Attempt to get the message from the channel
+                    # This call requires the client to be started, hence moving it to on_client_ready
                     await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
                     logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
@@ -1845,11 +1846,20 @@ async def verify_and_cleanup_media():
         # Run every 6 hours
         await asyncio.sleep(6 * 3600)
 
+@app.on_client_ready()
+async def startup_tasks(client: Client):
+    """
+    This function will be called automatically once the Pyrogram client has started successfully.
+    All startup logic that requires the client to be active should be placed here.
+    """
+    logger.info("Pyrogram client is ready. Starting background tasks.")
+    app.loop.create_task(cleanup_expired_data())
+    app.loop.create_task(verify_and_cleanup_media())
+    logger.info("Background cleanup and media verification tasks initiated.")
+
+
 # --- Main ---
 if __name__ == '__main__':
     logger.info("Bot starting...")
-    # Start background cleanup tasks
-    app.loop.create_task(cleanup_expired_data())
-    app.loop.create_task(verify_and_cleanup_media())
     # Run the bot
     app.run()
