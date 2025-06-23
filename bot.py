@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAFK7siFferpBbfqokmPu4l_5fK6ytzhpiM'
+    BOT_TOKEN = '7213744072:AAFK7siFferpBbfqokpPu4l_5fK6ytzhpiM' # Replaced with a dummy token for safety
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot'
@@ -932,12 +932,20 @@ async def select_category(client: Client, callback_query: CallbackQuery):
                 reply_markup=video_nav_keyboard(video['uuid'], category, user_id)
             )
             if fallback_success and isinstance(fallback_msg, Message):
+                # Delete old menu if possible
+                try:
+                    await callback_query.message.delete()
+                    logger.info(f"Deleted old menu message {callback_query.message.id} for user {user_id} after fallback from category selection.")
+                except Exception as e:
+                    logger.warning(f"Failed to delete old menu message {callback_query.message.id} for user {user_id}: {e}")
+
                 settings = settings_collection.find_one({'_id': 'settings'}) or {}
                 if settings.get('auto_delete', True):
                     asyncio.create_task(schedule_auto_delete(fallback_msg))
                 save_history(user_id, video['uuid'], category)
                 # IMPORTANT: Update active menu with the new message ID
                 set_active_menu(user_id, fallback_msg.id, chat_id) 
+                await client.send_message(chat_id, "Your menu was recreated due to a Telegram limitation.") # Inform the user
                 logger.info(f"User {user_id} sent new video message as fallback after edit failure.")
             else:
                 await client.send_message(chat_id, "Failed to load video. Please try again. 😥")
@@ -1015,12 +1023,20 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, video, reply_markup=video_nav_keyboard(video['uuid'], category, user_id))
             if fallback_success and isinstance(fallback_msg, Message):
+                # Delete old menu if possible
+                try:
+                    await callback_query.message.delete()
+                    logger.info(f"Deleted old menu message {callback_query.message.id} for user {user_id} after fallback for next video.")
+                except Exception as e:
+                    logger.warning(f"Failed to delete old menu message {callback_query.message.id} for user {user_id}: {e}")
+
                 settings = settings_collection.find_one({'_id': 'settings'}) or {}
                 if settings.get('auto_delete', True):
                     asyncio.create_task(schedule_auto_delete(fallback_msg))
                 save_history(user_id, video['uuid'], category)
                 # IMPORTANT: Update active menu with the new message ID
                 set_active_menu(user_id, fallback_msg.id, chat_id) 
+                await client.send_message(chat_id, "Your menu was recreated due to a Telegram limitation.") # Inform the user
                 logger.info(f"User {user_id} sent new video message as fallback after edit failure for next video.")
             else:
                 await client.send_message(chat_id, "Failed to load next video. Please try again. 😥")
@@ -1094,12 +1110,20 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, found_video, reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id))
             if fallback_success and isinstance(fallback_msg, Message):
+                # Delete old menu if possible
+                try:
+                    await callback_query.message.delete()
+                    logger.info(f"Deleted old menu message {callback_query.message.id} for user {user_id} after fallback for previous video.")
+                except Exception as e:
+                    logger.warning(f"Failed to delete old menu message {callback_query.message.id} for user {user_id}: {e}")
+
                 settings = settings_collection.find_one({'_id': 'settings'}) or {}
                 if settings.get('auto_delete', True):
                     asyncio.create_task(schedule_auto_delete(fallback_msg))
                 # Removed save_history here as it's not a new view but a navigation back
                 # IMPORTANT: Update active menu with the new message ID
                 set_active_menu(user_id, fallback_msg.id, chat_id)
+                await client.send_message(chat_id, "Your menu was recreated due to a Telegram limitation.") # Inform the user
                 logger.info(f"User {user_id} sent new video message as fallback after edit failure for previous video.")
             else:
                 await client.send_message(chat_id, "Failed to load previous video. Please try again. 😥")
@@ -1157,6 +1181,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             sent_message = await client.send_message(chat_id, "🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
             # IMPORTANT: Update active menu with the new message ID
             set_active_menu(user_id, sent_message.id, chat_id) 
+            await client.send_message(chat_id, "Your menu was recreated due to a Telegram limitation.") # Inform the user
     except Exception as e:
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
@@ -1221,7 +1246,8 @@ async def refresh_token_btn(client: Client, message: Message):
         logger.info(f"User {user_id}: 'Please wait...' message sent. Checking for existing token.")
 
         if user_has_token(user_id):
-            await temp_msg.delete()
+            if temp_msg:
+                await temp_msg.delete()
             await message.reply("💡 You already have an active token. No need to refresh yet! Enjoy the videos! 🥳")
             logger.info(f"User {user_id} attempted token refresh but already has valid tokens. Exiting.")
             return
@@ -1672,7 +1698,7 @@ async def handle_video_batch_add(client: Client, message: Message):
 
         if media_collection.find_one({"file_unique_id": file_unique_id}):
             logger.warning(f"Admin {user_id} attempted to add duplicate video: {file_unique_id}.")
-            await message.reply_text("⚠️ This video has already been added. Skipping. ⏩")
+            await message.reply_text("⚠️ This video has already been added. Skipping.⏩")
             return
 
         video_uuid = str(uuid.uuid4())
