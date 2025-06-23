@@ -7,8 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery,
-    InputMediaVideo # Import for editing media (though we'll remove its usage for next/prev)
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
 )
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait
 from pymongo import MongoClient, ASCENDING, ReturnDocument
@@ -44,7 +43,7 @@ class BotConfig:
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
-    MENU_TIMEOUT = 3600 # 1 hour in seconds for menu to expire
+    MENU_TIMEOUT = 3600 # 1 hour in seconds for menu to expire (time after which active menu is considered expired)
 
 try:
     config = BotConfig()
@@ -325,7 +324,8 @@ def get_last_video_from_history(user_id: int) -> dict | None:
     return None
 
 # --- Menu State Management ---
-active_menus = {} # Stores active menu message IDs and timestamps {user_id: {'message_id': int, 'timestamp': int, 'chat_id': int}}
+# Stores active menu message IDs and timestamps {user_id: {'message_id': int, 'timestamp': int, 'chat_id': int}}
+active_menus = {} 
 
 def set_active_menu(user_id: int, message_id: int, chat_id: int):
     """Set an active menu for a user."""
@@ -359,18 +359,6 @@ async def cleanup_expired_menu(client: Client, user_id: int, chat_id: int):
             logger.error(f"Failed to delete expired menu message {menu['message_id']} for user {user_id} in chat {chat_id}: {e}")
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
     clear_active_menu(user_id)
-
-async def is_menu_active(client: Client, user_id: int, chat_id: int) -> bool:
-    """Check if a user has an active menu and clean up if expired."""
-    if user_id not in active_menus:
-        return False
-        
-    menu = active_menus[user_id]
-    if get_current_time() - menu['timestamp'] > config.MENU_TIMEOUT:
-        await cleanup_expired_menu(client, user_id, chat_id)
-        return False
-        
-    return True
 
 # --- Keyboards ---
 async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
@@ -517,7 +505,6 @@ async def send_video_message(client: Client, chat_id: int, video_data: dict, rep
         logger.error(f"Failed to send video to chat {chat_id}: {e}")
         return False, f"❌ <b>Failed to send video.</b>\nReason: {e}\nPlease try again later. 😥"
 
-# New function for sending video with auto-delete and managing active menu
 async def send_video_with_auto_delete(client: Client, chat_id: int, video_data: dict, reply_markup: InlineKeyboardMarkup = None, old_message_id: int = None) -> tuple[bool, Message | str]:
     """
     Sends a new video message, schedules its auto-deletion, and updates the active menu.
@@ -1160,7 +1147,7 @@ async def refresh_token_btn(client: Client, message: Message):
         if user_has_token(user_id):
             if temp_msg:
                 await temp_msg.delete()
-            await message.reply("💡 You already have an active token. No need to refresh yet! Enjoy the videos! 🥳")
+            await message.reply("💡 You already have an Factive token. No need to refresh yet! Enjoy the videos! 🥳")
             logger.info(f"User {user_id} attempted token refresh but already has valid tokens. Exiting.")
             return
 
@@ -1783,10 +1770,6 @@ async def cleanup_expired_data():
             )
             logger.info("Expired tokens cleanup completed.")
             
-            # Clean up old history (older than 30 days - or keep only last 100 entries, already handled by save_history)
-            # The save_history function uses $slice to keep only the last 100, so explicit age-based cleanup might be redundant
-            # if 100 entries covers less than 30 days for very active users. Sticking to $slice for history length management.
-            
             # Remove empty history documents (those with no entries left after cleanup)
             history_collection.delete_many({'history': {'$size': 0}})
             logger.info("Empty history documents cleanup completed.")
@@ -1845,22 +1828,21 @@ async def verify_and_cleanup_media():
         # Run every 6 hours
         await asyncio.sleep(6 * 3600)
 
-async def startup():
+@app.on_ready()
+async def startup_tasks(client):
     """
-    This function contains all the logic that should run once the bot starts.
+    This function contains all the logic that should run once the bot starts and is ready.
     It initiates background tasks for cleanup and media verification.
     """
     logger.info("Bot has started. Initiating background cleanup and media verification tasks.")
-    app.loop.create_task(cleanup_expired_data())
-    app.loop.create_task(verify_and_cleanup_media())
+    # Ensure these are created as tasks that run independently
+    asyncio.create_task(cleanup_expired_data())
+    asyncio.create_task(verify_and_cleanup_media())
     logger.info("Background tasks initiated successfully.")
 
 # --- Main ---
 if __name__ == '__main__':
     logger.info("Bot starting...")
-    # Use app.start() to run the bot and then call the startup function
-    # app.run() is a blocking call that starts the client and keeps it running.
-    # The startup logic should be within the client's lifecycle,
-    # and on_client_ready is the appropriate Pyrogram way.
-    # We will simply run the app, and the @app.on_client_ready() will handle the rest.
-    app.run()
+    app.run() # This is a blocking call that starts the client and keeps it running.
+              # The startup_tasks function will be called automatically when the client is ready.
+
