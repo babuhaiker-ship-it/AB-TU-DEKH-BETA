@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAFK7siFferpBbfqokmPu4l_5fK6ytzhpiM' # Replaced with a dummy token for safety
+    BOT_TOKEN = '7213744072:AAFK7siFferpBbfqokpPu4l_5fK6ytzhpiM' # Replaced with a dummy token for safety
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot'
@@ -857,7 +857,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     logger.info(f"User {user_id} selected category: {category}.")
     
     if await is_rate_limited(user_id):
-        await callback_query.answer("⚠️ You're changing categories too quickly. Please wait a minute and try again.", show_alert=True)
+        await callback_query.answer("⚠️ Too many category changes. Wait 1 min. ⏳", show_alert=True)
         logger.warning(f"User {user_id} hit rate limit in select_category.")
         return
         
@@ -865,7 +865,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     current_active_menu = active_menus.get(user_id)
     if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
         logger.warning(f"User {user_id} tried to select category but current menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
-        await callback_query.answer("Menu expired or not active. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
+        await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
         # Attempt to delete the old message if it's not the current active one, then clear state
         if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
             try:
@@ -882,7 +882,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     # Ensure category exists and sanitize input
     if category not in get_categories():
         logger.warning(f"User {user_id} selected invalid category '{category}'.")
-        await callback_query.answer("Category not found. Please try again! 🧐", show_alert=True)
+        await callback_query.answer("Category not found. Try again! 🧐", show_alert=True)
         await callback_query.message.edit_text(
             "Category not found. Try another! 🧐",
             reply_markup=category_keyboard()
@@ -923,7 +923,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for category selection: {sent_message_or_error}. Attempting to send new message.")
-            # **FIX: Shorten the error message sent to callback_query.answer**
             await callback_query.answer("❌ Failed to load video. Sending new message... 😥", show_alert=True)
             # If editing fails, fallback to sending a new message with the video
             fallback_success, fallback_msg = await send_video_message(
@@ -958,7 +957,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         _, current_uuid, category = callback_query.data.split('_') # We still extract these for logging/context
         
         if await is_rate_limited(user_id):
-            await callback_query.answer("⚠️ You're Browse too quickly. Please wait a minute and try again. ⏳", show_alert=True)
+            await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
             logger.warning(f"User {user_id} hit rate limit in next_video.")
             return
 
@@ -966,7 +965,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         current_active_menu = active_menus.get(user_id)
         if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
             logger.warning(f"User {user_id} tried to navigate next but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
-            await callback_query.answer("Menu expired. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
+            await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
                 try:
                     await callback_query.message.delete()
@@ -981,7 +980,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         # Ensure category exists and sanitize input
         if category not in get_categories():
             logger.warning(f"User {user_id} used invalid category '{category}' for next video.")
-            await callback_query.answer("Category not found. Please try 'Change Category'! 🧐", show_alert=True)
+            await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
             return
         
         video = get_random_video(category)
@@ -1012,8 +1011,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for next video: {sent_message_or_error}. Attempting to send new message.")
-            # **FIX: Shorten the error message sent to callback_query.answer**
-            await callback_query.answer("❌ Failed to load next video. Sending new message... 😥", show_alert=True)
+            await callback_query.answer("❌ Failed to load next video. Sending new... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, video, reply_markup=video_nav_keyboard(video['uuid'], category, user_id))
             if fallback_success and isinstance(fallback_msg, Message):
@@ -1041,7 +1039,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         # _, current_uuid, _ = callback_query.data.split('_') # Current video UUID and category from button are hints
 
         if await is_rate_limited(user_id):
-            await callback_query.answer("⚠️ You're Browse too quickly. Please wait a minute and try again. ⏳", show_alert=True)
+            await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
             logger.warning(f"User {user_id} hit rate limit in prev_video.")
             return
 
@@ -1049,7 +1047,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         current_active_menu = active_menus.get(user_id)
         if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
             logger.warning(f"User {user_id} tried to navigate previous but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
-            await callback_query.answer("Menu expired. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
+            await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
                 try:
                     await callback_query.message.delete()
@@ -1066,7 +1064,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         if not found_video:
             logger.warning(f"User {user_id} has no previous video history (or only one entry).")
             await callback_query.answer(
-                "No previous videos available in your history. Try '🎞️ Get Video' to start! 🧐",
+                "No previous videos available. Try '🎞️ Get Video' to start! 🧐",
                 show_alert=True
             )
             return
@@ -1092,8 +1090,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for previous video: {sent_message_or_error}. Attempting to send new message.")
-            # **FIX: Shorten the error message sent to callback_query.answer**
-            await callback_query.answer("❌ Failed to load previous video. Sending new message... 😥", show_alert=True)
+            await callback_query.answer("❌ Failed to load prev video. Sending new... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, found_video, reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id))
             if fallback_success and isinstance(fallback_msg, Message):
@@ -1110,7 +1107,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
     except Exception as e:
         logger.error(f"User {user_id} error in prev_video: {e}", exc_info=True)
         await callback_query.answer(
-            "An unexpected error occurred while trying to go to the previous video. Please try again. 🤷‍♀️",
+            "An unexpected error occurred. Try again. 🤷‍♀️",
             show_alert=True
         )
 
@@ -1125,7 +1122,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         current_active_menu = active_menus.get(user_id)
         if not current_active_menu or current_active_menu.get('message_id') != callback_query.message.id:
             logger.warning(f"User {user_id} tried to change category but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_menu.get('message_id') if current_active_menu else 'None'}")
-            await callback_query.answer("Menu expired or not active. Please click '🎞️ Get Video' to restart. ⏰", show_alert=True)
+            await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_menu and callback_query.message.id != current_active_menu.get('message_id'):
                 try:
                     await callback_query.message.delete()
@@ -1155,7 +1152,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             set_active_menu(user_id, callback_query.message.id, chat_id) # Keep same message_id, update timestamp
         except Exception as e:
             logger.error(f"User {user_id} failed to edit message for change category (caption/markup): {e}", exc_info=True)
-            await callback_query.answer("❌ Something went wrong while changing category. Please try again. 🤷‍♀️", show_alert=True)
+            await callback_query.answer("❌ Failed to change category. Try again. 🤷‍♀️", show_alert=True)
             # Fallback to sending a new message if editing fails
             sent_message = await client.send_message(chat_id, "🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
             # IMPORTANT: Update active menu with the new message ID
@@ -1371,7 +1368,7 @@ async def broadcast_cmd(client: Client, message: Message):
                     f"Blocked Users: {blocked} 🚫\n"
                     f"Unsuccessful: {failed} ❌"
                 )
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5) # Small delay to prevent hitting limits too quickly
         
         await broadcast_msg.edit_text(
             f"Broadcast Completed! 🎉\n\n"
