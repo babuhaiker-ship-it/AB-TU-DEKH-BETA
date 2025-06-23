@@ -1729,7 +1729,7 @@ async def set_category_cmd(client: Client, message: Message):
         categories = get_categories()
         if not categories:
             logger.warning(f"Admin {user_id} tried to set category but no categories available.")
-            await message.reply_text("⚠️ No categories available to set. Use /addcategory to create one. ➕")
+            await message.reply_text("⚠️ No categories available to set. Use /addcategory to create one.➕")
             return
 
         buttons = []
