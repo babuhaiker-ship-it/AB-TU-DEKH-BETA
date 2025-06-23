@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7946785578:AAGzx5tFfZyIT6LxtvEQnkX9EA1TdqSgkCs' # Replaced with a dummy token for safety
+    BOT_TOKEN = '7946785578:AAGzx5tFfZyIT6LxtpEQnkX9EA1TdqSgkCs' # Replaced with a dummy token for safety
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot'
@@ -37,7 +37,7 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     URL_SHORTENER = 'https://api.linkshortify.com/st'
-    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc4' # Dummy key, ensure it's correct
+    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     # Customization options
@@ -1830,7 +1830,6 @@ async def verify_and_cleanup_media():
 
                 try:
                     # Attempt to get the message from the channel
-                    # This call requires the client to be started, hence moving it to on_client_ready
                     await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
                     logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
@@ -1846,27 +1845,22 @@ async def verify_and_cleanup_media():
         # Run every 6 hours
         await asyncio.sleep(6 * 3600)
 
-@app.on_client_ready()
-async def startup_tasks(client: Client):
+async def startup():
     """
-    This function will be called automatically once the Pyrogram client has started successfully.
-    All startup logic that requires the client to be active should be placed here.
-    It currently initiates the background tasks for cleanup and media verification.
+    This function contains all the logic that should run once the bot starts.
+    It initiates background tasks for cleanup and media verification.
     """
-    logger.info("Pyrogram client is ready. Starting background tasks.")
-    # Schedule these tasks to run in the background
+    logger.info("Bot has started. Initiating background cleanup and media verification tasks.")
     app.loop.create_task(cleanup_expired_data())
     app.loop.create_task(verify_and_cleanup_media())
-    logger.info("Background cleanup and media verification tasks initiated.")
-
+    logger.info("Background tasks initiated successfully.")
 
 # --- Main ---
 if __name__ == '__main__':
     logger.info("Bot starting...")
-    # The app.run() method is a blocking call that starts the Pyrogram event loop.
-    # It internally handles the execution of @app.on_client_ready() decorated functions
-    # once the client is successfully connected.
-    # Therefore, app.run(startup()) is not the correct syntax if 'startup' is meant
-    # to be a custom async function to be run *after* the client starts.
-    # Instead, @app.on_client_ready() handles this as demonstrated by startup_tasks.
+    # Use app.start() to run the bot and then call the startup function
+    # app.run() is a blocking call that starts the client and keeps it running.
+    # The startup logic should be within the client's lifecycle,
+    # and on_client_ready is the appropriate Pyrogram way.
+    # We will simply run the app, and the @app.on_client_ready() will handle the rest.
     app.run()
