@@ -467,6 +467,10 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             logger.error(f"User {user_id} provided invalid token refresh code format: {ad_code}")
             return False, "Invalid token refresh link format. 🐛"
             
+        if code_user_id != user_id:
+            logger.warning(f"User {user_id} attempted to use another user's token refresh link ({code_user_id}).")
+            return False, "This token refresh link is not for you! 😠"
+            
         if timestamp < get_current_time():
             logger.warning(f"User {user_id} attempted to use expired token refresh link.")
             return False, "This token refresh link has expired. ⏰"
@@ -537,8 +541,8 @@ async def edit_video_message(client: Client, chat_id: int, message_id: int, vide
         )
         return True, edited
     except MessageIdInvalid:
-        logger.warning(f"Attempted to edit message {message_id} in chat {chat_id}, but it was invalid/deleted. Falling back to send new.")
-        return False, "MESSAGE_INVALID" # Return a specific code for MessageIdInvalid
+        logger.warning(f"Attempted to edit message {message_id} in chat {chat_id}, but it was invalid/deleted. Returning failure to trigger new message send.")
+        return False, "Message not found or already deleted. Sending a new one..."
     except Exception as e:
         logger.error(f"Failed to edit video message {message_id} in chat {chat_id}: {e}")
         return False, f"❌ <b>Failed to update video.</b>\nReason: {e}\nPlease try again later. 😥"
@@ -747,7 +751,7 @@ async def start_cmd(client: Client, message: Message):
                             set_active_menu(user_id, sent_message_or_error.id, message.chat.id)
                         logger.info(f"User {user_id} sent shared video {video_uuid_from_link} as new menu.")
                     else:
-                        await message.reply(sent_message_or_or_error)
+                        await message.reply(sent_message_or_error)
                 break # Exit retry loop after handling shared video
             
             break  # Exit the retry loop on successful execution
@@ -896,21 +900,21 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         return
     
     try:
-        # Attempt to edit the existing message to change from category selection to video
-        sent_success, sent_message_or_error = await edit_video_message(
+        # Edit the existing message to change from category selection to video
+        sent_success, sent_message_or_error = await edit_video_message( # Use edit_video_message for smooth transition
             client,
             chat_id,
             callback_query.message.id, # Use the same message ID
             video,
-            reply_markup=video_nav_keyboard(video['uuid'], category, user_id)
+            reply_markup=video_nav_keyboard(video['uuid'], category, user_id) # Pass user_id for share button
         )
         
         if sent_success:
             # Schedule auto-delete for this newly edited message
             settings = settings_collection.find_one({'_id': 'settings'}) or {}
             auto_delete_enabled = settings.get('auto_delete', True)
-            if auto_delete_enabled and isinstance(sent_message_or_error, Message):
-                asyncio.create_task(schedule_auto_delete(sent_message_or_error))
+            if auto_delete_enabled and isinstance(sent_message_or_error, Message): # Ensure it's a Message object
+                asyncio.create_task(schedule_auto_delete(sent_message_or_error)) # sent_message_or_error is the edited Message object
 
             save_history(user_id, video['uuid'], category)
             # Update the timestamp of the active menu to reset its expiration
@@ -919,11 +923,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for category selection: {sent_message_or_error}. Attempting to send new message.")
-            if sent_message_or_error == "MESSAGE_INVALID":
-                await callback_query.answer("❌ Message expired or deleted. Sending a new one... 😥", show_alert=True)
-            else:
-                await callback_query.answer("❌ Failed to load video. Sending new message... 😥", show_alert=True)
-            
+            # **FIX: Shorten the error message sent to callback_query.answer**
+            await callback_query.answer("❌ Failed to load video. Sending new message... 😥", show_alert=True)
             # If editing fails, fallback to sending a new message with the video
             fallback_success, fallback_msg = await send_video_message(
                 client,
@@ -936,7 +937,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
                 if settings.get('auto_delete', True):
                     asyncio.create_task(schedule_auto_delete(fallback_msg))
                 save_history(user_id, video['uuid'], category)
-                set_active_menu(user_id, fallback_msg.id, chat_id) # Set the new message as active
+                # IMPORTANT: Update active menu with the new message ID
+                set_active_menu(user_id, fallback_msg.id, chat_id) 
                 logger.info(f"User {user_id} sent new video message as fallback after edit failure.")
             else:
                 await client.send_message(chat_id, "Failed to load video. Please try again. 😥")
@@ -989,7 +991,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
             return
         
-        sent_success, sent_message_or_error = await edit_video_message(
+        sent_success, sent_message_or_error = await edit_video_message( # ***KEY CHANGE: Use edit_video_message***
             client,
             chat_id,
             callback_query.message.id, # Keep the same message ID
@@ -1001,8 +1003,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             # Schedule auto-delete for this edited message (re-schedule if needed)
             settings = settings_collection.find_one({'_id': 'settings'}) or {}
             auto_delete_enabled = settings.get('auto_delete', True)
-            if auto_delete_enabled and isinstance(sent_message_or_error, Message):
-                asyncio.create_task(schedule_auto_delete(sent_message_or_error))
+            if auto_delete_enabled and isinstance(sent_message_or_error, Message): # Ensure it's a Message object
+                asyncio.create_task(schedule_auto_delete(sent_message_or_error)) # Pass the edited message object
 
             save_history(user_id, video['uuid'], category)
             set_active_menu(user_id, callback_query.message.id, chat_id) # Update timestamp only
@@ -1010,11 +1012,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for next video: {sent_message_or_error}. Attempting to send new message.")
-            if sent_message_or_error == "MESSAGE_INVALID":
-                await callback_query.answer("❌ Message expired or deleted. Sending a new one... 😥", show_alert=True)
-            else:
-                await callback_query.answer("❌ Failed to load next video. Sending new message... 😥", show_alert=True)
-            
+            # **FIX: Shorten the error message sent to callback_query.answer**
+            await callback_query.answer("❌ Failed to load next video. Sending new message... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, video, reply_markup=video_nav_keyboard(video['uuid'], category, user_id))
             if fallback_success and isinstance(fallback_msg, Message):
@@ -1022,7 +1021,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
                 if settings.get('auto_delete', True):
                     asyncio.create_task(schedule_auto_delete(fallback_msg))
                 save_history(user_id, video['uuid'], category)
-                set_active_menu(user_id, fallback_msg.id, chat_id) # Set the new message as active
+                # IMPORTANT: Update active menu with the new message ID
+                set_active_menu(user_id, fallback_msg.id, chat_id) 
                 logger.info(f"User {user_id} sent new video message as fallback after edit failure for next video.")
             else:
                 await client.send_message(chat_id, "Failed to load next video. Please try again. 😥")
@@ -1071,7 +1071,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             )
             return
             
-        sent_success, sent_message_or_error = await edit_video_message(
+        sent_success, sent_message_or_error = await edit_video_message( # ***KEY CHANGE: Use edit_video_message***
             client,
             chat_id,
             callback_query.message.id, # Keep the same message ID
@@ -1083,8 +1083,8 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             # Schedule auto-delete for this edited message (re-schedule if needed)
             settings = settings_collection.find_one({'_id': 'settings'}) or {}
             auto_delete_enabled = settings.get('auto_delete', True)
-            if auto_delete_enabled and isinstance(sent_message_or_error, Message):
-                asyncio.create_task(schedule_auto_delete(sent_message_or_error))
+            if auto_delete_enabled and isinstance(sent_message_or_error, Message): # Ensure it's a Message object
+                asyncio.create_task(schedule_auto_delete(sent_message_or_error)) # Pass the edited message object
 
             # Removed save_history here as it's not a new view but a navigation back
             set_active_menu(user_id, callback_query.message.id, chat_id) # Update timestamp only
@@ -1092,11 +1092,8 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer() # Answer the callback query
         else:
             logger.error(f"User {user_id} failed to edit message for previous video: {sent_message_or_error}. Attempting to send new message.")
-            if sent_message_or_error == "MESSAGE_INVALID":
-                await callback_query.answer("❌ Message expired or deleted. Sending a new one... 😥", show_alert=True)
-            else:
-                await callback_query.answer("❌ Failed to load previous video. Sending new message... 😥", show_alert=True)
-            
+            # **FIX: Shorten the error message sent to callback_query.answer**
+            await callback_query.answer("❌ Failed to load previous video. Sending new message... 😥", show_alert=True)
             # If editing fails, try to send a new message as a fallback
             fallback_success, fallback_msg = await send_video_message(client, chat_id, found_video, reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id))
             if fallback_success and isinstance(fallback_msg, Message):
@@ -1104,7 +1101,8 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
                 if settings.get('auto_delete', True):
                     asyncio.create_task(schedule_auto_delete(fallback_msg))
                 # Removed save_history here as it's not a new view but a navigation back
-                set_active_menu(user_id, fallback_msg.id, chat_id) # Set the new message as active
+                # IMPORTANT: Update active menu with the new message ID
+                set_active_menu(user_id, fallback_msg.id, chat_id)
                 logger.info(f"User {user_id} sent new video message as fallback after edit failure for previous video.")
             else:
                 await client.send_message(chat_id, "Failed to load previous video. Please try again. 😥")
@@ -1160,7 +1158,8 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("❌ Something went wrong while changing category. Please try again. 🤷‍♀️", show_alert=True)
             # Fallback to sending a new message if editing fails
             sent_message = await client.send_message(chat_id, "🎬 <b>Choose a Category:</b>", reply_markup=category_keyboard())
-            set_active_menu(user_id, sent_message.id, chat_id) # Update active menu with the new message
+            # IMPORTANT: Update active menu with the new message ID
+            set_active_menu(user_id, sent_message.id, chat_id) 
     except Exception as e:
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
@@ -1830,14 +1829,93 @@ async def toggle_protect(client: Client, message: Message):
         s = settings_collection.find_one({'_id': 'settings'}) or {'protect_content': True}
         new_status = not s.get('protect_content', True)
         settings_collection.update_one({'_id': 'settings'}, {'$set': {'protect_content': new_status}}, upsert=True)
-        await message.reply(f"Content protection is now {'<b>enabled</b> ✅' <div class="expand-code-button" title="Expand Code">
-    <svg aria-hidden="true" class="w-5" fill="none" stroke="currentColor" stroke-width="1.5" viewbox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-      <path d="M12 4.5v15m7.5-7.5h-15" stroke-linecap="round" stroke-linejoin="round"></path>
-    </svg>
-  </div>
-</div>
-<div class="code-snippet-container">
-  <div class="code-snippet-content" role="button" tabindex="0">
-    <pre class="single-line-code"><code>print(Google Search(queries=['pyrogram edit_message_media MessageIdInvalid']))</code></pre>
-  </div>
-</div>
+        await message.reply(f"Content protection is now {'<b>enabled</b> ✅' if new_status else '<b>disabled</b> 🚫'}.")
+        logger.info(f"Admin {user_id} toggled content protection to {'enabled' if new_status else 'disabled'}.")
+    except Exception as e:
+        logger.error(f"Admin {user_id} failed to toggle content protection: {e}", exc_info=True)
+        await message.reply("❌ An error occurred while toggling content protection. Please try again. 🐛")
+
+# --- Database Cleanup ---
+async def cleanup_expired_data():
+    """Periodically cleans up expired tokens, old history entries, and expired active menus."""
+    while True:
+        try:
+            now = datetime.utcnow()
+            
+            # Clean up expired tokens
+            tokens_collection.update_many(
+                {},
+                {'$pull': {'tokens': {'expires_at': {'$lt': now}}}}
+            )
+            logger.info("Expired tokens cleanup completed.")
+            
+            # Clean up old history (older than 30 days - or keep only last 100 entries, already handled by save_history)
+            # The save_history function uses $slice to keep only the last 100, so explicit age-based cleanup might be redundant
+            # if 100 entries covers less than 30 days for very active users. Sticking to $slice for history length management.
+            
+            # Remove empty history documents (those with no entries left after cleanup)
+            history_collection.delete_many({'history': {'$size': 0}})
+            logger.info("Empty history documents cleanup completed.")
+            
+            # Remove token documents with empty 'tokens' array
+            tokens_collection.delete_many({'tokens': {'$size': 0}})
+            logger.info("Empty token documents cleanup completed.")
+            
+            # Clean up expired active_menus from in-memory dictionary
+            expired_users_menus = []
+            # Create a list of items to iterate over, as we'll modify active_menus
+            for user_id_menu, menu_data in list(active_menus.items()): 
+                if get_current_time() - menu_data['timestamp'] > config.MENU_TIMEOUT:
+                    expired_users_menus.append((user_id_menu, menu_data.get('chat_id')))
+            
+            for user_id_to_clear, chat_id_to_clear in expired_users_menus:
+                await cleanup_expired_menu(app, user_id_to_clear, chat_id_to_clear) # Pass app instance and chat_id
+                logger.info(f"Cleaned up expired active menu for user {user_id_to_clear} from memory and attempted message deletion.")
+
+            logger.info("Database and active_menus cleanup cycle completed.")
+        except Exception as e:
+            logger.error(f"Error in database cleanup task: {e}", exc_info=True)
+        
+        # Run every 24 hours
+        await asyncio.sleep(86400) # 24 hours
+
+async def verify_and_cleanup_media():
+    """Periodically verifies if media files still exist in the channel and cleans up invalid entries."""
+    while True:
+        logger.info("Starting media verification and cleanup task.")
+        try:
+            all_media = list(media_collection.find({}))
+            for media_item in all_media:
+                video_uuid = media_item.get('uuid')
+                message_id_in_channel = media_item.get('message_id')
+                
+                if not message_id_in_channel:
+                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting from DB.")
+                    media_collection.delete_one({'uuid': video_uuid})
+                    continue
+
+                try:
+                    # Attempt to get the message from the channel
+                    await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                    logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
+                except (MessageIdInvalid, ValueError):
+                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
+                    media_collection.delete_one({'uuid': video_uuid})
+                except Exception as e:
+                    logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
+
+            logger.info("Media verification and cleanup task completed.")
+        except Exception as e:
+            logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
+        
+        # Run every 6 hours
+        await asyncio.sleep(6 * 3600)
+
+# --- Main ---
+if __name__ == '__main__':
+    logger.info("Bot starting...")
+    # Start background cleanup tasks
+    app.loop.create_task(cleanup_expired_data())
+    app.loop.create_task(verify_and_cleanup_media())
+    # Run the bot
+    app.run()
