@@ -43,6 +43,9 @@ class BotConfig:
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     MENU_TIMEOUT = 3600 # 1 hour in seconds, for soft expiry check, now less critical
+    PREMIUM_TRIAL_PRICE_INR = 69
+    PREMIUM_MONTH_PRICE_INR = 169
+    SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
 
 try:
     config = BotConfig()
@@ -71,6 +74,9 @@ media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
+# Ensure 'premium_until' field for users collection
+users_collection.create_index([("premium_until", ASCENDING)], expireAfterSeconds=0) # For automatic document expiration if needed for premium status
+
 # --- Pyrogram Client ---
 app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
@@ -90,7 +96,7 @@ def create_tracked_task(coro):
 
 async def cancel_all_active_tasks():
     """
-    Cancels all tasks currently being tracked in the active_tasks set.
+    Cancels all tasks currently being tracked in the_active_tasks set.
     Awaits their completion gracefully (or handles CancelledError).
     """
     if not active_tasks:
@@ -164,7 +170,7 @@ async def shorten_url(long_url: str) -> str:
         logger.error(f"General error shortening URL {long_url}: {e}", exc_info=True)
         return long_url
 
-# --- Token Management ---
+# --- Token and Premium Management ---
 def get_and_cleanup_tokens(user_id: int) -> list:
     """Removes expired tokens from the database and returns the list of valid tokens."""
     now = datetime.utcnow()
@@ -181,14 +187,14 @@ def get_and_cleanup_tokens(user_id: int) -> list:
     doc = tokens_collection.find_one({'user_id': user_id})
     return doc.get('tokens', []) if doc else []
 
-def add_token(user_id: int, duration=config.TOKEN_EXPIRY):
-    """Adds a new token for a user with a specified duration."""
+def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY):
+    """Adds a new token for a user with a specified duration and updates premium status."""
     now = datetime.utcnow()
-    expires = now + timedelta(seconds=duration)
+    expires_at = now + timedelta(seconds=duration_seconds)
     token = {
         'token_id': str(uuid.uuid4()),
         'created_at': now,
-        'expires_at': expires
+        'expires_at': expires_at
     }
     try:
         tokens_collection.update_one(
@@ -196,15 +202,54 @@ def add_token(user_id: int, duration=config.TOKEN_EXPIRY):
             {'$push': {'tokens': token}},
             upsert=True
         )
-        logger.info(f"Token added for user {user_id}")
+        # Update user's premium_until status
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'premium_until': expires_at}},
+            upsert=True
+        )
+        logger.info(f"Token added for user {user_id}, premium_until set to {expires_at}")
         return token
     except Exception as e:
         logger.error(f"Error adding token for user {user_id}: {e}", exc_info=True)
         return None
 
+def is_premium_user(user_id: int) -> bool:
+    """Checks if a user is a premium user (has an active token)."""
+    # This function now relies on the `premium_until` field.
+    # We still keep `get_and_cleanup_tokens` for token count display,
+    # but actual premium status check for features uses `premium_until`.
+    user = users_collection.find_one({'user_id': user_id})
+    if not user:
+        return False
+    
+    premium_until = user.get('premium_until')
+    if premium_until and premium_until > datetime.utcnow():
+        return True
+    
+    # If premium_until is in the past or not set, check for valid tokens
+    # and update premium_until if found. This acts as a fallback/sync.
+    valid_tokens = get_and_cleanup_tokens(user_id)
+    if valid_tokens:
+        latest_expiry = max(t['expires_at'] for t in valid_tokens)
+        if latest_expiry > datetime.utcnow():
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$set': {'premium_until': latest_expiry}}
+            )
+            return True
+    
+    # Ensure premium_until is removed if no valid tokens
+    users_collection.update_one(
+        {'user_id': user_id},
+        {'$unset': {'premium_until': ""}}
+    )
+    return False
+
 def user_has_token(user_id: int) -> bool:
-    """Checks if a user has any valid tokens."""
+    """Checks if a user has any valid tokens (for non-premium features)."""
     return len(get_and_cleanup_tokens(user_id)) > 0
+
 
 # --- Referral System ---
 def handle_referral(new_user_id: int, ref_code: str) -> int | None:
@@ -446,17 +491,23 @@ def category_keyboard() -> InlineKeyboardMarkup:
 
 def video_nav_keyboard(video_uuid: str, category: str, user_id: int) -> InlineKeyboardMarkup:
     """
-    Keyboard for navigating between videos, including a 'Share' button
-    with a deep link that carries video ID and user ID.
+    Keyboard for navigating between videos, including 'Share' and 'Download' buttons.
+    The 'Download' button is shown only to premium users.
     """
-    return InlineKeyboardMarkup([
+    buttons = [
         [
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{video_uuid}_{category}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next_{video_uuid}_{category}")
         ],
         [InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat")],
         [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")]
-    ])
+    ]
+    
+    # Add Download button if user is premium
+    if is_premium_user(user_id):
+        buttons.append([InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")])
+
+    return InlineKeyboardMarkup(buttons)
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
     """Keyboard for displaying a referral link."""
@@ -494,9 +545,12 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         if await is_rate_limited(user_id):
             return False, "⚠️ You're refreshing too quickly. Please wait a minute and try again."
 
-        if user_has_token(user_id):
-            logger.info(f"User {user_id} attempted token refresh but already has valid tokens.")
-            return False, "💡 You already have an active token. No need to refresh yet! Enjoy the videos! 🥳"
+        # The logic here assumes that getting a token always grants some form of access.
+        # For simplicity, if premium_until is already set, we consider them "active"
+        # and don't need a token refresh *from an ad*.
+        if is_premium_user(user_id): # Check premium status directly
+            logger.info(f"User {user_id} attempted token refresh but already has valid premium access.")
+            return False, "💡 You already have active premium access. No need to refresh yet! Enjoy the videos! 🥳"
             
         decoded = b64_to_str(ad_code)
         if not decoded:
@@ -519,7 +573,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             
         added_token = add_token(user_id, config.REFRESH_BONUS * 86400)
         if added_token:
-            logger.info(f"Token added for user {user_id} via refresh. New token count: {len(get_and_cleanup_tokens(user_id))}")
+            logger.info(f"Token added for user {user_id} via refresh. Premium status updated.")
             return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts 24 hours. Enjoy! 🍿"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
@@ -598,7 +652,8 @@ async def start_cmd(client: Client, message: Message):
                     'first_name': first_name_safe,
                     'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                     'joined_date': datetime.utcnow(),
-                    'referral_count': 0
+                    'referral_count': 0,
+                    'premium_until': None # Initialize premium_until for new users
                 })
                 add_token(user_id, config.NEW_USER_TOKENS * 86400)
                 logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
@@ -674,7 +729,7 @@ async def start_cmd(client: Client, message: Message):
                 if is_new_user and referrer_id_from_video_link:
                     handle_referral(user_id, deep_link_arg)
                 
-                if not user_has_token(user_id):
+                if not user_has_token(user_id): # This checks for tokens for general video access
                     await message.reply("You need a token to watch this video. Please get a token first! 🧐", reply_markup=await get_main_keyboard(user_id))
                     await send_token_earning_options(client, message)
                     break
@@ -753,12 +808,16 @@ async def profile_cmd(client: Client, message: Message):
     referral_count = user.get('referral_count', 0) if user else 0
     referred_by = user.get('referred_by', None) if user else None
     
+    # Determine user status
+    user_status = "Premium User 💎" if is_premium_user(user_id) else "Free User ✨"
+
     views_doc = history_collection.find_one({'user_id': user_id})
     view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
     ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
     
     await message.reply(
         f"👤 <b>Your Profile</b> ✨\n\n"
+        f"<b>Status:</b> {user_status}\n" # Display user status here
         f"<b>Tokens:</b> {len(tokens)} 🪙\n"
         f"<b>Video Views:</b> {view_count} 🎞️\n"
         f"<b>Referrals:</b> {referral_count} 👥\n"
@@ -1113,14 +1172,14 @@ async def refresh_token_btn(client: Client, message: Message):
         temp_msg = await message.reply("⏳ Please wait while we prepare your token... ✨")
         logger.info(f"User {user_id}: 'Please wait...' message sent. Checking for existing token.")
 
-        if user_has_token(user_id):
+        if is_premium_user(user_id): # Check premium status for refresh
             if temp_msg:
                 await temp_msg.delete()
-            await message.reply("💡 You already have an Factive token. No need to refresh yet! Enjoy the videos! 🥳")
-            logger.info(f"User {user_id} attempted token refresh but already has valid tokens. Exiting.")
+            await message.reply("💡 You already have active premium access. No need to refresh yet! Enjoy the videos! 🥳")
+            logger.info(f"User {user_id} attempted token refresh but already has valid premium access. Exiting.")
             return
 
-        logger.info(f"User {user_id}: User does not have valid token. Generating ad_code and attempting to shorten URL.")
+        logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await shorten_url(long_url)
@@ -1209,6 +1268,50 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
     except Exception as e:
         logger.error(f"User {user_id} failed to send share link for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^download_(.+)$"))
+async def download_video_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'Download' video callback for premium users."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 1)[1]
+    chat_id = callback_query.message.chat.id
+
+    logger.info(f"User {user_id} requested download for video {video_uuid}.")
+
+    try:
+        if not is_premium_user(user_id):
+            logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
+            support_bot_link = f"https://t.me/{config.SUPPORT_BOT_USERNAME}"
+            reply_markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Support Bot", url=support_bot_link, callback_data="support_link_clicked")]
+            ])
+            await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
+            await client.send_message(
+                chat_id,
+                f"To access the Download button, DM our support bot to purchase a 7-day trial for ₹{config.PREMIUM_TRIAL_PRICE_INR} or 1-month premium access for ₹{config.PREMIUM_MONTH_PRICE_INR}. 💎",
+                reply_markup=reply_markup
+            )
+            return
+
+        video = get_video_by_uuid(video_uuid)
+        if not video:
+            logger.warning(f"Premium user {user_id} requested download for non-existent video {video_uuid}.")
+            await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
+            return
+
+        # Send the raw video file without any captions or extra buttons
+        await client.send_video(
+            chat_id,
+            video=video['file_id'],
+            caption="Here's your download! Enjoy! 🎉",
+            protect_content=False # Ensure content can be forwarded/saved by user
+        )
+        await callback_query.answer("Download initiated! 🚀")
+        logger.info(f"Premium user {user_id} successfully received download for video {video_uuid}.")
+
+    except Exception as e:
+        logger.error(f"Error handling download for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to send video for download. Please try again later. 😥", show_alert=True)
 
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
@@ -1359,60 +1462,78 @@ async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery)
 
 @app.on_message(filters.command("addtoken") & filters.private & filters.user(config.ADMIN_IDS))
 async def addtoken_cmd(client: Client, message: Message):
-    """Admin command to add tokens to a specific user."""
+    """Admin command to add tokens to a specific user and grant premium access."""
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested to add token.")
     try:
         args = message.text.split()
         if len(args) < 3:
             logger.warning(f"Admin {user_id} used addtoken with insufficient arguments: {message.text}")
-            await message.reply("Usage: <code>/addtoken &lt;user_id&gt; &lt;count&gt;</code> 📝")
+            await message.reply("Usage: <code>/addtoken &lt;user_id&gt; &lt;duration_days&gt;</code>\nDuration is in days. 📝")
             return
             
         target_user_id = int(args[1])
-        count = int(args[2])
+        duration_days = int(args[2])
             
         if target_user_id <= 0:
             logger.warning(f"Admin {user_id} provided invalid target user ID: {target_user_id}.")
             await message.reply("User ID must be a positive integer. 🔢")
             return
                 
-        if count <= 0:
-            logger.warning(f"Admin {user_id} provided invalid token count: {count}.")
-            await message.reply("Token count must be a positive integer. 🔢")
+        if duration_days <= 0:
+            logger.warning(f"Admin {user_id} provided invalid duration: {duration_days}.")
+            await message.reply("Duration must be a positive integer (days). 🔢")
             return
                 
-        if count > 100:
-            logger.warning(f"Admin {user_id} attempted to add more than 100 tokens ({count}).")
-            await message.reply("Cannot add more than 100 tokens at once. Max 100 per command. 🚫")
+        if duration_days > 365:
+            logger.warning(f"Admin {user_id} attempted to add more than 365 days of premium access ({duration_days}).")
+            await message.reply("Cannot add more than 365 days of premium access at once. Max 365 days per command. 🚫")
             return
                 
-        user = users_collection.find_one({'user_id': target_user_id})
-        if not user:
+        user_doc = users_collection.find_one({'user_id': target_user_id})
+        if not user_doc:
             logger.warning(f"Admin {user_id} attempted to add tokens to non-existent user {target_user_id}.")
             await message.reply("User not found in database. 🧐")
             return
-                
-        successful_additions = 0
-        for _ in range(count):
-            added = add_token(target_user_id)
-            if added:
-                successful_additions += 1
-            
-        if successful_additions == count:
-            logger.info(f"Admin {user_id} added {count} tokens to user {target_user_id}.")
-            await message.reply(f"✅ Added <b>{count}</b> tokens to user <b>{target_user_id}</b>. 🎉")
-        elif successful_additions > 0:
-            logger.warning(f"Admin {user_id} partially added {successful_additions}/{count} tokens to user {target_user_id}.")
-            await message.reply(f"⚠️ Added <b>{successful_additions}</b> out of <b>{count}</b> tokens to user <b>{target_user_id}</b>. Some failed. 😥")
+        
+        # Calculate new premium_until date
+        current_premium_until = user_doc.get('premium_until')
+        if current_premium_until and current_premium_until > datetime.utcnow():
+            # If user already has active premium, extend from current expiry
+            new_premium_until = current_premium_until + timedelta(days=duration_days)
         else:
-            await message.reply("❌ Failed to add any tokens. Check logs for details. 🐛")
+            # If user is free or premium expired, start from now
+            new_premium_until = datetime.utcnow() + timedelta(days=duration_days)
+
+        # Update premium_until in users collection
+        users_collection.update_one(
+            {'user_id': target_user_id},
+            {'$set': {'premium_until': new_premium_until}},
+            upsert=True
+        )
+
+        # Also add a "token" entry for consistency with existing token system (if still desired)
+        # This token is essentially representing the premium access granted.
+        # It's important that `is_premium_user` now primarily checks `premium_until`.
+        add_token(target_user_id, duration_seconds=duration_days * 86400) # Use the add_token function to also add a token entry
+
+        logger.info(f"Admin {user_id} granted {duration_days} days of premium access to user {target_user_id}. New premium until: {new_premium_until}")
+        await message.reply(f"✅ Granted <b>{duration_days}</b> days of premium access to user <b>{target_user_id}</b>. New expiry: {new_premium_until.strftime('%Y-%m-%d %H:%M:%S UTC')}. 🎉")
+        
+        # Notify the target user
+        try:
+            await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{duration_days}</b> days of premium access by an admin! Your premium access now expires on <b>{new_premium_until.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 💎")
+        except (UserIsBlocked, ChatInvalid):
+            logger.warning(f"Could not notify user {target_user_id} about premium access; user blocked or chat invalid.")
+        except Exception as notify_e:
+            logger.error(f"Failed to notify user {target_user_id} about premium access: {notify_e}")
+
     except ValueError:
         logger.warning(f"Admin {user_id} provided invalid input for addtoken: {message.text}")
-        await message.reply("User ID and count must be valid integers. 🔢")
+        await message.reply("User ID and duration (in days) must be valid integers. 🔢")
     except Exception as e:
-        logger.error(f"Admin {user_id} error adding tokens: {e}", exc_info=True)
-        await message.reply("❌ Failed to add tokens. Please try again. 🐛")
+        logger.error(f"Admin {user_id} error adding tokens/premium access: {e}", exc_info=True)
+        await message.reply("❌ Failed to add premium access. Please try again. 🐛")
 
 # --- Batch Add Videos ---
 batch_add_state = {}
@@ -1720,12 +1841,23 @@ async def cleanup_expired_data():
         try:
             now = datetime.utcnow()
             
+            # Clean up expired tokens
             tokens_collection.update_many(
                 {},
                 {'$pull': {'tokens': {'expires_at': {'$lt': now}}}}
             )
             logger.info("Expired tokens cleanup completed.")
             
+            # Clean up users whose premium_until has passed
+            # This relies on MongoDB's TTL index on 'premium_until' if you choose to use it for auto-deletion of the whole user doc.
+            # However, if you want to simply update their status and not delete the user doc,
+            # you'd need a query like:
+            users_collection.update_many(
+                {'premium_until': {'$lt': now}},
+                {'$unset': {'premium_until': ""}}
+            )
+            logger.info("Expired premium user status cleanup completed.")
+
             history_collection.delete_many({'history': {'$size': 0}})
             logger.info("Empty history documents cleanup completed.")
             
@@ -1739,7 +1871,7 @@ async def cleanup_expired_data():
         except Exception as e:
             logger.error(f"Error in database cleanup task: {e}", exc_info=True)
         
-        await asyncio.sleep(86400)
+        await asyncio.sleep(86400) # Run once every 24 hours
 
 async def verify_and_cleanup_media():
     """Periodically verifies if media files still exist in the channel and cleans up invalid entries."""
@@ -1772,7 +1904,7 @@ async def verify_and_cleanup_media():
         except Exception as e:
             logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
         
-        await asyncio.sleep(6 * 3600)
+        await asyncio.sleep(6 * 3600) # Run every 6 hours
 
 async def main_bot_logic():
     """
