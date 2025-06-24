@@ -1782,21 +1782,18 @@ async def main_bot_logic():
     logger.info("Starting bot and scheduling background tasks...")
     
     # Start the Pyrogram client
-    await app.start()
-    logger.info("Bot has connected to Telegram.")
+await app.start()
+logger.info("Bot has connected to Telegram.")
 
-    # Schedule background tasks
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    
-    logger.info("Background tasks initiated. Bot is now fully operational.")
-    
-    # Keep the main bot logic running. Pyrogram's `idle()` or a similar mechanism
-    # within `app.run()` itself is usually what keeps the bot alive for long polling.
-    # In an async context, you might use asyncio.Event or asyncio.sleep(float('inf'))
-    # if you were managing the event loop manually.
-    # Since app.run() takes care of the blocking, we just need to ensure our
-    # background tasks are started. The Pyrogram handlers will keep the bot responsive.
+# Schedule background tasks
+create_tracked_task(cleanup_expired_data())
+create_tracked_task(verify_and_cleanup_media())
+
+logger.info("Background tasks initiated. Bot is now fully operational.")
+
+# ✅ FIX: Keep the bot alive
+await asyncio.Event().wait()  # <- This is required to prevent exit
+
 
 if __name__ == "__main__":
     logger.info("Script started. Entering main execution block.")
@@ -1813,4 +1810,4 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
-        # Any final cleanup can go here, though Pyrogram's stop usually handles client shutdown.
+        # Any final cleanup can go here
