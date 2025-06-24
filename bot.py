@@ -1890,33 +1890,39 @@ async def main():
 # --- Signal Handler for Graceful Shutdown ---
 async def shutdown():
     logger.info("Shutdown initiated by signal.")
-    # Pyrogram's app.idle() usually handles signals and raises CancelledError,
-    # leading to the finally block in main().
-    # However, explicitly calling cancel_all_active_tasks here ensures any lingering
-    # tasks are targeted directly, and app.stop() will follow.
-    await cancel_all_active_tasks()
-    # It's generally good practice to let app.idle() handle the cancellation of its
-    # own loop and then `app.stop()` in the `finally` block of `main`.
-    # If app.idle() is not used, then you'd explicitly call app.stop() here.
-    # For now, this function primarily logs and then the `main`'s `finally` does the heavy lifting.
+    # This task is created when a signal is received.
+    # It logs and then the `finally` block in `main()` will perform the actual cleanup
+    # once `app.idle()` raises CancelledError.
+    # We don't need to explicitly cancel tasks here if `app.idle()` is used,
+    # as `app.idle()` will cause a CancelledError in the main task,
+    # leading to the `finally` block in `main()` which calls `cancel_all_active_tasks()` and `app.stop()`.
+    pass # No direct action needed here, main's finally block handles it.
 
 def handle_signal(signum, frame):
     logger.info(f"Received signal {signum}. Initiating graceful shutdown.")
     # Get the current running event loop
     loop = asyncio.get_event_loop()
     # Create a task to run the async shutdown function
+    # This schedules `shutdown()` to run, but the primary mechanism for bot shutdown
+    # is `app.idle()` receiving the signal and raising CancelledError.
     loop.create_task(shutdown())
+    # Optionally, you can also stop the Pyrogram client here directly for immediate shutdown
+    # if `app.idle()` is not used or you want a more aggressive shutdown for some reason.
+    # For now, we rely on `app.idle()` to propagate the cancellation.
+    
+    # To properly stop the loop when a signal is received, you need to call loop.stop()
+    # This will cause asyncio.run() to return.
+    # However, Pyrogram's app.idle() already sets up signal handlers that will stop its internal loop
+    # and propagate CancelledError. So, in most cases, explicitly calling loop.stop() here might
+    # interfere or be redundant if app.idle() is the primary event loop driver.
+    # The current setup where `app.idle()` is used, and the `finally` block in `main` handles cleanup,
+    # is generally robust.
 
 if __name__ == '__main__':
     # Register signal handlers for graceful shutdown
-    # This ensures that Ctrl+C (SIGINT) and kill signals (SIGTERM)
-    # are caught and handled by our shutdown logic.
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    # Pyrogram's app.run() is a blocking call that internally runs asyncio.run() and handles
-    # the event loop. By replacing it with an explicit asyncio.run(main()), we get
-    # more control over the event loop for graceful shutdown.
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
