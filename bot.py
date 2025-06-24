@@ -1790,24 +1790,8 @@ async def main_bot_logic():
     # Keep the main logic running indefinitely until interrupted
     # Pyrogram handles the event loop when app.run() is called
     # In an async function, you can use an indefinite sleep or a Future that never completes
-    # For a Pyrogram bot, simply allowing the decorated handlers to run is usually enough.
-    # If this main_bot_logic is meant to be passed to asyncio.run(), then
-    # an app.idle() or an indefinite sleep would be needed.
     # However, since app.run() is used at the __main__ level, it takes care of this.
-    # The initial error was due to calling app.run(main_bot_logic()) which then again had app.idle()
-    # within main_bot_logic().
-    
-    # We can use asyncio.Event to keep the main coroutine "alive"
-    # without consuming CPU, if needed to prevent this coroutine from exiting
-    # while Pyrogram's internal loop is running.
-    # However, since app.run() is managing the main loop, this is less critical here.
-    # The primary issue was the double "idle" equivalent.
-    
-    # A simple way to keep an async function running if it's the top-level
-    # function for asyncio.run() would be:
-    # await asyncio.Event().wait()
-    # But since we are using app.run(), Pyrogram handles the main loop.
-    pass # No app.idle() needed here as app.run() handles it in __main__
+    pass
 
 if __name__ == '__main__':
     try:
@@ -1815,15 +1799,12 @@ if __name__ == '__main__':
         # It's suitable for simple bots that don't need a custom asyncio event loop setup.
         # This will block indefinitely, allowing Pyrogram to process updates.
         # The main_bot_logic() coroutine will be executed before the bot starts processing updates.
-        
-        # We start the bot directly with app.run() and pass the coroutine `main_bot_logic()`
-        # which will perform startup tasks like starting background jobs.
-        # Pyrogram's `app.run()` then keeps the bot running and handles the event loop.
+        print("Bot is running...")
         app.run(main_bot_logic())
     except KeyboardInterrupt:
         logger.info("Bot process interrupted by KeyboardInterrupt (Ctrl+C). Shutdown initiated.")
         # When app.run() is interrupted, it typically stops the internal loop.
-        # We can add explicit cleanup here if app.stop() isn't called by Pyrogram's shutdown.
         # For Pyrogram, app.run() handles the app.stop() on graceful shutdown (Ctrl+C).
     except Exception as e:
         logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
+
