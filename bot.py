@@ -46,6 +46,8 @@ class BotConfig:
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
     SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
+    # --- New: Bookmark Limits ---
+    FREE_USER_BOOKMARK_LIMIT = 100
 
 try:
     config = BotConfig()
@@ -63,6 +65,9 @@ media_collection = db['media']
 history_collection = db['history']
 categories_collection = db['categories']
 settings_collection = db['settings']
+# --- New: Bookmarks Collection ---
+bookmarks_collection = db['bookmarks']
+
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -73,6 +78,10 @@ media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
+# --- New: Bookmarks Index ---
+bookmarks_collection.create_index([("user_id", ASCENDING)])
+bookmarks_collection.create_index([("user_id", ASCENDING), ("video_uuid", ASCENDING)], unique=True)
+bookmarks_collection.create_index([("user_id", ASCENDING), ("timestamp", ASCENDING)]) # For sorting to get most recent 100
 
 # Ensure 'premium_until' field for users collection
 users_collection.create_index([("premium_until", ASCENDING)], expireAfterSeconds=0) # For automatic document expiration if needed for premium status
@@ -117,6 +126,7 @@ async def cancel_all_active_tasks():
     except Exception as e:
         logger.error(f"Error during asyncio.gather for task cancellation: {e}", exc_info=True)
     finally:
+    # Clear the set only after gathering, even if exceptions occur, to ensure a clean state
         active_tasks.clear()
         logger.info("Active tasks set cleared.")
 
@@ -389,6 +399,87 @@ def get_last_video_from_history(user_id: int) -> dict | None:
             return video
     return None
 
+# --- New: Bookmark Functions ---
+def add_bookmark(user_id: int, video_uuid: str) -> tuple[bool, str]:
+    """
+    Adds a video to a user's bookmarks.
+    Free users have a limit (config.FREE_USER_BOOKMARK_LIMIT). Premium users have unlimited.
+    """
+    now = datetime.utcnow()
+    is_premium = is_premium_user(user_id)
+    
+    existing_bookmark = bookmarks_collection.find_one({'user_id': user_id, 'video_uuid': video_uuid})
+    if existing_bookmark:
+        return False, "This video is already bookmarked! 📖"
+
+    if not is_premium:
+        current_bookmarks_count = bookmarks_collection.count_documents({'user_id': user_id})
+        if current_bookmarks_count >= config.FREE_USER_BOOKMARK_LIMIT:
+            return False, f"You have reached your bookmark limit of {config.FREE_USER_BOOKMARK_LIMIT} videos. Upgrade to premium for unlimited saves! 💎"
+            
+    try:
+        bookmarks_collection.insert_one({
+            'user_id': user_id,
+            'video_uuid': video_uuid,
+            'timestamp': now
+        })
+        logger.info(f"User {user_id} bookmarked video {video_uuid}. Premium status: {is_premium}")
+        return True, "Video bookmarked successfully! ✅"
+    except Exception as e:
+        logger.error(f"Error adding bookmark for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        return False, "Failed to bookmark video. Please try again. 😥"
+
+def remove_bookmark(user_id: int, video_uuid: str) -> tuple[bool, str]:
+    """Removes a video from a user's bookmarks."""
+    try:
+        result = bookmarks_collection.delete_one({'user_id': user_id, 'video_uuid': video_uuid})
+        if result.deleted_count > 0:
+            logger.info(f"User {user_id} unbookmarked video {video_uuid}.")
+            return True, "Video removed from bookmarks. 🗑️"
+        else:
+            return False, "This video was not found in your bookmarks. 🤔"
+    except Exception as e:
+        logger.error(f"Error removing bookmark for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        return False, "Failed to remove bookmark. Please try again. 😥"
+
+def get_bookmarked_videos(user_id: int) -> list[dict]:
+    """
+    Retrieves a user's bookmarked videos.
+    If premium has expired, only the most recent 100 are displayed.
+    """
+    is_premium = is_premium_user(user_id) # This checks active premium
+    user_doc = users_collection.find_one({'user_id': user_id})
+    premium_was_active = user_doc and user_doc.get('premium_until') and user_doc['premium_until'] > datetime.utcnow() - timedelta(days=1) # Consider recent premium for a grace period or just strict expiry
+
+    if is_premium:
+        # Premium users get all their bookmarks
+        bookmarks = list(bookmarks_collection.find({'user_id': user_id}).sort('timestamp', ASCENDING))
+        logger.info(f"Premium user {user_id} retrieved {len(bookmarks)} bookmarks.")
+    else:
+        # Free users or expired premium users get only the most recent 100
+        bookmarks = list(bookmarks_collection.find({'user_id': user_id}).sort('timestamp', -1).limit(config.FREE_USER_BOOKMARK_LIMIT))
+        logger.info(f"Free/expired premium user {user_id} retrieved {len(bookmarks)} bookmarks (capped at {config.FREE_USER_BOOKMARK_LIMIT}).")
+
+    video_uuids = [b['video_uuid'] for b in bookmarks]
+    # Fetch video details for the bookmarked UUIDs
+    bookmarked_videos_data = []
+    for uuid_val in video_uuids:
+        video_data = media_collection.find_one({'uuid': uuid_val})
+        if video_data:
+            bookmarked_videos_data.append(video_data)
+        else:
+            # Clean up broken bookmark entries (video no longer exists)
+            bookmarks_collection.delete_one({'user_id': user_id, 'video_uuid': uuid_val})
+            logger.warning(f"User {user_id} had a bookmark for non-existent video {uuid_val}. Bookmark removed.")
+
+    # Ensure the order is consistent with how they were retrieved (e.g., oldest first for premium, newest first for free)
+    # The current logic for sorting in find() already handles this.
+    return bookmarked_videos_data
+
+def get_bookmark_status(user_id: int, video_uuid: str) -> bool:
+    """Checks if a video is bookmarked by a user."""
+    return bookmarks_collection.find_one({'user_id': user_id, 'video_uuid': video_uuid}) is not None
+
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {} 
 
@@ -406,7 +497,7 @@ def clear_active_video_message(user_id: int):
         del active_video_message[user_id]
         logger.info(f"Active video message cleared for user {user_id}.")
 
-async def send_and_replace_message(client: Client, chat_id: int, old_message_id: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None) -> tuple[bool, Message | str]:
+async def send_and_replace_message(client: Client, chat_id: int, old_message_id: int, new_message_type: str, video_data: dict = None, text_content: str = None, reply_markup: InlineKeyboardMarkup = None) -> tuple[bool, Message | str]:
     """
     Deletes the old message (if provided) and sends a new video or text message.
     Updates the active_video_message tracking.
@@ -438,10 +529,10 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                 protect_content=protect_content_for_user
             )
             success = True
-        elif new_message_type == "text" and reply_markup:
+        elif new_message_type == "text" and text_content:
             sent_message = await client.send_message(
                 chat_id,
-                "🎬 <b>Choose a Category:</b>",
+                text_content,
                 reply_markup=reply_markup
             )
             success = True
@@ -468,7 +559,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton("🎞️ Get Video"), KeyboardButton("👤 Profile")],
         [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
-        [KeyboardButton("🔄 Refresh Token")]
+        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")] # New: Saved Videos button
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -491,15 +582,22 @@ def category_keyboard() -> InlineKeyboardMarkup:
 
 def video_nav_keyboard(video_uuid: str, category: str, user_id: int) -> InlineKeyboardMarkup:
     """
-    Keyboard for navigating between videos, including 'Share' and 'Download' buttons.
+    Keyboard for navigating between videos, including 'Share', 'Download', and 'Bookmark' buttons.
     The 'Download' button is shown only to premium users.
+    The 'Bookmark' button changes based on whether the video is already bookmarked.
     """
+    bookmark_text = "🔖 Remove Bookmark" if get_bookmark_status(user_id, video_uuid) else "🔖 Add Bookmark"
+    bookmark_callback = f"remove_bookmark_{video_uuid}" if get_bookmark_status(user_id, video_uuid) else f"add_bookmark_{video_uuid}"
+
     buttons = [
         [
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{video_uuid}_{category}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next_{video_uuid}_{category}")
         ],
-        [InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat")],
+        [
+            InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"),
+            InlineKeyboardButton(bookmark_text, callback_data=bookmark_callback) # New: Bookmark button
+        ],
         [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")]
     ]
     
@@ -507,6 +605,23 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int) -> InlineKe
     if is_premium_user(user_id):
         buttons.append([InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")])
 
+    return InlineKeyboardMarkup(buttons)
+
+# New: Keyboard for navigating saved videos
+def saved_video_nav_keyboard(video_uuid: str, current_index: int, total_videos: int) -> InlineKeyboardMarkup:
+    """
+    Keyboard for navigating saved videos, including previous, next, and remove bookmark.
+    """
+    buttons = [
+        [
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"saved_prev_{video_uuid}_{current_index}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"saved_next_{video_uuid}_{current_index}")
+        ],
+        [
+            InlineKeyboardButton("🔖 Remove Bookmark", callback_data=f"remove_bookmark_{video_uuid}")
+        ],
+        [InlineKeyboardButton("🔙 Back to Saved List", callback_data="show_saved_videos_list")]
+    ]
     return InlineKeyboardMarkup(buttons)
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
@@ -788,7 +903,8 @@ async def help_cmd(client: Client, message: Message):
         "- Use '🎞️ Get Video' to watch spicy content. 🔥\n"
         "- Each token gives you 24 hours access. ⏳\n"
         "- Earn tokens by referral, refreshing ads, or buying them. 💰\n"
-        "- Use '👤 Profile' to check your stats. 📈\n\n"
+        "- Use '👤 Profile' to check your stats. 📈\n"
+        "- Use '🔖 Saved Videos' to view your bookmarked content. 📚\n\n" # New help text
         "Enjoy your spicy journey! 🌶️",
         reply_markup=await get_main_keyboard(user_id)
     )
@@ -809,17 +925,26 @@ async def profile_cmd(client: Client, message: Message):
     referred_by = user.get('referred_by', None) if user else None
     
     # Determine user status
-    user_status = "Premium User 💎" if is_premium_user(user_id) else "Free User ✨"
+    user_is_premium = is_premium_user(user_id)
+    user_status = "Premium User 💎" if user_is_premium else "Free User ✨"
 
     views_doc = history_collection.find_one({'user_id': user_id})
     view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
     ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
     
+    # New: Bookmark limit display
+    current_bookmarks_count = bookmarks_collection.count_documents({'user_id': user_id})
+    if user_is_premium:
+        bookmark_limit_display = f"{current_bookmarks_count}/Unlimited ♾️"
+    else:
+        bookmark_limit_display = f"{current_bookmarks_count}/{config.FREE_USER_BOOKMARK_LIMIT} 📖"
+
     await message.reply(
         f"👤 <b>Your Profile</b> ✨\n\n"
         f"<b>Status:</b> {user_status}\n" # Display user status here
         f"<b>Tokens:</b> {len(tokens)} 🪙\n"
         f"<b>Video Views:</b> {view_count} 🎞️\n"
+        f"<b>Bookmarked Videos:</b> {bookmark_limit_display}\n" # New: Bookmark limit
         f"<b>Referrals:</b> {referral_count} 👥\n"
         f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗\n"
         f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}",
@@ -869,6 +994,7 @@ async def get_video(client: Client, message: Message):
         chat_id,
         old_message_id=old_message_id_to_delete,
         new_message_type="text",
+        text_content="🎬 <b>Choose a Category:</b>", # Changed to text_content
         reply_markup=category_keyboard()
     )
 
@@ -1112,6 +1238,400 @@ async def change_category(client: Client, callback_query: CallbackQuery):
     except Exception as e:
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
+
+# --- New: Bookmark Handlers ---
+@app.on_callback_query(filters.regex(r"^add_bookmark_(.+)$"))
+async def add_bookmark_callback(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 2)[2] # Split by _ and get the last part
+
+    try:
+        success, message = add_bookmark(user_id, video_uuid)
+        await callback_query.answer(message, show_alert=True)
+        logger.info(f"User {user_id} tried to add bookmark for {video_uuid}. Result: {success}, Message: {message}")
+
+        # Update the video navigation keyboard to reflect the new bookmark status
+        video_data = get_video_by_uuid(video_uuid)
+        if video_data:
+            await callback_query.edit_message_reply_markup(
+                reply_markup=video_nav_keyboard(video_uuid, video_data['category'], user_id)
+            )
+    except Exception as e:
+        logger.error(f"Error handling add_bookmark for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to add bookmark. 😥", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^remove_bookmark_(.+)$"))
+async def remove_bookmark_callback(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 2)[2]
+
+    try:
+        success, message = remove_bookmark(user_id, video_uuid)
+        await callback_query.answer(message, show_alert=True)
+        logger.info(f"User {user_id} tried to remove bookmark for {video_uuid}. Result: {success}, Message: {message}")
+        
+        # If the user is currently viewing the saved video, and removes it, update the list
+        if callback_query.message.caption and "Saved Video" in callback_query.message.caption:
+            # Check if this was from the `show_saved_video_detail` flow
+            current_bookmarks_count = bookmarks_collection.count_documents({'user_id': user_id})
+            if current_bookmarks_count == 0:
+                await callback_query.message.edit_text("You haven't saved any videos yet. 😔")
+                clear_active_video_message(user_id) # Clear state as there are no more saved videos
+            else:
+                # Attempt to show the previous video in the saved list, or the first if no previous
+                bookmarked_videos = get_bookmarked_videos(user_id) # This will be the *updated* list
+                if bookmarked_videos:
+                    # Find the index of the video that was just removed (if it was in the original list)
+                    # For simplicity, let's just go to the first video in the new list
+                    first_video = bookmarked_videos[0]
+                    sent_success, sent_message_or_error = await send_and_replace_message(
+                        client,
+                        callback_query.message.chat.id,
+                        old_message_id=callback_query.message.id,
+                        new_message_type="video",
+                        video_data=first_video,
+                        reply_markup=saved_video_nav_keyboard(first_video['uuid'], 0, len(bookmarked_videos))
+                    )
+                    if not sent_success:
+                         await callback_query.message.edit_text(sent_message_or_error) # Fallback to text message
+                else:
+                    await callback_query.message.edit_text("You haven't saved any videos yet. 😔")
+                    clear_active_video_message(user_id)
+
+        else: # If removed from general video Browse, update the button only
+            video_data = get_video_by_uuid(video_uuid)
+            if video_data:
+                await callback_query.edit_message_reply_markup(
+                    reply_markup=video_nav_keyboard(video_uuid, video_data['category'], user_id)
+                )
+
+    except Exception as e:
+        logger.error(f"Error handling remove_bookmark for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to remove bookmark. 😥", show_alert=True)
+
+
+@app.on_message(filters.regex("^🔖 Saved Videos$") & filters.private)
+async def show_saved_videos(client: Client, message: Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    logger.info(f"User {user_id} requested saved videos.")
+
+    if await is_rate_limited(user_id):
+        await handle_error(client, message, FloodWait(10))
+        logger.warning(f"User {user_id} hit rate limit in show_saved_videos.")
+        return
+    
+    old_message_id_to_delete = None
+    if user_id in active_video_message:
+        old_message_id_to_delete = active_video_message[user_id]['message_id']
+        clear_active_video_message(user_id)
+
+    bookmarked_videos = get_bookmarked_videos(user_id)
+
+    if not bookmarked_videos:
+        sent_success, sent_message_or_error = await send_and_replace_message(
+            client,
+            chat_id,
+            old_message_id=old_message_id_to_delete,
+            new_message_type="text",
+            text_content="You haven't saved any videos yet. 😔",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_main_menu")]])
+        )
+        if not sent_success:
+            await message.reply(sent_message_or_error)
+        logger.info(f"User {user_id} has no saved videos.")
+        return
+
+    # Display the first saved video
+    first_video = bookmarked_videos[0]
+    sent_success, sent_message_or_error = await send_and_replace_message(
+        client,
+        chat_id,
+        old_message_id=old_message_id_to_delete,
+        new_message_type="video",
+        video_data=first_video,
+        reply_markup=saved_video_nav_keyboard(first_video['uuid'], 0, len(bookmarked_videos))
+    )
+
+    if sent_success:
+        logger.info(f"User {user_id} displayed first saved video {first_video['uuid']}.")
+    else:
+        await message.reply(sent_message_or_error)
+        logger.error(f"User {user_id} failed to display first saved video: {sent_message_or_error}")
+
+@app.on_callback_query(filters.regex(r"^saved_next_(.+)_(\d+)$"))
+async def saved_next_video(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} requested next saved video.")
+    try:
+        _, video_uuid, current_index_str = callback_query.data.split('_')
+        current_index = int(current_index_str)
+
+        if await is_rate_limited(user_id):
+            await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
+            logger.warning(f"User {user_id} hit rate limit in saved_next_video.")
+            return
+
+        current_active_tracked_message = active_video_message.get(user_id)
+        if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} tried to navigate next saved but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
+            await callback_query.answer("Menu expired. Click '🔖 Saved Videos' to restart. ⏰", show_alert=True)
+            if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
+                try:
+                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                except MessageIdInvalid:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
+            clear_active_video_message(user_id)
+            await client.send_message(chat_id, "Your menu has expired. Please click '🔖 Saved Videos' to get a new one. ⏰")
+            return
+
+        bookmarked_videos = get_bookmarked_videos(user_id)
+        if not bookmarked_videos:
+            await callback_query.answer("You have no saved videos. 😔", show_alert=True)
+            await callback_query.message.edit_text("You haven't saved any videos yet. 😔")
+            clear_active_video_message(user_id)
+            return
+
+        next_index = (current_index + 1) % len(bookmarked_videos) # Loop back to start if at end
+        next_video_data = bookmarked_videos[next_index]
+
+        sent_success, sent_message_or_error = await send_and_replace_message(
+            client,
+            chat_id,
+            old_message_id=callback_query.message.id,
+            new_message_type="video",
+            video_data=next_video_data,
+            reply_markup=saved_video_nav_keyboard(next_video_data['uuid'], next_index, len(bookmarked_videos))
+        )
+        
+        if sent_success:
+            logger.info(f"User {user_id} navigated to next saved video {next_video_data['uuid']} (index {next_index}).")
+            await callback_query.answer()
+        else:
+            logger.error(f"User {user_id} failed to send next saved video: {sent_message_or_error}.")
+            await callback_query.answer("❌ Failed to load next saved video. Please try again. 😥", show_alert=True)
+            clear_active_video_message(user_id)
+
+@app.on_callback_query(filters.regex(r"^saved_prev_(.+)_(\d+)$"))
+async def saved_prev_video(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} requested previous saved video.")
+    try:
+        _, video_uuid, current_index_str = callback_query.data.split('_')
+        current_index = int(current_index_str)
+
+        if await is_rate_limited(user_id):
+            await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
+            logger.warning(f"User {user_id} hit rate limit in saved_prev_video.")
+            return
+
+        current_active_tracked_message = active_video_message.get(user_id)
+        if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} tried to navigate previous saved but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
+            await callback_query.answer("Menu expired. Click '🔖 Saved Videos' to restart. ⏰", show_alert=True)
+            if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
+                try:
+                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                except MessageIdInvalid:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
+            clear_active_video_message(user_id)
+            await client.send_message(chat_id, "Your menu has expired. Please click '🔖 Saved Videos' to get a new one. ⏰")
+            return
+
+
+        bookmarked_videos = get_bookmarked_videos(user_id)
+        if not bookmarked_videos:
+            await callback_query.answer("You have no saved videos. 😔", show_alert=True)
+            await callback_query.message.edit_text("You haven't saved any videos yet. 😔")
+            clear_active_video_message(user_id)
+            return
+
+        prev_index = (current_index - 1 + len(bookmarked_videos)) % len(bookmarked_videos) # Loop back to end if at start
+        prev_video_data = bookmarked_videos[prev_index]
+
+        sent_success, sent_message_or_error = await send_and_replace_message(
+            client,
+            chat_id,
+            old_message_id=callback_query.message.id,
+            new_message_type="video",
+            video_data=prev_video_data,
+            reply_markup=saved_video_nav_keyboard(prev_video_data['uuid'], prev_index, len(bookmarked_videos))
+        )
+        
+        if sent_success:
+            logger.info(f"User {user_id} navigated to previous saved video {prev_video_data['uuid']} (index {prev_index}).")
+            await callback_query.answer()
+        else:
+            logger.error(f"User {user_id} failed to send previous saved video: {sent_message_or_error}.")
+            await callback_query.answer("❌ Failed to load previous saved video. Please try again. 😥", show_alert=True)
+            clear_active_video_message(user_id)
+
+@app.on_callback_query(filters.regex(r"^show_saved_videos_list$"))
+async def back_to_saved_list(client: Client, callback_query: CallbackQuery):
+    """Handles 'Back to Saved List' button."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} requested to go back to saved video list.")
+
+    if await is_rate_limited(user_id):
+        await callback_query.answer("⚠️ Too many requests. Wait 1 min. ⏳", show_alert=True)
+        logger.warning(f"User {user_id} hit rate limit in back_to_saved_list.")
+        return
+
+    old_message_id_to_delete = callback_query.message.id
+    clear_active_video_message(user_id) # Clear current video message as we're going to a list
+
+    bookmarked_videos = get_bookmarked_videos(user_id)
+
+    if not bookmarked_videos:
+        sent_success, sent_message_or_error = await send_and_replace_message(
+            client,
+            chat_id,
+            old_message_id=old_message_id_to_delete,
+            new_message_type="text",
+            text_content="You haven't saved any videos yet. 😔",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_main_menu")]])
+        )
+        if not sent_success:
+            await callback_query.message.edit_text(sent_message_or_error) # Use edit_text as a fallback
+        logger.info(f"User {user_id} has no saved videos after trying to go back to list.")
+        await callback_query.answer()
+        return
+
+    # Generate a list of buttons for saved videos
+    buttons = []
+    for i, video in enumerate(bookmarked_videos):
+        buttons.append([InlineKeyboardButton(f"📚 {html.escape(video.get('category', 'N/A'))} - Video {i+1}", callback_data=f"view_saved_video_{video['uuid']}_{i}")])
+    
+    buttons.append([InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_main_menu")])
+
+    sent_success, sent_message_or_error = await send_and_replace_message(
+        client,
+        chat_id,
+        old_message_id=old_message_id_to_delete,
+        new_message_type="text",
+        text_content="📚 <b>Your Saved Videos:</b>",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+    if sent_success:
+        logger.info(f"User {user_id} displayed list of saved videos.")
+        await callback_query.answer()
+    else:
+        await callback_query.message.edit_text(sent_message_or_error) # Use edit_text as a fallback
+        logger.error(f"User {user_id} failed to display saved video list: {sent_message_or_error}")
+
+@app.on_callback_query(filters.regex(r"^view_saved_video_(.+)_(\d+)$"))
+async def view_specific_saved_video(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} requested to view specific saved video.")
+    try:
+        _, video_uuid, index_str = callback_query.data.split('_', 2)
+        current_index = int(index_str)
+
+        if await is_rate_limited(user_id):
+            await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
+            logger.warning(f"User {user_id} hit rate limit in view_specific_saved_video.")
+            return
+            
+        current_active_tracked_message = active_video_message.get(user_id)
+        if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} tried to view specific saved video but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
+            await callback_query.answer("Menu expired. Click '🔖 Saved Videos' to restart. ⏰", show_alert=True)
+            if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
+                try:
+                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                except MessageIdInvalid:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
+            clear_active_video_message(user_id)
+            await client.send_message(chat_id, "Your menu has expired. Please click '🔖 Saved Videos' to get a new one. ⏰")
+            return
+
+
+        video = get_video_by_uuid(video_uuid)
+        if not video:
+            remove_bookmark(user_id, video_uuid) # Clean up broken bookmark
+            await callback_query.answer("Video not found or has been removed. Removed from your bookmarks. 🗑️", show_alert=True)
+            await back_to_saved_list(client, callback_query) # Refresh the list
+            return
+
+        bookmarked_videos = get_bookmarked_videos(user_id) # Get the full list for navigation context
+        if not bookmarked_videos:
+             await callback_query.answer("You have no saved videos. 😔", show_alert=True)
+             await callback_query.message.edit_text("You haven't saved any videos yet. 😔")
+             clear_active_video_message(user_id)
+             return
+
+        # Ensure the index is valid for the *current* list of bookmarked videos
+        # This is important because the list might change if premium expires or videos are deleted
+        try:
+            current_index = [v['uuid'] for v in bookmarked_videos].index(video_uuid)
+        except ValueError:
+            # If the video isn't found in the latest bookmarked_videos list, fall back to showing the first one
+            current_index = 0
+            video = bookmarked_videos[0]
+            logger.warning(f"User {user_id} requested video {video_uuid} not found in current bookmarks list. Showing first video instead.")
+
+
+        sent_success, sent_message_or_error = await send_and_replace_message(
+            client,
+            chat_id,
+            old_message_id=callback_query.message.id,
+            new_message_type="video",
+            video_data=video,
+            reply_markup=saved_video_nav_keyboard(video['uuid'], current_index, len(bookmarked_videos))
+        )
+
+        if sent_success:
+            logger.info(f"User {user_id} viewing specific saved video {video['uuid']}.")
+            await callback_query.answer()
+        else:
+            logger.error(f"User {user_id} failed to send specific saved video: {sent_message_or_error}.")
+            await callback_query.answer("❌ Failed to load video. Please try again. 😥", show_alert=True)
+            clear_active_video_message(user_id)
+
+@app.on_callback_query(filters.regex(r"^back_to_main_menu$"))
+async def back_to_main_menu_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'Back to Main Menu' button."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} requested back to main menu.")
+
+    if await is_rate_limited(user_id):
+        await callback_query.answer("⚠️ Too many requests. Wait 1 min. ⏳", show_alert=True)
+        logger.warning(f"User {user_id} hit rate limit in back_to_main_menu_callback.")
+        return
+
+    old_message_id_to_delete = callback_query.message.id
+    clear_active_video_message(user_id)
+
+    try:
+        await client.delete_messages(chat_id, old_message_id_to_delete)
+        logger.info(f"Deleted old message {old_message_id_to_delete} for user {user_id} returning to main menu.")
+    except MessageIdInvalid:
+        logger.warning(f"Message {old_message_id_to_delete} for user {user_id} was already invalid/deleted when returning to main menu.")
+    except Exception as e:
+        logger.error(f"Failed to delete old message {old_message_id_to_delete} for user {user_id} returning to main menu: {e}")
+
+    await client.send_message(
+        chat_id,
+        "You are back in the main menu. What would you like to do? 👇",
+        reply_markup=await get_main_keyboard(user_id)
+    )
+    await callback_query.answer()
+    logger.info(f"User {user_id} returned to main menu.")
+
+# --- End New Bookmark Handlers ---
+
 
 @app.on_message(filters.regex("^👤 Profile$") & filters.private)
 async def profile_btn(client: Client, message: Message):
@@ -1858,6 +2378,36 @@ async def cleanup_expired_data():
             )
             logger.info("Expired premium user status cleanup completed.")
 
+            # New: Handle bookmark limits for users whose premium expired
+            # Find users who were premium but are no longer
+            expired_premium_users = users_collection.find({
+                'premium_until': {'$lt': now},
+                'last_premium_check': {'$lt': now - timedelta(hours=23)} # Check roughly once a day
+            }, {'user_id': 1})
+
+            for user_doc in expired_premium_users:
+                user_id = user_doc['user_id']
+                if not is_premium_user(user_id): # Double check if they are truly no longer premium
+                    current_bookmarks_count = bookmarks_collection.count_documents({'user_id': user_id})
+                    if current_bookmarks_count > config.FREE_USER_BOOKMARK_LIMIT:
+                        logger.info(f"User {user_id}'s premium expired. Cleaning up bookmarks from {current_bookmarks_count} to {config.FREE_USER_BOOKMARK_LIMIT}.")
+                        # Get bookmarks beyond the limit, sorted by timestamp ascending (oldest first)
+                        bookmarks_to_remove = bookmarks_collection.find(
+                            {'user_id': user_id}
+                        ).sort('timestamp', ASCENDING).skip(config.FREE_USER_BOOKMARK_LIMIT)
+
+                        for bookmark in bookmarks_to_remove:
+                            bookmarks_collection.delete_one({'_id': bookmark['_id']})
+                            logger.debug(f"Removed old bookmark for user {user_id}: {bookmark['video_uuid']}")
+            
+                # Update last_premium_check to avoid re-processing too frequently
+                users_collection.update_one(
+                    {'user_id': user_id},
+                    {'$set': {'last_premium_check': now}}
+                )
+            logger.info("Expired premium user bookmark cleanup completed.")
+
+
             history_collection.delete_many({'history': {'$size': 0}})
             logger.info("Empty history documents cleanup completed.")
             
@@ -1886,14 +2436,18 @@ async def verify_and_cleanup_media():
                 if not message_id_in_channel:
                     logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting from DB.")
                     media_collection.delete_one({'uuid': video_uuid})
+                    # Also remove any bookmarks for this video
+                    bookmarks_collection.delete_many({'video_uuid': video_uuid})
                     continue
 
                 try:
                     await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
                     logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
-                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
+                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB and bookmarks.")
                     media_collection.delete_one({'uuid': video_uuid})
+                    # Also remove any bookmarks for this video
+                    bookmarks_collection.delete_many({'video_uuid': video_uuid})
                 except Exception as e:
                     logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
 
@@ -1942,4 +2496,4 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
-        # Any final cleanup can go here
+
