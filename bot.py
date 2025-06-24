@@ -76,6 +76,40 @@ categories_collection.create_index([("name", ASCENDING)], unique=True)
 # --- Pyrogram Client ---
 app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
+# --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
+# This set will hold references to all tasks created with create_task
+active_tasks = set()
+
+def create_tracked_task(coro):
+    """
+    Creates an asyncio task, adds it to the global active_tasks set,
+    and removes it when it finishes (successfully or with an exception).
+    """
+    task = asyncio.create_task(coro)
+    active_tasks.add(task)
+    task.add_done_callback(active_tasks.discard)
+    return task
+
+async def cancel_all_active_tasks():
+    """
+    Cancels all tasks currently being tracked in the active_tasks set.
+    Awaits their completion gracefully (or handles CancelledError).
+    """
+    if not active_tasks:
+        logger.info("No active tasks to cancel.")
+        return
+
+    logger.info(f"Attempting to cancel {len(active_tasks)} active tasks...")
+    for task in list(active_tasks): # Iterate over a copy because the set will be modified
+        if not task.done():
+            task.cancel()
+            
+    # Wait for tasks to complete or be cancelled, with a timeout
+    await asyncio.gather(*active_tasks, return_exceptions=True)
+    logger.info("All active tasks cancelled or completed.")
+    active_tasks.clear() # Ensure the set is empty after cleanup
+
+
 # --- Admin Check Utility ---
 def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
@@ -480,6 +514,8 @@ async def schedule_auto_delete(message: Message, delay: int = 1200):  # 20 minut
         await asyncio.sleep(delay)
         await message.delete()
         logger.info(f"Auto-deleted message {message.id} from chat {message.chat.id}")
+    except asyncio.CancelledError:
+        logger.info(f"Auto-delete task for message {message.id} was cancelled gracefully.")
     except Exception as e:
         logger.error(f"Failed to auto-delete message {message.id}: {e}")
 
@@ -528,7 +564,8 @@ async def send_video_with_auto_delete(client: Client, chat_id: int, video_data: 
         settings = settings_collection.find_one({'_id': 'settings'}) or {}
         auto_delete_enabled = settings.get('auto_delete', True)
         if auto_delete_enabled:
-            asyncio.create_task(schedule_auto_delete(sent_message_or_error))
+            # Use the new tracked task function
+            create_tracked_task(schedule_auto_delete(sent_message_or_error))
         
         # Update the active menu with the new message ID
         set_active_menu(sent_message_or_error.chat.id, sent_message_or_error.id, sent_message_or_error.chat.id)
@@ -1790,6 +1827,9 @@ async def cleanup_expired_data():
                 logger.info(f"Cleaned up expired active menu for user {user_id_to_clear} from memory and attempted message deletion.")
 
             logger.info("Database and active_menus cleanup cycle completed.")
+        except asyncio.CancelledError:
+            logger.info("cleanup_expired_data task cancelled gracefully.")
+            break # Exit the loop when cancelled
         except Exception as e:
             logger.error(f"Error in database cleanup task: {e}", exc_info=True)
         
@@ -1822,6 +1862,9 @@ async def verify_and_cleanup_media():
                     logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
 
             logger.info("Media verification and cleanup task completed.")
+        except asyncio.CancelledError:
+            logger.info("verify_and_cleanup_media task cancelled gracefully.")
+            break # Exit the loop when cancelled
         except Exception as e:
             logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
         
@@ -1831,23 +1874,28 @@ async def verify_and_cleanup_media():
 async def main():
     """Main function to start the bot and background tasks."""
     logger.info("Starting bot...")
+    
+    # Start Pyrogram client
     await app.start()
-    logger.info("Bot has connected to Telegram. Initiating background cleanup and media verification tasks.")
-    # Start background tasks
-    asyncio.create_task(cleanup_expired_data())
-    asyncio.create_task(verify_and_cleanup_media())
+    logger.info("Bot has connected to Telegram.")
+
+    # Schedule long-running background tasks using the new create_tracked_task
+    logger.info("Initiating background cleanup and media verification tasks.")
+    create_tracked_task(cleanup_expired_data())
+    create_tracked_task(verify_and_cleanup_media())
+    
     logger.info("Background tasks initiated. Bot is now idling.")
-    await app.idle() # This keeps the bot running until interrupted
-    logger.info("Bot stopped.")
+    try:
+        await app.idle() # This keeps the bot running until interrupted
+    except asyncio.CancelledError:
+        logger.info("Main bot idle task was cancelled.")
+    finally:
+        logger.info("Stopping bot gracefully...")
+        await cancel_all_active_tasks() # Ensure all custom tasks are cancelled
+        await app.stop() # Stop Pyrogram client
+        logger.info("Bot stopped.")
 
 
 # --- Main Entry Point ---
 if __name__ == '__main__':
-    # Pyrogram's app.run() is a synchronous blocking call that starts the event loop
-    # and runs the client. It handles the "on_ready" equivalent internally.
-    # To run asynchronous tasks alongside app.run(), you would typically
-    # use app.start() and app.idle() in an async context, or create
-    # tasks that run in the same event loop managed by Pyrogram.
-    # The updated `main` function demonstrates this.
     asyncio.run(main())
-
