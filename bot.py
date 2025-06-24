@@ -1887,10 +1887,40 @@ async def main():
         await app.stop() # Stop Pyrogram client (this also stops its internal dispatcher tasks)
         logger.info("Bot stopped.")
 
-# --- Main Entry Point ---
+# --- Signal Handler for Graceful Shutdown ---
+async def shutdown():
+    logger.info("Shutdown initiated by signal.")
+    # Pyrogram's app.idle() usually handles signals and raises CancelledError,
+    # leading to the finally block in main().
+    # However, explicitly calling cancel_all_active_tasks here ensures any lingering
+    # tasks are targeted directly, and app.stop() will follow.
+    await cancel_all_active_tasks()
+    # It's generally good practice to let app.idle() handle the cancellation of its
+    # own loop and then `app.stop()` in the `finally` block of `main`.
+    # If app.idle() is not used, then you'd explicitly call app.stop() here.
+    # For now, this function primarily logs and then the `main`'s `finally` does the heavy lifting.
+
+def handle_signal(signum, frame):
+    logger.info(f"Received signal {signum}. Initiating graceful shutdown.")
+    # Get the current running event loop
+    loop = asyncio.get_event_loop()
+    # Create a task to run the async shutdown function
+    loop.create_task(shutdown())
+
 if __name__ == '__main__':
+    # Register signal handlers for graceful shutdown
+    # This ensures that Ctrl+C (SIGINT) and kill signals (SIGTERM)
+    # are caught and handled by our shutdown logic.
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
     # Pyrogram's app.run() is a blocking call that internally runs asyncio.run() and handles
     # the event loop. By replacing it with an explicit asyncio.run(main()), we get
     # more control over the event loop for graceful shutdown.
-    asyncio.run(main())
-
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot process interrupted by KeyboardInterrupt (Ctrl+C). Shutdown initiated.")
+        # The `finally` block in `main()` will handle the actual cleanup.
+    except Exception as e:
+        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
