@@ -16,7 +16,7 @@ from aiohttp import ClientTimeout
 from collections import defaultdict
 import re
 import html
-import signal # For optional signal handling
+# import signal # Removed: No longer needed for manual signal handling
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -53,7 +53,7 @@ try:
     config = BotConfig()
     # Basic validation for essential configs
     if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.SHORTENER_API_KEY, config.BOT_USERNAME]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME in your environment variables.")
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME in your environment variables.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -1887,41 +1887,13 @@ async def main():
         await app.stop() # Stop Pyrogram client (this also stops its internal dispatcher tasks)
         logger.info("Bot stopped.")
 
-# --- Signal Handler for Graceful Shutdown ---
-async def shutdown():
-    logger.info("Shutdown initiated by signal.")
-    # This task is created when a signal is received.
-    # It logs and then the `finally` block in `main()` will perform the actual cleanup
-    # once `app.idle()` raises CancelledError.
-    # We don't need to explicitly cancel tasks here if `app.idle()` is used,
-    # as `app.idle()` will cause a CancelledError in the main task,
-    # leading to the `finally` block in `main()` which calls `cancel_all_active_tasks()` and `app.stop()`.
-    pass # No direct action needed here, main's finally block handles it.
-
-def handle_signal(signum, frame):
-    logger.info(f"Received signal {signum}. Initiating graceful shutdown.")
-    # Get the current running event loop
-    loop = asyncio.get_event_loop()
-    # Create a task to run the async shutdown function
-    # This schedules `shutdown()` to run, but the primary mechanism for bot shutdown
-    # is `app.idle()` receiving the signal and raising CancelledError.
-    loop.create_task(shutdown())
-    # Optionally, you can also stop the Pyrogram client here directly for immediate shutdown
-    # if `app.idle()` is not used or you want a more aggressive shutdown for some reason.
-    # For now, we rely on `app.idle()` to propagate the cancellation.
-    
-    # To properly stop the loop when a signal is received, you need to call loop.stop()
-    # This will cause asyncio.run() to return.
-    # However, Pyrogram's app.idle() already sets up signal handlers that will stop its internal loop
-    # and propagate CancelledError. So, in most cases, explicitly calling loop.stop() here might
-    # interfere or be redundant if app.idle() is the primary event loop driver.
-    # The current setup where `app.idle()` is used, and the `finally` block in `main` handles cleanup,
-    # is generally robust.
+# --- Removed: Signal Handler for Graceful Shutdown ---
+# The previous signal handling logic conflicted with app.idle()'s built-in shutdown.
+# Relying on app.idle() to raise CancelledError on SIGINT/SIGTERM is the recommended Pyrogram approach.
 
 if __name__ == '__main__':
-    # Register signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
+    # Removed: signal.signal(signal.SIGINT, handle_signal)
+    # Removed: signal.signal(signal.SIGTERM, handle_signal)
 
     try:
         asyncio.run(main())
@@ -1930,3 +1902,4 @@ if __name__ == '__main__':
         # The `finally` block in `main()` will handle the actual cleanup.
     except Exception as e:
         logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
+
