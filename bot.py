@@ -1775,36 +1775,42 @@ async def verify_and_cleanup_media():
         await asyncio.sleep(6 * 3600)
 
 async def main_bot_logic():
-    """Starts the bot and schedules background tasks."""
-    logger.info("Starting bot...")
+    """
+    Main function to start the bot and schedule background tasks.
+    This function will be run once by app.run().
+    """
+    logger.info("Starting bot and scheduling background tasks...")
     
+    # Start the Pyrogram client
     await app.start()
     logger.info("Bot has connected to Telegram.")
 
-    logger.info("Initiating background cleanup and media verification tasks.")
-    # Create and track the background tasks
+    # Schedule background tasks
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     
-    logger.info("Background tasks initiated. Bot is now running.")
-    # Keep the main logic running indefinitely until interrupted
-    # Pyrogram handles the event loop when app.run() is called
-    # In an async function, you can use an indefinite sleep or a Future that never completes
-    # However, since app.run() is used at the __main__ level, it takes care of this.
-    pass
+    logger.info("Background tasks initiated. Bot is now fully operational.")
+    
+    # Keep the main bot logic running. Pyrogram's `idle()` or a similar mechanism
+    # within `app.run()` itself is usually what keeps the bot alive for long polling.
+    # In an async context, you might use asyncio.Event or asyncio.sleep(float('inf'))
+    # if you were managing the event loop manually.
+    # Since app.run() takes care of the blocking, we just need to ensure our
+    # background tasks are started. The Pyrogram handlers will keep the bot responsive.
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    logger.info("Script started. Entering main execution block.")
     try:
-        # Pyrogram's app.run() is a blocking call that handles the event loop internally.
-        # It's suitable for simple bots that don't need a custom asyncio event loop setup.
-        # This will block indefinitely, allowing Pyrogram to process updates.
-        # The main_bot_logic() coroutine will be executed before the bot starts processing updates.
-        print("Bot is running...")
+        # Pyrogram's app.run() is a blocking call that starts the bot and
+        # runs the provided coroutine (main_bot_logic) within its own event loop.
+        # It then handles long polling internally.
         app.run(main_bot_logic())
     except KeyboardInterrupt:
-        logger.info("Bot process interrupted by KeyboardInterrupt (Ctrl+C). Shutdown initiated.")
-        # When app.run() is interrupted, it typically stops the internal loop.
-        # For Pyrogram, app.run() handles the app.stop() on graceful shutdown (Ctrl+C).
+        logger.info("Bot stopped by KeyboardInterrupt (Ctrl+C). Shutting down...")
+        # Pyrogram's app.run() usually handles app.stop() on Ctrl+C.
+        # Ensure any custom cleanup is performed here if needed outside app.stop().
     except Exception as e:
-        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
-
+        logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
+    finally:
+        logger.info("Application exiting.")
+        # Any final cleanup can go here, though Pyrogram's stop usually handles client shutdown.
