@@ -1828,21 +1828,26 @@ async def verify_and_cleanup_media():
         # Run every 6 hours
         await asyncio.sleep(6 * 3600)
 
-@app.on_ready()
-async def startup_tasks(client):
-    """
-    This function contains all the logic that should run once the bot starts and is ready.
-    It initiates background tasks for cleanup and media verification.
-    """
-    logger.info("Bot has started. Initiating background cleanup and media verification tasks.")
-    # Ensure these are created as tasks that run independently
+async def main():
+    """Main function to start the bot and background tasks."""
+    logger.info("Starting bot...")
+    await app.start()
+    logger.info("Bot has connected to Telegram. Initiating background cleanup and media verification tasks.")
+    # Start background tasks
     asyncio.create_task(cleanup_expired_data())
     asyncio.create_task(verify_and_cleanup_media())
-    logger.info("Background tasks initiated successfully.")
+    logger.info("Background tasks initiated. Bot is now idling.")
+    await app.idle() # This keeps the bot running until interrupted
+    logger.info("Bot stopped.")
 
-# --- Main ---
+
+# --- Main Entry Point ---
 if __name__ == '__main__':
-    logger.info("Bot starting...")
-    app.run() # This is a blocking call that starts the client and keeps it running.
-              # The startup_tasks function will be called automatically when the client is ready.
+    # Pyrogram's app.run() is a synchronous blocking call that starts the event loop
+    # and runs the client. It handles the "on_ready" equivalent internally.
+    # To run asynchronous tasks alongside app.run(), you would typically
+    # use app.start() and app.idle() in an async context, or create
+    # tasks that run in the same event loop managed by Pyrogram.
+    # The updated `main` function demonstrates this.
+    asyncio.run(main())
 
