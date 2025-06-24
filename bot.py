@@ -100,12 +100,15 @@ async def cancel_all_active_tasks():
         return
 
     logger.info(f"Attempting to cancel {len(active_tasks)} active tasks...")
-    for task in list(active_tasks): # Iterate over a copy because the set will be modified
+    # Create a copy of the set to iterate, as tasks will be removed by done_callback
+    tasks_to_cancel = list(active_tasks) 
+    for task in tasks_to_cancel:
         if not task.done():
             task.cancel()
             
     # Wait for tasks to complete or be cancelled, with a timeout
-    await asyncio.gather(*active_tasks, return_exceptions=True)
+    # return_exceptions=True prevents asyncio.gather from stopping if one task fails
+    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
     logger.info("All active tasks cancelled or completed.")
     active_tasks.clear() # Ensure the set is empty after cleanup
 
