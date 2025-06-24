@@ -1782,17 +1782,17 @@ async def main_bot_logic():
     logger.info("Starting bot and scheduling background tasks...")
     
     # Start the Pyrogram client
-await app.start()
-logger.info("Bot has connected to Telegram.")
+    await app.start()
+    logger.info("Bot has connected to Telegram.")
 
-# Schedule background tasks
-create_tracked_task(cleanup_expired_data())
-create_tracked_task(verify_and_cleanup_media())
+    # Schedule background tasks
+    create_tracked_task(cleanup_expired_data())
+    create_tracked_task(verify_and_cleanup_media())
 
-logger.info("Background tasks initiated. Bot is now fully operational.")
+    logger.info("Background tasks initiated. Bot is now fully operational.")
 
-# ✅ FIX: Keep the bot alive
-await asyncio.Event().wait()  # <- This is required to prevent exit
+    # ✅ FIX: Keep the bot alive
+    await asyncio.Event().wait()  # <- This is required to prevent exit
 
 
 if __name__ == "__main__":
