@@ -489,19 +489,20 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
             InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category}")
         ],
         [InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat")],
+        # Share button placed on its own row to align with the layout request
         [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")]
     ]
     
-    # Add Remove button for saved videos, Bookmark for others
+    # Add Download button for premium users on its own row
+    if is_premium_user(user_id):
+        buttons.append([InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")])
+
+    # Add Remove button for saved videos, Bookmark for others, each on its own row
     if is_saved:
         buttons.append([InlineKeyboardButton("🗑️ Remove from Saved", callback_data=f"remove_saved_{video_uuid}")])
     else:
         buttons.append([InlineKeyboardButton("❤️ Bookmark", callback_data=f"bookmark_{video_uuid}")])
     
-    # Add Download button for premium users
-    if is_premium_user(user_id):
-        buttons.append([InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")])
-
     return InlineKeyboardMarkup(buttons)
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
@@ -1550,7 +1551,7 @@ async def saved_videos_btn(client: Client, message: Message):
 
     if not video:
         # Fallback if somehow still no video, should be rare now
-        await message.reply("Failed to load your latest saved video. It may have been removed. 😔", reply_markup=await get_main_keyboard(user_id))
+        await message.reply("Failed to load your latest saved video. It may have been removed.😔", reply_markup=await get_main_keyboard(user_id))
         users_collection.update_one(
             {'user_id': user_id},
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}} # Clean up if still an issue
