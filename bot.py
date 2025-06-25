@@ -37,7 +37,7 @@ class BotConfig:
     ADMIN_IDS = [6612030110]
     URL_SHORTENER = 'https://api.linkshortify.com/st'
     SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
-    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
+    TUTORIAL_LINK_2 = 'https://tme/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
@@ -474,21 +474,42 @@ def category_keyboard() -> InlineKeyboardMarkup:
         [[InlineKeyboardButton(f"🎬 {html.escape(cat)}", callback_data=f"cat_{cat}")] for cat in cats]
     )
 
-def video_nav_keyboard(video_uuid: str, category: str, user_id: int) -> InlineKeyboardMarkup:
+def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_from_saved_list_view: bool = False) -> InlineKeyboardMarkup:
     """
-    Keyboard for navigating between videos, including 'Share', 'Download' and 'Bookmark' buttons.
+    Keyboard for navigating between videos, including 'Share', 'Download', 'Bookmark', and 'Remove' buttons.
     The 'Download' button is shown only to premium users.
+    'Remove' button is shown only when viewing a video from the 'Saved Videos' list.
     """
+    # Convert boolean to string '1' or '0' for callback data
+    saved_list_flag = '1' if is_from_saved_list_view else '0'
+
     buttons = [
         [
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{video_uuid}_{category}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next_{video_uuid}_{category}")
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{video_uuid}_{category}_{saved_list_flag}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"next_{video_uuid}_{category}_{saved_list_flag}")
         ],
         [InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat")],
-        [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")],
-        [InlineKeyboardButton("❤️ Bookmark", callback_data=f"bookmark_{video_uuid}")] # Added Bookmark button
+        [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")]
     ]
     
+    # Check if the currently displayed video is in the user's bookmarks
+    # This ensures the 'Bookmark'/'Remove' button accurately reflects its status,
+    # regardless of how the user arrived at the video (category, shared link, history).
+    user_doc = users_collection.find_one({'user_id': user_id})
+    bookmarked_videos = user_doc.get('bookmarked_videos', []) if user_doc else []
+    
+    is_bookmarked_by_user = any(v['uuid'] == video_uuid for v in bookmarked_videos)
+
+    if is_from_saved_list_view: # Only show Remove when explicitly viewing from the 'Saved Videos' list
+        if is_bookmarked_by_user:
+            buttons.append([InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_video_{video_uuid}")])
+        else: # This case theoretically shouldn't happen if is_from_saved_list_view is true
+              # but adding a bookmark option as a fallback makes sense.
+            buttons.append([InlineKeyboardButton("❤️ Bookmark", callback_data=f"bookmark_{video_uuid}")])
+    else: # For regular category/shared views, only show Bookmark
+        if not is_bookmarked_by_user:
+            buttons.append([InlineKeyboardButton("❤️ Bookmark", callback_data=f"bookmark_{video_uuid}")])
+
     # Add Download button if user is premium
     if is_premium_user(user_id):
         buttons.append([InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")])
@@ -506,49 +527,6 @@ def buy_token_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)]
     ])
-
-def saved_videos_keyboard(bookmarked_videos: list[dict], page: int = 0, videos_per_page: int = 5) -> InlineKeyboardMarkup:
-    """
-    Keyboard for navigating saved videos.
-    Each button leads to a specific saved video.
-    """
-    total_videos = len(bookmarked_videos)
-    start_index = page * videos_per_page
-    end_index = min(start_index + videos_per_page, total_videos)
-    
-    buttons = []
-    
-    if not bookmarked_videos:
-        buttons.append([InlineKeyboardButton("You haven't saved any videos yet. 😔", callback_data="no_saved_videos")])
-        return InlineKeyboardMarkup(buttons)
-
-    # Add buttons for videos on the current page
-    for i in range(start_index, end_index):
-        video_uuid = bookmarked_videos[i]['uuid']
-        # Fetch video details to display a more meaningful name
-        video_data = get_video_by_uuid(video_uuid)
-        if video_data:
-            # You might want to store video titles/descriptions or generate from category/UUID
-            video_name = f"🎬 {html.escape(video_data.get('category', 'Video'))} (ID: {video_uuid[:6]})"
-            buttons.append([InlineKeyboardButton(video_name, callback_data=f"view_saved_video_{video_uuid}")])
-        else:
-            # If video data is not found (e.g., deleted), provide a placeholder
-            buttons.append([InlineKeyboardButton(f"🚫 Unavailable Video (ID: {video_uuid[:6]})", callback_data=f"unavailable_{video_uuid}")])
-
-    # Add pagination controls
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"saved_page_{page - 1}"))
-    if end_index < total_videos:
-        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"saved_page_{page + 1}"))
-
-    if nav_buttons:
-        buttons.append(nav_buttons)
-    
-    buttons.append([InlineKeyboardButton("🗑️ Clear All Saved Videos", callback_data="confirm_clear_all_saved")])
-    
-    return InlineKeyboardMarkup(buttons)
-
 
 # --- Video Sharing ---
 async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> tuple[bool, dict | str]:
@@ -714,7 +692,7 @@ async def start_cmd(client: Client, message: Message):
                     deep_link_data = deep_link_arg
                 elif deep_link_arg.startswith('saved_video_'): # Handle direct link to a saved video from /savedvideos
                     deep_link_type = 'view_saved_video'
-                    video_uuid_from_link = deep_link_arg[12:]
+                    video_uuid_from_link = deep_link_arg[len('saved_video_'):] # Correct parsing for direct UUID
                     deep_link_data = video_uuid_from_link
 
             if is_new_user:
@@ -763,7 +741,7 @@ async def start_cmd(client: Client, message: Message):
                 if is_new_user and referrer_id_from_video_link:
                     handle_referral(user_id, deep_link_arg)
                 
-                if not user_has_token(user_id): # This checks for tokens for general video access
+                if not user_has_token(user_id):
                     await message.reply("You need a token to watch this video. Please get a token first! 🧐", reply_markup=await get_main_keyboard(user_id))
                     await send_token_earning_options(client, message)
                     break
@@ -780,13 +758,16 @@ async def start_cmd(client: Client, message: Message):
                         old_message_id_to_delete = active_video_message[user_id]['message_id']
                         clear_active_video_message(user_id)
                     
+                    # Determine if it's a view from a saved_video deep link
+                    is_view_from_saved_deep_link = (deep_link_type == 'view_saved_video')
+
                     sent_success, sent_message_or_error = await send_and_replace_message(
                         client,
                         message.chat.id,
                         old_message_id=old_message_id_to_delete,
                         new_message_type="video",
                         video_data=video,
-                        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id)
+                        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_from_saved_list_view=is_view_from_saved_deep_link)
                     )
                     
                     if sent_success:
@@ -974,7 +955,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         old_message_id=callback_query.message.id,
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], category, user_id)
+        reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_from_saved_list_view=False) # Not from saved list view
     )
     
     if sent_success:
@@ -986,14 +967,15 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("❌ Failed to load video. Please try again. 😥", show_alert=True)
         clear_active_video_message(user_id)
 
-@app.on_callback_query(filters.regex(r"^next_(.+)_(.+)$"))
+@app.on_callback_query(filters.regex(r"^next_(.+)_(.+?)_(.+)$"))
 async def next_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' video navigation."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested next video.")
     try:
-        _, current_uuid, category = callback_query.data.split('_')
+        _, current_uuid, category, is_from_saved_list_str = callback_query.data.split('_')
+        is_from_saved_list_view = is_from_saved_list_str == '1'
         
         if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
@@ -1015,30 +997,63 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
-        if category not in get_categories():
-            logger.warning(f"User {user_id} used invalid category '{category}' for next video.")
-            await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
-            return
-        
-        video = get_random_video(category)
-        
-        if not video:
-            logger.warning(f"No more videos found in category '{category}' for user {user_id}.")
-            await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
-            return
-        
+        video = None
+        video_category = category # Default to the category from callback, adjusted if saved view
+
+        if is_from_saved_list_view:
+            user_doc = users_collection.find_one({'user_id': user_id})
+            bookmarked_videos = user_doc.get('bookmarked_videos', []) if user_doc else []
+            
+            # Filter out the current video and any unavailable ones from the bookmarked list
+            available_saved_uuids = [v['uuid'] for v in bookmarked_videos if v['uuid'] != current_uuid and media_collection.find_one({'uuid': v['uuid']})]
+            
+            if not available_saved_uuids:
+                # If no other saved videos available after filtering, check if any videos at all are saved and available
+                all_available_saved_uuids = [v['uuid'] for v in bookmarked_videos if media_collection.find_one({'uuid': v['uuid']})]
+                if all_available_saved_uuids:
+                    # If there's only one saved video (the current one) or all others are unavailable,
+                    # just display the current one again (or a random one if current is gone)
+                    if current_uuid in all_available_saved_uuids:
+                        video = get_video_by_uuid(current_uuid)
+                    else:
+                        video = get_video_by_uuid(random.choice(all_available_saved_uuids))
+                else:
+                    video = None # No saved videos at all or all are unavailable
+            else:
+                next_video_uuid = random.choice(available_saved_uuids)
+                video = get_video_by_uuid(next_video_uuid)
+                
+            if not video:
+                await callback_query.answer("No more saved videos available. 😔", show_alert=True)
+                return
+            
+            # Use the actual category of the found video for display
+            video_category = video['category']
+
+        else: # Regular category browsing
+            if category not in get_categories():
+                logger.warning(f"User {user_id} used invalid category '{category}' for next video.")
+                await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
+                return
+            video = get_random_video(category)
+            if not video:
+                logger.warning(f"No more videos found in category '{category}' for user {user_id}.")
+                await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
+                return
+            video_category = category # Keep category as the one user selected for browsing
+
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
             old_message_id=callback_query.message.id,
             new_message_type="video",
             video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], category, user_id)
+            reply_markup=video_nav_keyboard(video['uuid'], video_category, user_id, is_from_saved_list_view)
         )
         
         if sent_success:
-            save_history(user_id, video['uuid'], category)
-            logger.info(f"User {user_id} navigated to next video {video['uuid']} in category {category}.")
+            save_history(user_id, video['uuid'], video['category']) # Always save history with true category
+            logger.info(f"User {user_id} navigated to next video {video['uuid']} in category {video['category']} (from {'saved' if is_from_saved_list_view else 'category'} view).")
             await callback_query.answer()
         else:
             logger.error(f"User {user_id} failed to send next video: {sent_message_or_error}.")
@@ -1048,13 +1063,16 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} error in next_video: {e}", exc_info=True)
         await callback_query.answer("Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^prev_(.+)_(.+)$"))
+@app.on_callback_query(filters.regex(r"^prev_(.+)_(.+?)_(.+)$"))
 async def prev_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Previous' video navigation."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested previous video.")
     try:
+        _, current_uuid, category, is_from_saved_list_str = callback_query.data.split('_')
+        # is_from_saved_list_view = is_from_saved_list_str == '1' # This is the context from which the prev button was clicked, not relevant for history lookup
+        
         if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
             logger.warning(f"User {user_id} hit rate limit in prev_video.")
@@ -1075,7 +1093,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
-        found_video = get_last_video_from_history(user_id)
+        found_video = get_last_video_from_history(user_id) # History does not care about view context, it's just previous viewed video.
         
         if not found_video:
             logger.warning(f"User {user_id} has no previous video history (or only one entry).")
@@ -1084,14 +1102,20 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
                 show_alert=True
             )
             return
-            
+        
+        # Determine if the 'previous' video now being displayed should be shown with a 'Remove' button.
+        # This depends on whether it's in the user's bookmarked videos.
+        user_doc = users_collection.find_one({'user_id': user_id})
+        bookmarked_videos = user_doc.get('bookmarked_videos', []) if user_doc else []
+        is_prev_video_saved = any(v['uuid'] == found_video['uuid'] for v in bookmarked_videos)
+
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
             old_message_id=callback_query.message.id,
             new_message_type="video",
             video_data=found_video,
-            reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id)
+            reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id, is_prev_video_saved)
         )
         
         if sent_success:
@@ -1183,7 +1207,7 @@ async def refer_btn(client: Client, message: Message):
             return
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this link to earn tokens:\n<code>{html.escape(ref_link)}</code>\n\nInvite your friends and get rewarded! 🎁", reply_markup=referral_keyboard(ref_link))
+        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢", reply_markup=referral_keyboard(ref_link), disable_web_page_preview=True)
         logger.info(f"User {user_id}: Referral link sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
@@ -1433,34 +1457,32 @@ async def saved_videos_btn(client: Client, message: Message):
         )
         logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT} as premium expired or was never premium.")
 
+    # Sort for consistent display in the list (e.g., oldest first)
+    bookmarked_videos_data.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+
     if not bookmarked_videos_data:
         await message.reply("You haven't saved any videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
         return
 
-    # To ensure consistent ordering for pagination, sort by bookmarked_at (oldest first for display order)
-    bookmarked_videos_data.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
-    
-    # Store the sorted list in a temporary state or pass implicitly
-    # For a persistent solution across different messages, you might store this in user_data in DB or redis.
-    # For now, let's just pass it to the keyboard and callback.
-    # This also means the videos_per_page should be small or we handle more complex state.
-    # Let's keep it simple for initial implementation and send a list of direct links.
-
-    # Instead of pagination within this message, we'll offer a direct list.
-    # For larger lists, this should be paginated in the future.
     message_text = "📚 Your Saved Videos:\n\n"
     buttons = []
     
+    # Filter out unavailable videos and build buttons
+    available_buttons_created = False
     for i, video_entry in enumerate(bookmarked_videos_data):
         video_uuid = video_entry['uuid']
         video_data = get_video_by_uuid(video_uuid)
         if video_data:
             video_name = f"🎬 {html.escape(video_data.get('category', 'Video'))} (ID: {video_uuid[:6]})"
             buttons.append([InlineKeyboardButton(video_name, callback_data=f"view_saved_video_{video_uuid}")])
+            available_buttons_created = True
         else:
-            buttons.append([InlineKeyboardButton(f"🚫 Unavailable Video (ID: {video_uuid[:6]})", callback_data=f"unavailable_{video_uuid}")])
+            # If video data is not found (e.g., deleted), provide a placeholder and mark for cleanup
+            buttons.append([InlineKeyboardButton(f"🚫 Unavailable Video (ID: {video_uuid[:6]}) - Click to Remove", callback_data=f"remove_saved_video_{video_uuid}")])
+            # Note: The `verify_and_cleanup_media` task will eventually remove this from DB entirely.
+            # Allowing direct removal from this button for immediate user feedback.
 
-    if not buttons: # If all saved videos are now unavailable
+    if not available_buttons_created and not buttons: # If all saved videos are now unavailable
         await message.reply("You haven't saved any videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
         return
 
@@ -1490,12 +1512,12 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     """Handles viewing a specific saved video."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
-    video_uuid = callback_query.data.split('_', 3)[3] # Correctly parse UUID
+    video_uuid = callback_query.data[len("view_saved_video_"):] # Correctly parse UUID
 
     logger.info(f"User {user_id} requested to view saved video {video_uuid}.")
 
     if await is_rate_limited(user_id):
-        await callback_query.answer("⚠️ You're Browse too quickly. Please wait a minute and try again. ⏳", show_alert=True)
+        await callback_query.answer("⚠️ You're browsing too quickly. Please wait a minute and try again. ⏳", show_alert=True)
         return
 
     if not user_has_token(user_id):
@@ -1523,7 +1545,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         old_message_id=old_message_id_to_delete,
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id)
+        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_from_saved_list_view=True)
     )
 
     if sent_success:
@@ -1539,7 +1561,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
 async def unavailable_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles clicks on unavailable videos in the saved list."""
     user_id = callback_query.from_user.id
-    video_uuid = callback_query.data.split('_', 1)[1]
+    video_uuid = callback_query.data[len("unavailable_"):] # Corrected parsing
     
     await callback_query.answer("This video is no longer available. It may have been removed. 😔", show_alert=True)
     # Optionally remove from saved list if confirmed unavailable.
@@ -1548,6 +1570,81 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
         {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
     )
     logger.info(f"User {user_id} clicked unavailable video {video_uuid}. Removed from bookmarks.")
+
+@app.on_callback_query(filters.regex(r"^remove_saved_video_(.+)$"))
+async def remove_saved_video_callback(client: Client, callback_query: CallbackQuery):
+    """Handles removing a video from the user's saved list."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    video_uuid_to_remove = callback_query.data[len("remove_saved_video_"):]
+
+    logger.info(f"User {user_id} requested to remove saved video {video_uuid_to_remove}.")
+
+    try:
+        user_doc = users_collection.find_one({'user_id': user_id})
+        if not user_doc:
+            await callback_query.answer("User data not found. Please restart the bot.", show_alert=True)
+            return
+
+        bookmarked_videos = user_doc.get('bookmarked_videos', [])
+        
+        # Check if the video is actually in the list
+        if not any(v['uuid'] == video_uuid_to_remove for v in bookmarked_videos):
+            await callback_query.answer("This video is not in your saved list. 🤔", show_alert=True)
+            return
+
+        # Remove the video
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$pull': {'bookmarked_videos': {'uuid': video_uuid_to_remove}}}
+        )
+        
+        await callback_query.answer("Video removed from saved list! ✅")
+        logger.info(f"User {user_id} successfully removed video {video_uuid_to_remove} from saved list.")
+
+        # After removal, try to display another saved video, or the main saved list if none left
+        updated_user_doc = users_collection.find_one({'user_id': user_id})
+        remaining_saved_videos = updated_user_doc.get('bookmarked_videos', [])
+        
+        if remaining_saved_videos:
+            # Pick a random video from the remaining ones
+            next_video_entry = random.choice(remaining_saved_videos)
+            next_video_data = get_video_by_uuid(next_video_entry['uuid'])
+            
+            if next_video_data:
+                sent_success, sent_message_or_error = await send_and_replace_message(
+                    client,
+                    chat_id,
+                    old_message_id=callback_query.message.id,
+                    new_message_type="video",
+                    video_data=next_video_data,
+                    reply_markup=video_nav_keyboard(next_video_data['uuid'], next_video_data['category'], user_id, is_from_saved_list_view=True)
+                )
+                if not sent_success:
+                    logger.error(f"Failed to send next saved video after removal: {sent_message_or_error}")
+                    await client.send_message(chat_id, "❌ Failed to load next video. Please try again or check your saved videos list.")
+            else:
+                # Next random video is unavailable, try showing the list again
+                await callback_query.message.edit_text("Video removed. Loading updated saved list...", reply_markup=None)
+                # Call saved_videos_btn to refresh the list displayed to the user
+                # Create a dummy message object similar to what saved_videos_btn expects
+                dummy_message = Message(
+                    id=callback_query.message.id, # Using the ID of the current message for consistency
+                    chat=callback_query.message.chat,
+                    from_user=callback_query.from_user,
+                    text="🔖 Saved Videos" # Simulating the button click text
+                )
+                await saved_videos_btn(client, dummy_message)
+        else:
+            # No more saved videos left
+            await callback_query.message.edit_text("🗑️ All your saved videos have been cleared! ✨ No more saved videos to display. Click '🎞️ Get Video' to explore!",
+                                                  reply_markup=await get_main_keyboard(user_id))
+            clear_active_video_message(user_id) # Clear the current message tracking
+
+    except Exception as e:
+        logger.error(f"Error removing saved video for user {user_id}, video {video_uuid_to_remove}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to remove video. Please try again later. 😥", show_alert=True)
+
 
 @app.on_callback_query(filters.regex(r"^confirm_clear_all_saved$"))
 async def confirm_clear_all_saved_callback(client: Client, callback_query: CallbackQuery):
@@ -2244,3 +2341,4 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
+
