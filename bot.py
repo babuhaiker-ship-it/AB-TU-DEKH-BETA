@@ -46,6 +46,7 @@ class BotConfig:
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
     SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
+    FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
 
 try:
     config = BotConfig()
@@ -74,8 +75,8 @@ media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
-# Ensure 'premium_until' field for users collection
-users_collection.create_index([("premium_until", ASCENDING)], expireAfterSeconds=0) # For automatic document expiration if needed for premium status
+# Ensure 'premium_until' field for users collection and TTL for automatic expiration
+users_collection.create_index([("premium_until", ASCENDING)], expireAfterSeconds=0)
 
 # --- Pyrogram Client ---
 app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
@@ -216,9 +217,6 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY):
 
 def is_premium_user(user_id: int) -> bool:
     """Checks if a user is a premium user (has an active token)."""
-    # This function now relies on the `premium_until` field.
-    # We still keep `get_and_cleanup_tokens` for token count display,
-    # but actual premium status check for features uses `premium_until`.
     user = users_collection.find_one({'user_id': user_id})
     if not user:
         return False
@@ -227,27 +225,14 @@ def is_premium_user(user_id: int) -> bool:
     if premium_until and premium_until > datetime.utcnow():
         return True
     
-    # If premium_until is in the past or not set, check for valid tokens
-    # and update premium_until if found. This acts as a fallback/sync.
-    valid_tokens = get_and_cleanup_tokens(user_id)
-    if valid_tokens:
-        latest_expiry = max(t['expires_at'] for t in valid_tokens)
-        if latest_expiry > datetime.utcnow():
-            users_collection.update_one(
-                {'user_id': user_id},
-                {'$set': {'premium_until': latest_expiry}}
-            )
-            return True
-    
-    # Ensure premium_until is removed if no valid tokens
-    users_collection.update_one(
-        {'user_id': user_id},
-        {'$unset': {'premium_until': ""}}
-    )
     return False
 
 def user_has_token(user_id: int) -> bool:
     """Checks if a user has any valid tokens (for non-premium features)."""
+    # This function is used to gate general video access.
+    # Premium users implicitly 'have tokens' through their premium_until status.
+    if is_premium_user(user_id):
+        return True
     return len(get_and_cleanup_tokens(user_id)) > 0
 
 
@@ -406,7 +391,7 @@ def clear_active_video_message(user_id: int):
         del active_video_message[user_id]
         logger.info(f"Active video message cleared for user {user_id}.")
 
-async def send_and_replace_message(client: Client, chat_id: int, old_message_id: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None) -> tuple[bool, Message | str]:
+async def send_and_replace_message(client: Client, chat_id: int, old_message_id: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None) -> tuple[bool, Message | str]:
     """
     Deletes the old message (if provided) and sends a new video or text message.
     Updates the active_video_message tracking.
@@ -438,10 +423,10 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                 protect_content=protect_content_for_user
             )
             success = True
-        elif new_message_type == "text" and reply_markup:
+        elif new_message_type == "text" and text_content:
             sent_message = await client.send_message(
                 chat_id,
-                "🎬 <b>Choose a Category:</b>",
+                text_content,
                 reply_markup=reply_markup
             )
             success = True
@@ -468,7 +453,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton("🎞️ Get Video"), KeyboardButton("👤 Profile")],
         [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
-        [KeyboardButton("🔄 Refresh Token")]
+        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")] # Added Saved Videos button
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -491,7 +476,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
 
 def video_nav_keyboard(video_uuid: str, category: str, user_id: int) -> InlineKeyboardMarkup:
     """
-    Keyboard for navigating between videos, including 'Share' and 'Download' buttons.
+    Keyboard for navigating between videos, including 'Share', 'Download' and 'Bookmark' buttons.
     The 'Download' button is shown only to premium users.
     """
     buttons = [
@@ -500,7 +485,8 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int) -> InlineKe
             InlineKeyboardButton("➡️ Next", callback_data=f"next_{video_uuid}_{category}")
         ],
         [InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat")],
-        [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")]
+        [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")],
+        [InlineKeyboardButton("❤️ Bookmark", callback_data=f"bookmark_{video_uuid}")] # Added Bookmark button
     ]
     
     # Add Download button if user is premium
@@ -520,6 +506,49 @@ def buy_token_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)]
     ])
+
+def saved_videos_keyboard(bookmarked_videos: list[dict], page: int = 0, videos_per_page: int = 5) -> InlineKeyboardMarkup:
+    """
+    Keyboard for navigating saved videos.
+    Each button leads to a specific saved video.
+    """
+    total_videos = len(bookmarked_videos)
+    start_index = page * videos_per_page
+    end_index = min(start_index + videos_per_page, total_videos)
+    
+    buttons = []
+    
+    if not bookmarked_videos:
+        buttons.append([InlineKeyboardButton("You haven't saved any videos yet. 😔", callback_data="no_saved_videos")])
+        return InlineKeyboardMarkup(buttons)
+
+    # Add buttons for videos on the current page
+    for i in range(start_index, end_index):
+        video_uuid = bookmarked_videos[i]['uuid']
+        # Fetch video details to display a more meaningful name
+        video_data = get_video_by_uuid(video_uuid)
+        if video_data:
+            # You might want to store video titles/descriptions or generate from category/UUID
+            video_name = f"🎬 {html.escape(video_data.get('category', 'Video'))} (ID: {video_uuid[:6]})"
+            buttons.append([InlineKeyboardButton(video_name, callback_data=f"view_saved_video_{video_uuid}")])
+        else:
+            # If video data is not found (e.g., deleted), provide a placeholder
+            buttons.append([InlineKeyboardButton(f"🚫 Unavailable Video (ID: {video_uuid[:6]})", callback_data=f"unavailable_{video_uuid}")])
+
+    # Add pagination controls
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"saved_page_{page - 1}"))
+    if end_index < total_videos:
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"saved_page_{page + 1}"))
+
+    if nav_buttons:
+        buttons.append(nav_buttons)
+    
+    buttons.append([InlineKeyboardButton("🗑️ Clear All Saved Videos", callback_data="confirm_clear_all_saved")])
+    
+    return InlineKeyboardMarkup(buttons)
+
 
 # --- Video Sharing ---
 async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> tuple[bool, dict | str]:
@@ -653,7 +682,8 @@ async def start_cmd(client: Client, message: Message):
                     'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                     'joined_date': datetime.utcnow(),
                     'referral_count': 0,
-                    'premium_until': None # Initialize premium_until for new users
+                    'premium_until': None, # Initialize premium_until for new users
+                    'bookmarked_videos': [] # Initialize bookmarked_videos for new users
                 })
                 add_token(user_id, config.NEW_USER_TOKENS * 86400)
                 logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
@@ -682,6 +712,10 @@ async def start_cmd(client: Client, message: Message):
                 elif deep_link_arg.startswith('ref_'):
                     deep_link_type = 'referral'
                     deep_link_data = deep_link_arg
+                elif deep_link_arg.startswith('saved_video_'): # Handle direct link to a saved video from /savedvideos
+                    deep_link_type = 'view_saved_video'
+                    video_uuid_from_link = deep_link_arg[12:]
+                    deep_link_data = video_uuid_from_link
 
             if is_new_user:
                 if deep_link_type == 'referral':
@@ -710,19 +744,19 @@ async def start_cmd(client: Client, message: Message):
                         "🎉 <b>Success!</b> Click on '🎞️ Get Video' to watch spicy content.",
                         reply_markup=await get_main_keyboard(user_id)
                     )
-            elif deep_link_type == 'video_share':
-                logger.info(f"User {user_id} attempting to view shared video {video_uuid_from_link}")
+            elif deep_link_type == 'video_share' or deep_link_type == 'view_saved_video':
+                logger.info(f"User {user_id} attempting to view shared/saved video {video_uuid_from_link}")
                             
                 try:
                     uuid.UUID(video_uuid_from_link)
                 except ValueError:
-                    logger.warning(f"User {user_id} attempted to view shared video with invalid UUID format: {video_uuid_from_link}.")
+                    logger.warning(f"User {user_id} attempted to view shared/saved video with invalid UUID format: {video_uuid_from_link}.")
                     await message.reply("Invalid video link format. 🐛", reply_markup=await get_main_keyboard(user_id))
                     break
 
                 video_found_in_db = media_collection.find_one({'uuid': video_uuid_from_link})
                 if not video_found_in_db:
-                    logger.warning(f"User {user_id} attempted to view non-existent shared video UUID {video_uuid_from_link}.")
+                    logger.warning(f"User {user_id} attempted to view non-existent shared/saved video UUID {video_uuid_from_link}.")
                     await message.reply("Invalid video link. 😔", reply_markup=await get_main_keyboard(user_id))
                     break
 
@@ -757,7 +791,7 @@ async def start_cmd(client: Client, message: Message):
                     
                     if sent_success:
                         save_history(user_id, video['uuid'], video['category'])
-                        logger.info(f"User {user_id} sent shared video {video_uuid_from_link} as new menu.")
+                        logger.info(f"User {user_id} sent shared/saved video {video_uuid_from_link} as new menu.")
                     else:
                         await message.reply(sent_message_or_error)
                 break
@@ -788,7 +822,8 @@ async def help_cmd(client: Client, message: Message):
         "- Use '🎞️ Get Video' to watch spicy content. 🔥\n"
         "- Each token gives you 24 hours access. ⏳\n"
         "- Earn tokens by referral, refreshing ads, or buying them. 💰\n"
-        "- Use '👤 Profile' to check your stats. 📈\n\n"
+        "- Use '👤 Profile' to check your stats. 📈\n"
+        "- Use '🔖 Saved Videos' to view your bookmarked videos. ❤️\n\n"
         "Enjoy your spicy journey! 🌶️",
         reply_markup=await get_main_keyboard(user_id)
     )
@@ -807,9 +842,17 @@ async def profile_cmd(client: Client, message: Message):
     tokens = get_and_cleanup_tokens(user_id)
     referral_count = user.get('referral_count', 0) if user else 0
     referred_by = user.get('referred_by', None) if user else None
+    bookmarked_videos = user.get('bookmarked_videos', [])
     
-    # Determine user status
-    user_status = "Premium User 💎" if is_premium_user(user_id) else "Free User ✨"
+    # Determine user status and save limit
+    is_premium = is_premium_user(user_id)
+    user_status = "Premium User 💎" if is_premium else "Free User ✨"
+    
+    if is_premium:
+        save_limit_display = f"{len(bookmarked_videos)}/Unlimited"
+    else:
+        save_limit_display = f"{len(bookmarked_videos)}/{config.FREE_USER_SAVE_LIMIT}"
+
 
     views_doc = history_collection.find_one({'user_id': user_id})
     view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
@@ -820,6 +863,7 @@ async def profile_cmd(client: Client, message: Message):
         f"<b>Status:</b> {user_status}\n" # Display user status here
         f"<b>Tokens:</b> {len(tokens)} 🪙\n"
         f"<b>Video Views:</b> {view_count} 🎞️\n"
+        f"<b>Saved Videos:</b> {save_limit_display} ❤️\n" # Display saved video count/limit
         f"<b>Referrals:</b> {referral_count} 👥\n"
         f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗\n"
         f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}",
@@ -869,6 +913,7 @@ async def get_video(client: Client, message: Message):
         chat_id,
         old_message_id=old_message_id_to_delete,
         new_message_type="text",
+        text_content="🎬 <b>Choose a Category:</b>",
         reply_markup=category_keyboard()
     )
 
@@ -1312,6 +1357,241 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     except Exception as e:
         logger.error(f"Error handling download for user {user_id}, video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to send video for download. Please try again later. 😥", show_alert=True)
+
+
+@app.on_callback_query(filters.regex(r"^bookmark_(.+)$"))
+async def bookmark_video_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'Bookmark' video callback."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 1)[1]
+
+    logger.info(f"User {user_id} requested to bookmark video {video_uuid}.")
+
+    try:
+        user = users_collection.find_one({'user_id': user_id})
+        if not user:
+            await callback_query.answer("User not found. Please restart the bot.", show_alert=True)
+            return
+
+        bookmarked_videos = user.get('bookmarked_videos', [])
+        
+        # Check if already bookmarked
+        if any(v['uuid'] == video_uuid for v in bookmarked_videos):
+            await callback_query.answer("This video is already bookmarked! ❤️", show_alert=True)
+            return
+
+        is_premium = is_premium_user(user_id)
+        
+        # Check free user limit
+        if not is_premium and len(bookmarked_videos) >= config.FREE_USER_SAVE_LIMIT:
+            await callback_query.answer(f"You've reached your limit of {config.FREE_USER_SAVE_LIMIT} saved videos! Upgrade to Premium for unlimited saves. ✨", show_alert=True)
+            return
+
+        # Add the video with timestamp for ordering
+        bookmarked_videos.append({'uuid': video_uuid, 'bookmarked_at': datetime.utcnow()})
+        
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'bookmarked_videos': bookmarked_videos}}
+        )
+        
+        await callback_query.answer("Video bookmarked successfully! ❤️")
+        logger.info(f"User {user_id} bookmarked video {video_uuid}.")
+
+    except Exception as e:
+        logger.error(f"Error handling bookmark for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to bookmark video. Please try again later. 😥", show_alert=True)
+
+@app.on_message(filters.regex("^🔖 Saved Videos$") & filters.private)
+async def saved_videos_btn(client: Client, message: Message):
+    """Handles 'Saved Videos' button click."""
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    logger.info(f"User {user_id} clicked Saved Videos button.")
+
+    if await is_rate_limited(user_id):
+        await handle_error(client, message, FloodWait(10))
+        logger.warning(f"User {user_id} hit rate limit in saved_videos_btn.")
+        return
+
+    user = users_collection.find_one({'user_id': user_id})
+    if not user:
+        await message.reply("User not found. Please restart the bot.", reply_markup=await get_main_keyboard(user_id))
+        return
+
+    bookmarked_videos_data = user.get('bookmarked_videos', [])
+
+    # Filter/truncate based on premium status
+    if not is_premium_user(user_id) and len(bookmarked_videos_data) > config.FREE_USER_SAVE_LIMIT:
+        # Sort by bookmarked_at (most recent first) and take the top 100
+        bookmarked_videos_data.sort(key=lambda x: x.get('bookmarked_at', datetime.min), reverse=True)
+        bookmarked_videos_data = bookmarked_videos_data[:config.FREE_USER_SAVE_LIMIT]
+        # Update DB to reflect the truncation for free users if not already done
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'bookmarked_videos': bookmarked_videos_data}}
+        )
+        logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT} as premium expired or was never premium.")
+
+    if not bookmarked_videos_data:
+        await message.reply("You haven't saved any videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
+        return
+
+    # To ensure consistent ordering for pagination, sort by bookmarked_at (oldest first for display order)
+    bookmarked_videos_data.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+    
+    # Store the sorted list in a temporary state or pass implicitly
+    # For a persistent solution across different messages, you might store this in user_data in DB or redis.
+    # For now, let's just pass it to the keyboard and callback.
+    # This also means the videos_per_page should be small or we handle more complex state.
+    # Let's keep it simple for initial implementation and send a list of direct links.
+
+    # Instead of pagination within this message, we'll offer a direct list.
+    # For larger lists, this should be paginated in the future.
+    message_text = "📚 Your Saved Videos:\n\n"
+    buttons = []
+    
+    for i, video_entry in enumerate(bookmarked_videos_data):
+        video_uuid = video_entry['uuid']
+        video_data = get_video_by_uuid(video_uuid)
+        if video_data:
+            video_name = f"🎬 {html.escape(video_data.get('category', 'Video'))} (ID: {video_uuid[:6]})"
+            buttons.append([InlineKeyboardButton(video_name, callback_data=f"view_saved_video_{video_uuid}")])
+        else:
+            buttons.append([InlineKeyboardButton(f"🚫 Unavailable Video (ID: {video_uuid[:6]})", callback_data=f"unavailable_{video_uuid}")])
+
+    if not buttons: # If all saved videos are now unavailable
+        await message.reply("You haven't saved any videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
+        return
+
+    buttons.append([InlineKeyboardButton("🗑️ Clear All Saved Videos", callback_data="confirm_clear_all_saved")])
+
+    old_message_id_to_delete = None
+    if user_id in active_video_message:
+        old_message_id_to_delete = active_video_message[user_id]['message_id']
+        clear_active_video_message(user_id)
+
+    sent_success, sent_message_or_error = await send_and_replace_message(
+        client,
+        chat_id,
+        old_message_id=old_message_id_to_delete,
+        new_message_type="text",
+        text_content=message_text,
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+    if not sent_success:
+        await message.reply(sent_message_or_error)
+        logger.error(f"User {user_id} failed to send saved videos list: {sent_message_or_error}")
+
+
+@app.on_callback_query(filters.regex(r"^view_saved_video_(.+)$"))
+async def view_saved_video_callback(client: Client, callback_query: CallbackQuery):
+    """Handles viewing a specific saved video."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    video_uuid = callback_query.data.split('_', 3)[3] # Correctly parse UUID
+
+    logger.info(f"User {user_id} requested to view saved video {video_uuid}.")
+
+    if await is_rate_limited(user_id):
+        await callback_query.answer("⚠️ You're Browse too quickly. Please wait a minute and try again. ⏳", show_alert=True)
+        return
+
+    if not user_has_token(user_id):
+        await callback_query.answer("You need a token to watch this video. Please get a token first! 🧐", show_alert=True)
+        # Optionally, send earning options after the answer
+        await send_token_earning_options(client, callback_query.message)
+        return
+
+    video = get_video_by_uuid(video_uuid)
+    if not video:
+        await callback_query.answer("Video not found or has been removed. 😔", show_alert=True)
+        # Remove from saved list if it's no longer available
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+        )
+        return
+
+    old_message_id_to_delete = callback_query.message.id
+    clear_active_video_message(user_id) # Clear previous message state
+
+    sent_success, sent_message_or_error = await send_and_replace_message(
+        client,
+        chat_id,
+        old_message_id=old_message_id_to_delete,
+        new_message_type="video",
+        video_data=video,
+        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id)
+    )
+
+    if sent_success:
+        save_history(user_id, video['uuid'], video['category'])
+        await callback_query.answer()
+        logger.info(f"User {user_id} viewed saved video {video_uuid}.")
+    else:
+        await callback_query.answer("❌ Failed to load saved video. Please try again. 😥", show_alert=True)
+        logger.error(f"User {user_id} failed to load saved video {video_uuid}: {sent_message_or_error}")
+
+
+@app.on_callback_query(filters.regex(r"^unavailable_(.+)$"))
+async def unavailable_video_callback(client: Client, callback_query: CallbackQuery):
+    """Handles clicks on unavailable videos in the saved list."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 1)[1]
+    
+    await callback_query.answer("This video is no longer available. It may have been removed. 😔", show_alert=True)
+    # Optionally remove from saved list if confirmed unavailable.
+    users_collection.update_one(
+        {'user_id': user_id},
+        {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+    )
+    logger.info(f"User {user_id} clicked unavailable video {video_uuid}. Removed from bookmarks.")
+
+@app.on_callback_query(filters.regex(r"^confirm_clear_all_saved$"))
+async def confirm_clear_all_saved_callback(client: Client, callback_query: CallbackQuery):
+    """Asks for confirmation before clearing all saved videos."""
+    user_id = callback_query.from_user.id
+    logger.info(f"User {user_id} requested to confirm clearing all saved videos.")
+    
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Yes, Clear All", callback_data="clear_all_saved_videos")],
+        [InlineKeyboardButton("❌ No, Keep Them", callback_data="cancel_clear_saved")]
+    ])
+    
+    await callback_query.message.edit_text(
+        "⚠️ Are you sure you want to clear ALL your saved videos? This action cannot be undone.",
+        reply_markup=reply_markup
+    )
+    await callback_query.answer()
+
+@app.on_callback_query(filters.regex(r"^clear_all_saved_videos$"))
+async def clear_all_saved_videos_callback(client: Client, callback_query: CallbackQuery):
+    """Clears all saved videos for the user."""
+    user_id = callback_query.from_user.id
+    logger.info(f"User {user_id} confirmed clearing all saved videos.")
+
+    try:
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'bookmarked_videos': []}}
+        )
+        await callback_query.message.edit_text("🗑️ All your saved videos have been cleared! ✨")
+        await callback_query.answer("All saved videos cleared.")
+        logger.info(f"User {user_id} successfully cleared all saved videos.")
+    except Exception as e:
+        logger.error(f"Error clearing all saved videos for user {user_id}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to clear saved videos. Please try again. 😥", show_alert=True)
+        await callback_query.message.edit_text("❌ Failed to clear saved videos. Please try again. 😥")
+
+@app.on_callback_query(filters.regex(r"^cancel_clear_saved$"))
+async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQuery):
+    """Cancels clearing all saved videos."""
+    user_id = callback_query.from_user.id
+    logger.info(f"User {user_id} cancelled clearing all saved videos.")
+    await callback_query.message.edit_text("Operation cancelled. Your saved videos are safe! ✅")
+    await callback_query.answer("Operation cancelled.")
 
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
@@ -1836,7 +2116,7 @@ async def toggle_protect(client: Client, message: Message):
 
 # --- Database Cleanup (No longer deletes messages from chats) ---
 async def cleanup_expired_data():
-    """Periodically cleans up expired tokens and old history entries."""
+    """Periodically cleans up expired tokens and old history entries, and handles premium expiry for bookmarks."""
     while True:
         try:
             now = datetime.utcnow()
@@ -1848,15 +2128,26 @@ async def cleanup_expired_data():
             )
             logger.info("Expired tokens cleanup completed.")
             
-            # Clean up users whose premium_until has passed
-            # This relies on MongoDB's TTL index on 'premium_until' if you choose to use it for auto-deletion of the whole user doc.
-            # However, if you want to simply update their status and not delete the user doc,
-            # you'd need a query like:
-            users_collection.update_many(
-                {'premium_until': {'$lt': now}},
-                {'$unset': {'premium_until': ""}}
-            )
-            logger.info("Expired premium user status cleanup completed.")
+            # Clean up users whose premium_until has passed and truncate bookmarks
+            expired_premium_users = users_collection.find({'premium_until': {'$lt': now}})
+            for user in expired_premium_users:
+                user_id = user['user_id']
+                bookmarked_videos = user.get('bookmarked_videos', [])
+                if len(bookmarked_videos) > config.FREE_USER_SAVE_LIMIT:
+                    # Sort by bookmarked_at (most recent first) and keep only the latest 100
+                    bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min), reverse=True)
+                    truncated_bookmarks = bookmarked_videos[:config.FREE_USER_SAVE_LIMIT]
+                    users_collection.update_one(
+                        {'user_id': user_id},
+                        {'$set': {'bookmarked_videos': truncated_bookmarks, 'premium_until': None}}
+                    )
+                    logger.info(f"Premium expired for user {user_id}. Bookmarks truncated to {config.FREE_USER_SAVE_LIMIT}.")
+                else:
+                    users_collection.update_one(
+                        {'user_id': user_id},
+                        {'$unset': {'premium_until': ""}}
+                    )
+                    logger.info(f"Premium expired for user {user_id}. premium_until field unset.")
 
             history_collection.delete_many({'history': {'$size': 0}})
             logger.info("Empty history documents cleanup completed.")
@@ -1884,16 +2175,26 @@ async def verify_and_cleanup_media():
                 message_id_in_channel = media_item.get('message_id')
                 
                 if not message_id_in_channel:
-                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting from DB.")
+                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting from DB and user bookmarks.")
                     media_collection.delete_one({'uuid': video_uuid})
+                    # Also remove from all user bookmarks
+                    users_collection.update_many(
+                        {},
+                        {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+                    )
                     continue
 
                 try:
                     await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
                     logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
-                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB.")
+                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB and user bookmarks.")
                     media_collection.delete_one({'uuid': video_uuid})
+                    # Also remove from all user bookmarks
+                    users_collection.update_many(
+                        {},
+                        {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+                    )
                 except Exception as e:
                     logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
 
