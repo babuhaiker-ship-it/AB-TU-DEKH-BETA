@@ -484,8 +484,9 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
     """
     buttons = [
         [
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_{video_uuid}_{category}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next_{video_uuid}_{category}")
+            # Updated callback_data format to use | instead of _
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{category}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category}")
         ],
         [InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat")],
         [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")]
@@ -1022,14 +1023,19 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("❌ Failed to load video. Please try again. 😥", show_alert=True)
         clear_active_video_message(user_id)
 
-@app.on_callback_query(filters.regex(r"^next_(.+)_(.+)$"))
+@app.on_callback_query(filters.regex(r"^next\|")) # Updated regex to match new format
 async def next_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' video navigation."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested next video.")
     try:
-        _, current_uuid, category = callback_query.data.split('_')
+        parts = callback_query.data.split('|') # Updated split delimiter
+        if len(parts) != 3: # Added check for valid parts length
+            logger.error(f"Invalid callback data for next_video: {callback_query.data}")
+            await callback_query.answer("Invalid request. Please try again.", show_alert=True)
+            return
+        action, current_uuid, category = parts # Unpack parts
         
         if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
@@ -1117,13 +1123,20 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} error in next_video: {e}", exc_info=True)
         await callback_query.answer("Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^prev_(.+)_(.+)$"))
+@app.on_callback_query(filters.regex(r"^prev\|")) # Updated regex to match new format
 async def prev_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Previous' video navigation."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested previous video.")
     try:
+        parts = callback_query.data.split('|') # Updated split delimiter
+        if len(parts) != 3: # Added check for valid parts length
+            logger.error(f"Invalid callback data for prev_video: {callback_query.data}")
+            await callback_query.answer("Invalid request. Please try again.", show_alert=True)
+            return
+        action, current_uuid, category = parts # Unpack parts
+
         if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
             logger.warning(f"User {user_id} hit rate limit in prev_video.")
