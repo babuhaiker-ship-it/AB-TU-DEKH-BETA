@@ -479,30 +479,38 @@ def category_keyboard() -> InlineKeyboardMarkup:
 
 def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: bool = False) -> InlineKeyboardMarkup:
     """
-    Keyboard for navigating videos, with a Remove button for saved videos.
+    Keyboard for navigating videos, with button arrangements based on whether it's a saved video.
     The 'Download' button is shown only to premium users.
     """
-    buttons = [
-        [
-            # Updated callback_data format to use | instead of _
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{category}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category}")
-        ],
-        [InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat")],
-        # Share button placed on its own row to align with the layout request
-        [InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")]
-    ]
-    
-    # Add Download button for premium users on its own row
-    if is_premium_user(user_id):
-        buttons.append([InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")])
+    buttons = []
 
-    # Add Remove button for saved videos, Bookmark for others, each on its own row
+    # Row 1: Previous and Next
+    buttons.append([
+        InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{category}"),
+        InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category}")
+    ])
+
+    # Row 2: Categories, Share, and Download (if premium)
+    row_2_buttons = [
+        InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"),
+        InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")
+    ]
+    if is_premium_user(user_id):
+        row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
+    buttons.append(row_2_buttons)
+
+    # Row 3: Bookmark or Remove and Bookmark based on is_saved
+    row_3_buttons = []
     if is_saved:
-        buttons.append([InlineKeyboardButton("🗑️ Remove from Saved", callback_data=f"remove_saved_{video_uuid}")])
-    else:
-        buttons.append([InlineKeyboardButton("❤️ Bookmark", callback_data=f"bookmark_{video_uuid}")])
+        row_3_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
+    # The user's format implies bookmark is always present,
+    # and for saved videos, it's on the same row as remove.
+    row_3_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
     
+    # Only add row 3 if there are buttons in it
+    if row_3_buttons:
+        buttons.append(row_3_buttons)
+
     return InlineKeyboardMarkup(buttons)
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
@@ -1551,7 +1559,7 @@ async def saved_videos_btn(client: Client, message: Message):
 
     if not video:
         # Fallback if somehow still no video, should be rare now
-        await message.reply("Failed to load your latest saved video. It may have been removed.😔", reply_markup=await get_main_keyboard(user_id))
+        await message.reply("Failed to load your latest saved video. It may have been removed. 😔", reply_markup=await get_main_keyboard(user_id))
         users_collection.update_one(
             {'user_id': user_id},
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}} # Clean up if still an issue
