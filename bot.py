@@ -32,7 +32,7 @@ class BotConfig:
     BOT_USERNAME = '@Testingnyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    VIDEO_CHANNEL_ID = -1002621716446 # Ensure this is the correct ID of your private content channel
+    VIDEO_CHANNEL_ID = -1002781555849 # Ensure this is the correct ID of your private content channel
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     URL_SHORTENER = 'https://api.linkshortify.com/st'
