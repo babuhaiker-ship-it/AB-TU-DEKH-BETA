@@ -9,7 +9,7 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError
 from pymongo import MongoClient, ASCENDING, ReturnDocument
 import aiohttp
 from aiohttp import ClientTimeout
@@ -32,7 +32,7 @@ class BotConfig:
     BOT_USERNAME = '@Testingnyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    VIDEO_CHANNEL_ID = -1002621716446
+    VIDEO_CHANNEL_ID = -1002621716446 # Ensure this is the correct ID of your private content channel
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     URL_SHORTENER = 'https://api.linkshortify.com/st'
@@ -50,8 +50,8 @@ class BotConfig:
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.SHORTENER_API_KEY, config.BOT_USERNAME]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.SHORTENER_API_KEY, config.BOT_USERNAME, config.VIDEO_CHANNEL_ID]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME, VIDEO_CHANNEL_ID.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -63,11 +63,11 @@ tokens_collection = db['tokens']
 media_collection = db['media']
 history_collection = db['history']
 categories_collection = db['categories']
-settings_collection = db['settings'] # For storing bot-wide settings, including session string
+settings_collection = db['settings']
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
-tokens_collection.create_index([("user_id", ASCENDING)], unique=True)
+tokens_collection.create_index([("user_id", ASCENDING)], unique=True) # Ensure this index exists
 media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
@@ -75,18 +75,11 @@ media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
-# --- Pyrogram Client Initialization (Moved to top-level for decorators) ---
-# Fetch session string before initializing the Pyrogram Client.
-# This ensures 'app' is a Client object when decorators (like @app.on_message) are processed.
-session_doc = settings_collection.find_one({'_id': 'bot_session'})
-session_string = session_doc.get('session_string') if session_doc else None
+# The 'premium_until' field is no longer used for premium status TTL.
+# users_collection.create_index([("premium_until", ASCENDING)], expireAfterSeconds=0)
 
-if session_string:
-    logger.info("Found existing session string. Initializing Pyrogram client with session.")
-    app = Client("spicynyraa", session_string=session_string, api_id=config.API_ID, api_hash=config.API_HASH)
-else:
-    logger.info("No existing session string found. Initializing Pyrogram client with API details.")
-    app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+# --- Pyrogram Client ---
+app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -104,7 +97,7 @@ def create_tracked_task(coro):
 
 async def cancel_all_active_tasks():
     """
-    Cancels all tasks currently being tracked in the active_tasks set.
+    Cancels all tasks currently being tracked in the_active_tasks set.
     Awaits their completion gracefully (or handles CancelledError).
     """
     if not active_tasks:
@@ -247,7 +240,7 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
         try:
             await client.send_message(user_id, "⚠️ <b>Your Premium Access Has Expired!</b> 💔\n\nYour premium token has expired. You are no longer a premium user. Enjoy regular features or purchase new premium access! 🛒")
             logger.info(f"Notified user {user_id} about premium expiry.")
-        except (UserIsBlocked, ChatInvalid):
+        except (UserIsBlocked, ChatInvalid, PeerIdInvalid):
             logger.warning(f"Could not notify user {user_id} about premium expiry; user blocked or chat invalid.")
         except Exception as e:
             logger.error(f"Failed to send premium expiry notification to user {user_id}: {e}")
@@ -354,54 +347,16 @@ def delete_category(name: str) -> tuple[bool, str, int]:
         return False, "Failed to delete category. Please try again.", 0
 
 # --- Video Navigation ---
-def get_random_video_from_db(category: str) -> dict | None:
-    """Retrieves a random video from the specified category from the database."""
+def get_random_video(category: str) -> dict | None:
+    """Retrieves a random video from the specified category."""
     videos = list(media_collection.find({'category': category}))
     if not videos:
         return None
     return random.choice(videos)
 
-def get_video_from_db_by_uuid(uuid_: str) -> dict | None:
-    """Retrieves a video by its UUID from the database without channel verification."""
+def get_video_by_uuid(uuid_: str) -> dict | None:
+    """Retrieves a video by its UUID."""
     return media_collection.find_one({'uuid': uuid_})
-
-async def get_and_verify_video(video_uuid: str) -> dict | None:
-    """
-    Retrieves a video by its UUID and verifies its existence in the channel.
-    If the video is invalid or missing from the channel, it cleans up the entry.
-    Returns the video dictionary if valid, otherwise None.
-    """
-    video = get_video_from_db_by_uuid(video_uuid)
-    if not video or video.get('banned'):
-        logger.warning(f"Video {video_uuid} not found in DB or marked as banned.")
-        return None
-
-    message_id_in_channel = video.get('message_id')
-    if not message_id_in_channel:
-        logger.error(f"Video {video_uuid} has no message_id in channel. Marking for cleanup.")
-        # Mark as banned and let periodic cleanup handle deletion
-        media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
-        return None
-
-    try:
-        # Check if the message still exists and is a video in the channel
-        message = await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
-        if not message or not message.video:
-            logger.warning(f"Message {message_id_in_channel} for video {video_uuid} does not exist or is not a video in channel. Marking for cleanup.")
-            media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
-            return None
-        logger.info(f"Video {video_uuid} successfully verified in channel.")
-        return video
-    except (MessageIdInvalid, ValueError):
-        logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) invalid or deleted from channel. Marking for cleanup.")
-        media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
-        return None
-    except Exception as e:
-        logger.error(f"Error verifying video {video_uuid} in channel: {e}", exc_info=True)
-        # Mark as banned on other errors too, to prevent repeated attempts
-        media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
-        return None
-
 
 def save_history(user_id: int, video_uuid: str, category: str):
     """Saves a video viewing entry to a user's history, limiting to the last 100 entries."""
@@ -433,8 +388,7 @@ def get_last_video_from_history(user_id: int) -> dict | None:
             return None
 
         video_uuid = last_viewed_entry['video_uuid']
-        # Use the simple DB retrieval here, verification will happen at display time.
-        video = get_video_from_db_by_uuid(video_uuid)
+        video = media_collection.find_one({'uuid': video_uuid})
         if video:
             return video
     return None
@@ -466,7 +420,7 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
         try:
             await client.delete_messages(chat_id, old_message_id)
             logger.info(f"Deleted old message {old_message_id} in chat {chat_id}.")
-        except MessageIdInvalid:
+        except (MessageIdInvalid, PeerIdInvalid):
             logger.warning(f"Old message {old_message_id} for deletion in chat {chat_id} was already invalid or deleted.")
         except Exception as e:
             logger.error(f"Failed to delete old message {old_message_id} in chat {chat_id}: {e}")
@@ -480,14 +434,48 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
 
     try:
         if new_message_type == "video" and video_data:
-            sent_message = await client.send_video(
-                chat_id,
-                video_data['file_id'],
-                caption=f"Category: {html.escape(video_data['category'])}",
-                reply_markup=reply_markup,
-                protect_content=protect_content_for_user
-            )
-            success = True
+            # Use forward_messages for persistence as requested
+            # The forwarded message will inherit content protection and original caption from the channel message
+            # So, we send a separate message for the bot's caption and reply_markup
+            if 'message_id' not in video_data or 'channel_id' not in video_data:
+                error_message = "Video data missing 'message_id' or 'channel_id' for forwarding."
+                logger.error(error_message)
+                return False, error_message
+
+            try:
+                # Forward the video from the channel (no caption, no buttons here)
+                # The original upload to the channel should have been without caption/buttons
+                await client.forward_messages(
+                    chat_id=chat_id,
+                    from_chat_id=video_data.get('channel_id', config.VIDEO_CHANNEL_ID), # Use stored channel_id or default
+                    message_ids=video_data['message_id']
+                )
+                logger.info(f"Video {video_data['uuid']} forwarded from channel {video_data.get('channel_id', config.VIDEO_CHANNEL_ID)} message {video_data['message_id']} to user {chat_id}.")
+
+                # Send a separate message for the caption and buttons
+                sent_message = await client.send_message(
+                    chat_id=chat_id,
+                    text=f"Category: {html.escape(video_data['category'])}",
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True # Prevent preview of forwarded message if it contains links
+                )
+                success = True
+            except RPCError as e:
+                # Handle specific Pyrogram RPC errors during forwarding
+                if "MESSAGE_ID_INVALID" in str(e) or "PEER_ID_INVALID" in str(e):
+                    logger.warning(f"Failed to forward video {video_data['uuid']} (message_id: {video_data['message_id']}) to user {chat_id}. Content in channel seems missing or inaccessible. Error: {e}")
+                    error_message = "❌ <b>Video content unavailable.</b>\nThis video might have been removed or is temporarily inaccessible. Please try another or contact support. 😥"
+                    
+                    # Optionally remove the video from DB if it's confirmed invalid/missing from channel
+                    # This is also handled by the periodic cleanup, but can be done immediately here.
+                    media_collection.delete_one({'uuid': video_data['uuid']})
+                    users_collection.update_many(
+                        {},
+                        {'$pull': {'bookmarked_videos': {'uuid': video_data['uuid']}}}
+                    )
+                else:
+                    raise e # Re-raise other RPC errors
+
         elif new_message_type == "text" and text_content:
             sent_message = await client.send_message(
                 chat_id,
@@ -500,16 +488,20 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
             logger.error(error_message)
 
     except Exception as e:
-        logger.error(f"Failed to send new message of type {new_message_type} to chat {chat_id}: {e}")
+        logger.error(f"Failed to send new message of type {new_message_type} to chat {chat_id}: {e}", exc_info=True)
         error_message = f"❌ <b>Failed to send message.</b>\nReason: {e}\nPlease try again later. 😥"
         success = False
 
     if success and isinstance(sent_message, Message):
+        # We track the *last sent message containing the buttons/caption* for deletion.
+        # The forwarded video itself cannot be deleted by message_id from the user's chat.
         set_active_video_message(chat_id, sent_message.id, chat_id)
         logger.info(f"New message {sent_message.id} of type {new_message_type} sent and active video message updated for user {chat_id}.")
         return True, sent_message
     else:
         logger.error(f"Failed to send new message in send_and_replace_message: {error_message}")
+        # If sending the follow-up message fails, ensure the old one is cleared.
+        clear_active_video_message(chat_id) 
         return False, error_message
 
 # --- Keyboards ---
@@ -597,12 +589,14 @@ async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> 
     Handles a user attempting to view a video shared via a deep link.
     Returns (success: bool, result: dict | str), where result is video data on success, or an error message on failure.
     """
-    video = await get_and_verify_video(video_uuid) # Use the new verification function
+    video = get_video_by_uuid(video_uuid)
     if not video:
-        logger.warning(f"User {user_id} attempted to view non-existent or invalid shared video {video_uuid}.")
-        return False, "Oops, invalid link or video unavailable. Try again! 😔"
+        logger.warning(f"User {user_id} attempted to view non-existent shared video {video_uuid}.")
+        return False, "Oops, invalid link. Try again! 😔"
     
-    # Banned status is already handled within get_and_verify_video now
+    if video.get('banned'):
+        logger.warning(f"User {user_id} attempted to view banned video {video_uuid}.")
+        return False, "🚫 This content is no longer available."
     
     return True, video
 
@@ -720,6 +714,7 @@ async def start_cmd(client: Client, message: Message):
                     'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                     'joined_date': datetime.utcnow(),
                     'referral_count': 0,
+                    # 'premium_until': None, # Removed, premium status is now token-based
                     'bookmarked_videos': [],
                     'last_premium_check_status': False # Track last premium status for notifications
                 })
@@ -796,7 +791,7 @@ async def start_cmd(client: Client, message: Message):
                     await message.reply("Invalid video link format. 🐛", reply_markup=await get_main_keyboard(user_id))
                     break
 
-                video_found_in_db = get_video_from_db_by_uuid(video_uuid_from_link) # Initial DB check
+                video_found_in_db = media_collection.find_one({'uuid': video_uuid_from_link})
                 if not video_found_in_db:
                     logger.warning(f"User {user_id} attempted to view non-existent shared/saved video UUID {video_uuid_from_link}.")
                     await message.reply("Invalid video link. 😔", reply_markup=await get_main_keyboard(user_id))
@@ -810,7 +805,7 @@ async def start_cmd(client: Client, message: Message):
                     await send_token_earning_options(client, message)
                     break
                 else:
-                    success, result_or_msg = await handle_shared_video(client, user_id, video_uuid_from_link) # This now calls get_and_verify_video
+                    success, result_or_msg = await handle_shared_video(client, user_id, video_uuid_from_link)
                     if not success:
                         await message.reply(result_or_msg, reply_markup=await get_main_keyboard(user_id))
                         break
@@ -959,7 +954,7 @@ async def get_video(client: Client, message: Message):
         if old_message_id_to_delete:
             try:
                 await client.delete_messages(chat_id, old_message_id_to_delete)
-            except MessageIdInvalid:
+            except (MessageIdInvalid, PeerIdInvalid):
                 pass
             except Exception as e:
                 logger.warning(f"Failed to delete old message {old_message_id_to_delete} for user {user_id}: {e}")
@@ -1006,7 +1001,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
             try:
                 await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-            except MessageIdInvalid:
+            except (MessageIdInvalid, PeerIdInvalid):
                 pass
             except Exception as e:
                 logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
@@ -1030,7 +1025,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         # Filter out videos whose data might be missing from media_collection before selecting
         existing_bookmarked_videos = []
         for bookmark in bookmarked_videos:
-            video_data = get_video_from_db_by_uuid(bookmark['uuid']) # Use simple DB fetch
+            video_data = get_video_by_uuid(bookmark['uuid'])
             if video_data:
                 existing_bookmarked_videos.append(bookmark)
             else:
@@ -1052,17 +1047,20 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         # Select the most recent one from the *existing* bookmarked videos
         latest_bookmark = max(existing_bookmarked_videos, key=lambda x: x.get('bookmarked_at', datetime.min))
         video_uuid = latest_bookmark['uuid']
-        video = await get_and_verify_video(video_uuid) # Use the new verification function here
+        video = get_video_by_uuid(video_uuid) 
 
         if not video:
-            # Fallback if somehow still no video (should be rare now after get_and_verify_video)
-            await callback_query.answer("Saved video not found or is unavailable. It may have been removed. 😔", show_alert=True)
-            # Cleanup already handled by get_and_verify_video, but ensure it's pulled from user bookmarks if it somehow slipped through
+            # Fallback if somehow still no video (should be rare)
+            await callback_query.answer("Saved video not found after selection. It may have been removed. 😔", show_alert=True)
             users_collection.update_one(
                 {'user_id': user_id},
                 {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
             )
             return
+        
+        # Ensure 'channel_id' is present in video data for forwarding
+        if 'channel_id' not in video:
+            video['channel_id'] = config.VIDEO_CHANNEL_ID # Assume default if not explicitly stored
 
         # Send the video directly
         sent_success, sent_message_or_error = await send_and_replace_message(
@@ -1092,27 +1090,20 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         )
         return
     
-    # Loop to find a valid random video, handling potential unavailability
-    retries = 3
-    video = None
-    for _ in range(retries):
-        temp_video = get_random_video_from_db(category) # Get from DB first
-        if temp_video:
-            video = await get_and_verify_video(temp_video['uuid']) # Then verify
-            if video:
-                break
-        logger.warning(f"Attempt {_ + 1}/{retries}: Could not find or verify a random video in category {category}.")
-        await asyncio.sleep(0.5) # Small delay before retrying
-        
+    video = get_random_video(category)
     if not video:
-        logger.warning(f"No valid videos found in category '{category}' for user {user_id} after retries.")
-        await callback_query.answer("No videos in this category or all are unavailable. Try another! 😔", show_alert=True)
+        logger.warning(f"No videos found in category '{category}' for user {user_id}.")
+        await callback_query.answer("No videos in this category. Try another! 😔", show_alert=True)
         await callback_query.message.edit_text(
-            "No videos in this category or all are unavailable. Try another! 😔",
+            "No videos in this category. Try another! 😔",
             reply_markup=category_keyboard()
         )
         return
     
+    # Ensure 'channel_id' is present in video data for forwarding
+    if 'channel_id' not in video:
+        video['channel_id'] = config.VIDEO_CHANNEL_ID # Assume default if not explicitly stored
+
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
@@ -1161,7 +1152,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
                 try:
                     await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-                except MessageIdInvalid:
+                except (MessageIdInvalid, PeerIdInvalid):
                     pass
                 except Exception as e:
                     logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
@@ -1177,7 +1168,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             # Filter out videos whose data might be missing from media_collection
             existing_bookmarked_videos = []
             for bookmark in bookmarked_videos:
-                video_data = get_video_from_db_by_uuid(bookmark['uuid']) # Use simple DB fetch
+                video_data = get_video_by_uuid(bookmark['uuid'])
                 if video_data:
                     existing_bookmarked_videos.append(bookmark)
                 else:
@@ -1193,15 +1184,15 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             
             # Randomly select a video from the *existing* bookmarked videos
             selected_bookmark = random.choice(existing_bookmarked_videos)
-            video_uuid_to_show = selected_bookmark['uuid']
-            video = await get_and_verify_video(video_uuid_to_show) # Use verification here
+            video_uuid = selected_bookmark['uuid']
+            video = get_video_by_uuid(video_uuid)
             
             if not video:
-                # This should ideally not happen after filtering and re-getting/verifying, but for safety:
-                await callback_query.answer("Saved video not found or is unavailable. It may have been removed. 😔", show_alert=True)
+                # This should ideally not happen after filtering and re-getting, but for safety:
+                await callback_query.answer("Saved video not found. It may have been removed. 😔", show_alert=True)
                 users_collection.update_one(
                     {'user_id': user_id},
-                    {'$pull': {'bookmarked_videos': {'uuid': video_uuid_to_show}}}
+                    {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
                 )
                 return
         else:
@@ -1211,22 +1202,15 @@ async def next_video(client: Client, callback_query: CallbackQuery):
                 await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
                 return
 
-            # Loop to find a valid random video, handling potential unavailability
-            retries = 3
-            video = None
-            for _ in range(retries):
-                temp_video = get_random_video_from_db(category) # Get from DB first
-                if temp_video:
-                    video = await get_and_verify_video(temp_video['uuid']) # Then verify
-                    if video:
-                        break
-                logger.warning(f"Attempt {_ + 1}/{retries}: Could not find or verify a random video in category {category} for 'Next' button.")
-                await asyncio.sleep(0.5) # Small delay before retrying
-
+            video = get_random_video(category)
             if not video:
-                await callback_query.answer("No more videos in this category or all are unavailable. Try another! 😔", show_alert=True)
+                await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
                 return
         
+        # Ensure 'channel_id' is present in video data for forwarding
+        if 'channel_id' not in video:
+            video['channel_id'] = config.VIDEO_CHANNEL_ID # Assume default if not explicitly stored
+
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
@@ -1276,7 +1260,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
                 try:
                     await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-                except MessageIdInvalid:
+                except (MessageIdInvalid, PeerIdInvalid):
                     pass
                 except Exception as e:
                     logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
@@ -1284,23 +1268,12 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
-        found_video_from_db = get_last_video_from_history(user_id) # Get from DB first
+        found_video = get_last_video_from_history(user_id)
         
-        if not found_video_from_db:
+        if not found_video:
             logger.warning(f"User {user_id} has no previous video history (or only one entry).")
             await callback_query.answer(
                 "No previous videos available. Try '🎞️ Get Video' to start! 🧐",
-                show_alert=True
-            )
-            return
-
-        # Now verify the video from history
-        found_video = await get_and_verify_video(found_video_from_db['uuid'])
-
-        if not found_video:
-            logger.warning(f"Previous video {found_video_from_db['uuid']} from history is now unavailable for user {user_id}.")
-            await callback_query.answer(
-                "Previous video unavailable. Try '🎞️ Get Video' to get a new one! 🧐",
                 show_alert=True
             )
             return
@@ -1318,6 +1291,10 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         if history_entry and history_entry.get('category') == "saved_videos":
             is_saved_for_prev = True
             
+        # Ensure 'channel_id' is present in video data for forwarding
+        if 'channel_id' not in found_video:
+            found_video['channel_id'] = config.VIDEO_CHANNEL_ID # Assume default if not explicitly stored
+
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
@@ -1359,7 +1336,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
                 try:
                     await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-                except MessageIdInvalid:
+                except (MessageIdInvalid, PeerIdInvalid):
                     pass
                 except Exception as e:
                     logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
@@ -1371,7 +1348,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             await client.delete_messages(chat_id, callback_query.message.id)
             logger.info(f"Deleted current video message {callback_query.message.id} for user {user_id} to show category menu.")
             clear_active_video_message(user_id)
-        except MessageIdInvalid:
+        except (MessageIdInvalid, PeerIdInvalid):
             logger.warning(f"Message {callback_query.message.id} for user {user_id} was already invalid/deleted when changing category.")
             clear_active_video_message(user_id)
         except Exception as e:
@@ -1595,13 +1572,14 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             )
             return
 
-        video = await get_and_verify_video(video_uuid) # Use the new verification function
+        video = get_video_by_uuid(video_uuid)
         if not video:
-            logger.warning(f"Premium user {user_id} requested download for non-existent or unavailable video {video_uuid}.")
-            await callback_query.answer("Video not found or is unavailable. It might have been removed. 😔", show_alert=True)
+            logger.warning(f"Premium user {user_id} requested download for non-existent video {video_uuid}.")
+            await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
             return
 
         # Send the raw video file without any captions or extra buttons
+        # This will be a copy, not a forward, so user can download/save it freely.
         await client.send_video(
             chat_id,
             video=video['file_id'],
@@ -1639,13 +1617,6 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
         if any(v['uuid'] == video_uuid for v in bookmarked_videos):
             await callback_query.answer("This video is already bookmarked! ❤️", show_alert=True)
             return
-
-        # Validate if the video actually exists and is available before bookmarking
-        video_exists_and_valid = await get_and_verify_video(video_uuid)
-        if not video_exists_and_valid:
-            await callback_query.answer("This video is not available and cannot be bookmarked. 😔", show_alert=True)
-            return
-
 
         is_premium = is_premium_user(user_id) # Uses the new logic
         
@@ -1701,28 +1672,19 @@ async def saved_videos_btn(client: Client, message: Message):
         )
         logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT} as premium expired or was never premium.")
 
-    # Filter out videos whose data might be missing from media_collection or are unavailable
+    # Filter out videos whose data might be missing from media_collection
     existing_bookmarked_videos = []
-    # Using a list comprehension to build the list of valid bookmarks
-    # and perform cleanup on the fly within the loop
-    bookmarks_to_keep = []
     for bookmark in bookmarked_videos_data:
-        video_data = await get_and_verify_video(bookmark['uuid']) # Use the new verification function
+        video_data = get_video_by_uuid(bookmark['uuid'])
         if video_data:
-            existing_bookmarked_videos.append(bookmark) # Add original bookmark object
-            bookmarks_to_keep.append(bookmark)
+            existing_bookmarked_videos.append(bookmark)
         else:
-            logger.warning(f"Saved video {bookmark['uuid']} for user {user_id} is unavailable during saved_videos_btn. Removing from bookmarks.")
-            # Removal will be handled by the update_one below for all removed items
-    
-    # Update the user's bookmarked_videos in DB to remove invalid ones
-    if len(bookmarks_to_keep) < len(bookmarked_videos_data):
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'bookmarked_videos': bookmarks_to_keep}}
-        )
-        logger.info(f"User {user_id}'s bookmarked videos updated after removing unavailable videos.")
-
+            logger.warning(f"Saved video {bookmark['uuid']} for user {user_id} not found in media_collection during saved_videos_btn. Removing from bookmarks.")
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
+            )
+            
     if not existing_bookmarked_videos:
         await message.reply("You haven't saved any valid videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
         return
@@ -1730,7 +1692,7 @@ async def saved_videos_btn(client: Client, message: Message):
     # Get the most recent valid bookmarked video to display directly
     latest_bookmark = max(existing_bookmarked_videos, key=lambda x: x.get('bookmarked_at', datetime.min))
     video_uuid = latest_bookmark['uuid']
-    video = await get_and_verify_video(video_uuid) # Verify again (should be fast as it was just verified)
+    video = get_video_by_uuid(video_uuid) 
 
     if not video:
         # Fallback if somehow still no video, should be rare now
@@ -1740,6 +1702,10 @@ async def saved_videos_btn(client: Client, message: Message):
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}} # Clean up if still an issue
         )
         return
+    
+    # Ensure 'channel_id' is present in video data for forwarding
+    if 'channel_id' not in video:
+        video['channel_id'] = config.VIDEO_CHANNEL_ID # Assume default if not explicitly stored
 
     old_message_id_to_delete = None
     if user_id in active_video_message:
@@ -1786,32 +1752,29 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
             user = users_collection.find_one({'user_id': user_id})
             bookmarked_videos = user.get('bookmarked_videos', [])
             
-            # Filter out any videos that no longer exist in media_collection or are unavailable
+            # Filter out any videos that no longer exist in media_collection before processing
             existing_bookmarked_videos = []
-            bookmarks_to_keep = [] # Prepare a list to update DB if needed
             for bookmark in bookmarked_videos:
-                video_data = await get_and_verify_video(bookmark['uuid']) # Use new verification
-                if video_data:
+                if get_video_by_uuid(bookmark['uuid']):
                     existing_bookmarked_videos.append(bookmark)
-                    bookmarks_to_keep.append(bookmark)
                 else:
-                    logger.warning(f"Saved video {bookmark['uuid']} for user {user_id} is unavailable during remove_saved_video_callback. Removing from bookmarks.")
+                    logger.warning(f"Saved video {bookmark['uuid']} for user {user_id} not found in media_collection during remove_saved_video_callback. Removing from bookmarks.")
+                    users_collection.update_one(
+                        {'user_id': user_id},
+                        {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
+                    )
             
-            # Update the user's bookmarked_videos in DB to remove invalid ones
-            if len(bookmarks_to_keep) < len(bookmarked_videos):
-                users_collection.update_one(
-                    {'user_id': user_id},
-                    {'$set': {'bookmarked_videos': bookmarks_to_keep}}
-                )
-                logger.info(f"User {user_id}'s bookmarked videos updated after removing unavailable videos during remove.")
-
             if existing_bookmarked_videos:
                 # Show the next most recent saved video
                 latest_bookmark = max(existing_bookmarked_videos, key=lambda x: x.get('bookmarked_at', datetime.min))
                 next_video_uuid = latest_bookmark['uuid']
-                next_video = await get_and_verify_video(next_video_uuid) # Verify again
+                next_video = get_video_by_uuid(next_video_uuid)
                 
                 if next_video:
+                    # Ensure 'channel_id' is present in video data for forwarding
+                    if 'channel_id' not in next_video:
+                        next_video['channel_id'] = config.VIDEO_CHANNEL_ID # Assume default if not explicitly stored
+
                     sent_success, sent_message_or_error = await send_and_replace_message(
                         client,
                         chat_id,
@@ -1825,7 +1788,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                     else:
                         await client.send_message(chat_id, "❌ Failed to load next saved video. Please try again. 😥")
                 else:
-                    await client.send_message(chat_id, "The next saved video was not found or is unavailable. It may have been removed. 😔")
+                    await client.send_message(chat_id, "The next saved video was not found. It may have been removed. 😔")
             else:
                 # No saved videos left
                 await send_and_replace_message(
@@ -1867,7 +1830,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         await send_token_earning_options(client, callback_query.message)
         return
 
-    video = await get_and_verify_video(video_uuid) # Use new verification
+    video = get_video_by_uuid(video_uuid)
     if not video:
         await callback_query.answer("Video not found or has been removed. 😔", show_alert=True)
         # Remove from saved list if it's no longer available
@@ -1876,6 +1839,10 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
         )
         return
+    
+    # Ensure 'channel_id' is present in video data for forwarding
+    if 'channel_id' not in video:
+        video['channel_id'] = config.VIDEO_CHANNEL_ID # Assume default if not explicitly stored
 
     old_message_id_to_delete = callback_query.message.id
     clear_active_video_message(user_id) # Clear previous message state
@@ -1905,7 +1872,7 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
     video_uuid = callback_query.data.split('_', 1)[1]
     
     await callback_query.answer("This video is no longer available. It may have been removed. 😔", show_alert=True)
-    # Automatically remove from saved list if clicked and confirmed unavailable
+    # Optionally remove from saved list if confirmed unavailable.
     users_collection.update_one(
         {'user_id': user_id},
         {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
@@ -2158,7 +2125,7 @@ async def addtoken_cmd(client: Client, message: Message):
                 {'user_id': target_user_id},
                 {'$set': {'last_premium_check_status': True}}
             )
-        except (UserIsBlocked, ChatInvalid):
+        except (UserIsBlocked, ChatInvalid, PeerIdInvalid):
             logger.warning(f"Could not notify user {target_user_id} about premium access; user blocked or chat invalid.")
         except Exception as notify_e:
             logger.error(f"Failed to notify user {target_user_id} about premium access: {notify_e}")
@@ -2187,19 +2154,6 @@ async def batchadd_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated batch add mode.")
     try:
-        # ** New: Verify bot is admin in the channel **
-        try:
-            chat_member = await client.get_chat_member(config.VIDEO_CHANNEL_ID, "me")
-            if chat_member.status not in ["administrator", "creator"]:
-                await message.reply(f"❌ Bot is not an admin in the video channel ({config.VIDEO_CHANNEL_ID}). Please add it as an admin with 'Send Messages' and 'Manage Content' rights and try again.")
-                logger.error(f"Bot lacks admin rights in channel {config.VIDEO_CHANNEL_ID} for batchadd_cmd.")
-                return
-            logger.info(f"Bot is admin in channel {config.VIDEO_CHANNEL_ID}.")
-        except Exception as e:
-            await message.reply(f"❌ Failed to verify bot's admin status in channel ({config.VIDEO_CHANNEL_ID}): {e}")
-            logger.error(f"Error checking admin status for channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
-            return
-
         categories = get_categories()
         if not categories:
             await message.reply("⚠️ No categories exist. Please create at least one category using /addcategory before starting batch add. ➕")
@@ -2318,6 +2272,24 @@ async def handle_video_batch_add(client: Client, message: Message):
             await message.reply_text("❌ Please send a video file. 🎥")
             return
 
+        # --- Admin Rights Verification for Channel ---
+        try:
+            me = await client.get_me()
+            member = await client.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
+            if not member.can_post_messages: # Bot needs 'Post Messages' permission
+                await message.reply_text(f"⚠️ Error: I am not an admin in the content channel ({config.VIDEO_CHANNEL_ID}) or I don't have 'Post Messages' permission. Please grant me the necessary permissions before adding videos. 🛠️")
+                logger.error(f"Bot lacks 'Post Messages' permission in channel {config.VIDEO_CHANNEL_ID} for admin {user_id}'s batchadd.")
+                return
+        except PeerIdInvalid:
+            await message.reply_text(f"❌ Error: The configured VIDEO_CHANNEL_ID ({config.VIDEO_CHANNEL_ID}) is invalid or inaccessible. Please check it. 🐛")
+            logger.error(f"Configured VIDEO_CHANNEL_ID ({config.VIDEO_CHANNEL_ID}) is invalid or bot is not in it.")
+            return
+        except Exception as e:
+            await message.reply_text(f"❌ Error checking bot's permissions in content channel: {e}. Please ensure the channel ID is correct and I have access. 🐛")
+            logger.error(f"Failed to check bot permissions in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
+            return
+        # --- End Admin Rights Verification ---
+
         file_id = message.video.file_id
         file_unique_id = message.video.file_unique_id
         file_size = message.video.file_size
@@ -2330,23 +2302,18 @@ async def handle_video_batch_add(client: Client, message: Message):
         video_uuid = str(uuid.uuid4())
         
         try:
-            # Ensure the bot is admin in the channel before forwarding
-            chat_member = await client.get_chat_member(config.VIDEO_CHANNEL_ID, "me")
-            if chat_member.status not in ["administrator", "creator"]:
-                await message.reply(f"❌ Bot is not an admin in the video channel ({config.VIDEO_CHANNEL_ID}). Cannot forward video. Please add it as an admin with 'Send Messages' and 'Manage Content' rights.")
-                logger.error(f"Bot lacks admin rights in channel {config.VIDEO_CHANNEL_ID} for handle_video_batch_add.")
-                return
-
+            # Upload the video to the private channel with NO caption as requested
+            # The caption will be added dynamically when sent to users.
             forwarded_message = await client.send_video(
                 chat_id=config.VIDEO_CHANNEL_ID,
                 video=file_id,
-                caption=f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}",
-                protect_content=False # Important: allow bot to re-access this message later
+                caption="", # No caption on initial upload
+                protect_content=True # Keep content protected in the channel
             )
             message_id_in_channel = forwarded_message.id
         except Exception as forward_e:
-            logger.error(f"Failed to forward video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
-            await message.reply_text(f"❌ Failed to forward video to channel. Please check bot's permissions: {forward_e} 🐛")
+            logger.error(f"Failed to upload video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
+            await message.reply_text("❌ Failed to upload video to channel. Please check bot's permissions. 🐛")
             return
 
         video_data = {
@@ -2357,6 +2324,7 @@ async def handle_video_batch_add(client: Client, message: Message):
             "size_bytes": file_size,
             "timestamp": get_current_time(),
             "message_id": message_id_in_channel,
+            "channel_id": config.VIDEO_CHANNEL_ID, # Store channel ID explicitly
             "banned": False
         }
         media_collection.insert_one(video_data)
@@ -2367,6 +2335,7 @@ async def handle_video_batch_add(client: Client, message: Message):
             f"📁 Category: {html.escape(category)}\n"
             f"📊 Size: {format_size(file_size)}\n"
             f"🆔 File ID: <code>{file_id}</code>\n"
+            f"Channel Message ID: <code>{message_id_in_channel}</code>\n" # Display for verification
             f"Videos added in this batch: <b>{batch_add_state[user_id]['count']}</b> 🔢"
         )
     except Exception as e:
@@ -2552,49 +2521,37 @@ async def verify_and_cleanup_media():
     while True:
         logger.info("Starting media verification and cleanup task.")
         try:
-            # First, filter out any already marked as 'banned' and delete them from media_collection
-            # This ensures we don't try to verify them again and that get_and_verify_video's
-            # marking of 'banned' leads to eventual deletion.
-            banned_media_items = list(media_collection.find({"banned": True}))
-            for media_item in banned_media_items:
-                video_uuid = media_item.get('uuid')
-                logger.warning(f"Deleting banned media item {video_uuid} from DB.")
-                media_collection.delete_one({'uuid': video_uuid})
-                # Also remove from all user bookmarks
-                users_collection.update_many(
-                    {},
-                    {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
-                )
-            if banned_media_items:
-                logger.info(f"Cleaned up {len(banned_media_items)} previously marked banned media items.")
-
-            # Now, iterate through remaining active media and verify them
-            all_active_media = list(media_collection.find({"banned": {"$ne": True}})) # Only process non-banned
-            for media_item in all_active_media:
+            all_media = list(media_collection.find({}))
+            for media_item in all_media:
                 video_uuid = media_item.get('uuid')
                 message_id_in_channel = media_item.get('message_id')
-                
+                channel_id_for_media = media_item.get('channel_id', config.VIDEO_CHANNEL_ID) # Use stored channel ID, fallback to config
+
                 if not message_id_in_channel:
-                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Marking as banned for later deletion.")
-                    media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
+                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting from DB and user bookmarks.")
+                    media_collection.delete_one({'uuid': video_uuid})
+                    # Also remove from all user bookmarks
+                    users_collection.update_many(
+                        {},
+                        {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+                    )
                     continue
 
                 try:
-                    # Attempt to get the message to verify its existence
-                    message = await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
-                    if not message or not message.video:
-                        # If message is gone or no longer a video, mark as banned
-                        logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists or is not a video in channel. Marking as banned for later deletion.")
-                        media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
-                    else:
-                        logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
-                except (MessageIdInvalid, ValueError):
-                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) invalid or deleted from channel. Marking as banned for later deletion.")
-                    media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
+                    # Attempt to get the message from the channel
+                    await app.get_messages(channel_id_for_media, message_id_in_channel)
+                    logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel {channel_id_for_media}.")
+                except (MessageIdInvalid, ValueError, PeerIdInvalid):
+                    # If message is invalid, it means it's deleted or inaccessible
+                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel {channel_id_for_media}. Deleting from DB and user bookmarks.")
+                    media_collection.delete_one({'uuid': video_uuid})
+                    # Also remove from all user bookmarks
+                    users_collection.update_many(
+                        {},
+                        {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+                    )
                 except Exception as e:
-                    logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
-                    # Mark as banned on other errors too, to ensure eventual removal
-                    media_collection.update_one({'uuid': video_uuid}, {'$set': {'banned': True}})
+                    logger.error(f"Error verifying media {video_uuid} in channel {channel_id_for_media}: {e}", exc_info=True)
 
             logger.info("Media verification and cleanup task completed.")
         except asyncio.CancelledError:
@@ -2610,31 +2567,11 @@ async def main_bot_logic():
     Main function to start the bot and schedule background tasks.
     This function will be run once by app.run().
     """
-    # 'app' is already initialized at the top-level due to decorator requirements.
-    # No need to declare 'global app' or re-initialize it here.
-
     logger.info("Starting bot and scheduling background tasks...")
     
     # Start the Pyrogram client
-    try:
-        await app.start()
-        logger.info("Bot has connected to Telegram.")
-
-        # Export session string AFTER successful start and save it
-        exported_session = await app.export_session_string()
-        settings_collection.update_one(
-            {'_id': 'bot_session'},
-            {'$set': {'session_string': exported_session, 'last_exported_at': datetime.utcnow()}},
-            upsert=True
-        )
-        logger.info("Bot session string exported and saved to MongoDB.")
-        
-    except Exception as e:
-        logger.critical(f"Failed to start Pyrogram client or export session: {e}", exc_info=True)
-        # If bot fails to start, it cannot operate, so exit.
-        # Ensure app is stopped even if start fails partially
-        await app.stop() 
-        raise # Re-raise to ensure script truly exits if start fails
+    await app.start()
+    logger.info("Bot has connected to Telegram.")
 
     # Schedule background tasks
     create_tracked_task(cleanup_expired_data())
@@ -2652,7 +2589,7 @@ if __name__ == "__main__":
         # Pyrogram's app.run() is a blocking call that starts the bot and
         # runs the provided coroutine (main_bot_logic) within its own event loop.
         # It then handles long polling internally.
-        asyncio.run(main_bot_logic()) # Use asyncio.run for top-level async function
+        app.run(main_bot_logic())
     except KeyboardInterrupt:
         logger.info("Bot stopped by KeyboardInterrupt (Ctrl+C). Shutting down...")
         # Pyrogram's app.run() usually handles app.stop() on Ctrl+C.
@@ -2662,3 +2599,5 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
+
+
