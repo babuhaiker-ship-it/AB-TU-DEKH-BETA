@@ -75,8 +75,18 @@ media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
-# --- Pyrogram Client (Initialized later after session string check) ---
-app = None # Initialize as None, will be set in main_bot_logic
+# --- Pyrogram Client Initialization (Moved to top-level for decorators) ---
+# Fetch session string before initializing the Pyrogram Client.
+# This ensures 'app' is a Client object when decorators (like @app.on_message) are processed.
+session_doc = settings_collection.find_one({'_id': 'bot_session'})
+session_string = session_doc.get('session_string') if session_doc else None
+
+if session_string:
+    logger.info("Found existing session string. Initializing Pyrogram client with session.")
+    app = Client("spicynyraa", session_string=session_string, api_id=config.API_ID, api_hash=config.API_HASH)
+else:
+    logger.info("No existing session string found. Initializing Pyrogram client with API details.")
+    app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -2600,21 +2610,11 @@ async def main_bot_logic():
     Main function to start the bot and schedule background tasks.
     This function will be run once by app.run().
     """
-    global app # Declare app as global to modify it
+    # 'app' is already initialized at the top-level due to decorator requirements.
+    # No need to declare 'global app' or re-initialize it here.
 
     logger.info("Starting bot and scheduling background tasks...")
     
-    # --- Session Management ---
-    session_doc = settings_collection.find_one({'_id': 'bot_session'})
-    session_string = session_doc.get('session_string') if session_doc else None
-
-    if session_string:
-        logger.info("Found existing session string. Starting Pyrogram client with session.")
-        app = Client("spicynyraa", session_string=session_string, api_id=config.API_ID, api_hash=config.API_HASH)
-    else:
-        logger.info("No existing session string found. Starting Pyrogram client with API details.")
-        app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
-
     # Start the Pyrogram client
     try:
         await app.start()
@@ -2632,8 +2632,9 @@ async def main_bot_logic():
     except Exception as e:
         logger.critical(f"Failed to start Pyrogram client or export session: {e}", exc_info=True)
         # If bot fails to start, it cannot operate, so exit.
-        await app.stop()
-        return
+        # Ensure app is stopped even if start fails partially
+        await app.stop() 
+        raise # Re-raise to ensure script truly exits if start fails
 
     # Schedule background tasks
     create_tracked_task(cleanup_expired_data())
@@ -2661,5 +2662,3 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
-
-
