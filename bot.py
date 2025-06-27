@@ -26,17 +26,16 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = ''
+    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@Testingnyraa_bot'
+    BOT_USERNAME = '@Testingnyraa_bot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
-    URL_SHORTENER = 'https://api.linkshortify.com/st'
-    SHORTENER_API_KEY = '5cd923c490f64017cffa6e3bb6cc724560a8cfc6'
+    # Removed URL_SHORTENER and SHORTENER_API_KEY from here, now loaded from DB
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
@@ -50,8 +49,8 @@ class BotConfig:
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.SHORTENER_API_KEY, config.BOT_USERNAME]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, SHORTENER_API_KEY, BOT_USERNAME.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -63,7 +62,7 @@ tokens_collection = db['tokens']
 media_collection = db['media']
 history_collection = db['history']
 categories_collection = db['categories']
-settings_collection = db['settings']
+settings_collection = db['settings'] # This collection will now store shortener config
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -83,6 +82,10 @@ app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_t
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
+
+# --- Admin State for Shortener Setup ---
+# Stores the current step for each admin in the /setshortener flow
+admin_shortener_setup_state = defaultdict(dict) 
 
 def create_tracked_task(coro):
     """
@@ -143,26 +146,54 @@ def get_current_time() -> int:
     """Returns the current UTC timestamp as an integer."""
     return int(datetime.utcnow().timestamp())
 
-async def shorten_url(long_url: str) -> str:
-    """Shortens a given URL using the configured URL shortener service."""
+async def get_shortener_config_and_shorten_url(long_url: str) -> str:
+    """
+    Shortens a given URL using the configured URL shortener service
+    fetched from the database. If no config or API error, returns original URL.
+    """
     logger.info(f"Attempting to shorten URL: {long_url}")
+    shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
+
+    if not shortener_config:
+        logger.warning("URL shortener configuration not found in DB. Returning original URL.")
+        return long_url
+
+    base_url = shortener_config.get('base_url')
+    api_key = shortener_config.get('api_key')
+
+    if not base_url or not api_key:
+        logger.warning("Missing base_url or api_key in shortener config. Returning original URL.")
+        return long_url
+        
+    # Ensure base_url ends with a slash if it's meant to be a directory
+    # and has a path component, or if it's an API endpoint.
+    # The example given `https://linkshortify.com/` suggests it might not need a further path.
+    # However, `https://api.linkshortify.com/st` suggests a specific endpoint.
+    # We should use the exact URL as configured by the admin.
+    shortener_api_endpoint = base_url if base_url.endswith('/') else f"{base_url}/"
+    # Assuming the API expects the 'st' endpoint from the original config, if it's not part of the base_url.
+    # Let's be flexible: if the base_url provided by admin looks like an API endpoint already, use it.
+    # Otherwise, append a default /st if not present.
+    if not shortener_api_endpoint.endswith('/st') and 'api.' in shortener_api_endpoint:
+        shortener_api_endpoint = f"{shortener_api_endpoint}st" # Append if not already there, and looks like an API domain
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(config.URL_SHORTENER, json={
-                'api': config.SHORTENER_API_KEY,
+            async with session.post(shortener_api_endpoint, json={
+                'api': api_key,
                 'url': long_url
             }, timeout=ClientTimeout(total=10)) as resp:
-                logger.info(f"URL shortener API response status: {resp.status}")
+                logger.info(f"URL shortener API response status: {resp.status} for endpoint: {shortener_api_endpoint}")
                 if resp.status == 200:
                     data = await resp.json()
                     if data.get('shortenedUrl'):
                         logger.info(f"URL shortened successfully to: {data['shortenedUrl']}")
                         return data['shortenedUrl']
                     else:
-                        logger.warning(f"URL shortening API returned 200 but no shortenedUrl: {data}")
+                        logger.warning(f"URL shortening API returned 200 but no 'shortenedUrl' key: {data}")
                 else:
-                    logger.warning(f"URL shortening API returned non-200 status {resp.status} for {long_url}")
-        logger.warning(f"URL shortening failed for {long_url} after API call.")
+                    logger.warning(f"URL shortening API returned non-200 status {resp.status}, response: {await resp.text()}")
+        logger.warning(f"URL shortening failed for {long_url} after API call (no shortenedUrl or non-200 status).")
         return long_url
     except aiohttp.ClientError as ce:
         logger.error(f"Aiohttp client error during URL shortening for {long_url}: {ce}", exc_info=True)
@@ -334,7 +365,7 @@ def delete_category(name: str) -> tuple[bool, str, int]:
     """Deletes a category and its associated videos. Returns (success, message, deleted_count)"""
     try:
         if not categories_collection.find_one({'name': name}):
-            return False, f"Category '{html.escape(name)}' does not exist.", 0
+            return False, f"Category '{html.escape(name)}' does not exist."
             
         result = media_collection.delete_many({'category': name})
         deleted_count = result.deleted_count
@@ -676,7 +707,6 @@ async def start_cmd(client: Client, message: Message):
                     'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                     'joined_date': datetime.utcnow(),
                     'referral_count': 0,
-                    # 'premium_until': None, # Removed, premium status is now token-based
                     'bookmarked_videos': [],
                     'last_premium_check_status': False # Track last premium status for notifications
                 })
@@ -1398,8 +1428,8 @@ async def refresh_token_btn(client: Client, message: Message):
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-        ad_url = await shorten_url(long_url)
-        logger.info(f"User {user_id}: shorten_url call completed. Result: {ad_url}")
+        ad_url = await get_shortener_config_and_shorten_url(long_url) # Changed to new function
+        logger.info(f"User {user_id}: get_shortener_config_and_shorten_url call completed. Result: {ad_url}")
         
         if temp_msg:
             await temp_msg.delete()
@@ -1442,7 +1472,7 @@ async def send_token_earning_options(client: Client, message: Message):
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-        ad_url = await shorten_url(long_url)
+        ad_url = await get_shortener_config_and_shorten_url(long_url) # Changed to new function
         
         disable_preview = False
         if ad_url.startswith(f"https://t.me/{config.BOT_USERNAME[1:]}"):
@@ -2369,6 +2399,84 @@ async def toggle_protect(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to toggle content protection: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling content protection. Please try again. 🐛")
 
+# --- ADMIN SHORTENER SETUP FLOW ---
+@app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
+async def setshortener_cmd(client: Client, message: Message):
+    """Admin command to initiate URL shortener configuration."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /setshortener command.")
+    admin_shortener_setup_state[user_id] = {'step': 'await_base_url'}
+    await message.reply("Send your Shortener Base URL (e.g., `https://api.linkshortify.com/st`).")
+
+@app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
+async def handle_setshortener_input(client: Client, message: Message):
+    """Handles admin's input for URL shortener configuration."""
+    user_id = message.from_user.id
+    
+    if user_id in admin_shortener_setup_state:
+        current_step = admin_shortener_setup_state[user_id].get('step')
+        
+        if current_step == 'await_base_url':
+            base_url = message.text.strip()
+            if not base_url.startswith("http://") and not base_url.startswith("https://"):
+                await message.reply("Invalid URL. Please send a valid URL starting with `http://` or `https://`.")
+                logger.warning(f"Admin {user_id} provided invalid base URL format: {base_url}")
+                return
+            
+            admin_shortener_setup_state[user_id]['base_url'] = base_url
+            admin_shortener_setup_state[user_id]['step'] = 'await_api_key'
+            await message.reply("Send your API Token (e.g., `sk_XXXXXX...`).")
+            logger.info(f"Admin {user_id} provided base URL: {base_url}")
+            
+        elif current_step == 'await_api_key':
+            api_key = message.text.strip()
+            if not api_key:
+                await message.reply("API Token cannot be empty. Please send your API Token.")
+                logger.warning(f"Admin {user_id} provided empty API key.")
+                return
+
+            try:
+                settings_collection.update_one(
+                    {'_id': 'shortener_config'},
+                    {'$set': {'base_url': admin_shortener_setup_state[user_id]['base_url'], 'api_key': api_key}},
+                    upsert=True
+                )
+                del admin_shortener_setup_state[user_id] # Clear state
+                await message.reply("✅ Shortener Set Successfully")
+                logger.info(f"Admin {user_id} successfully set shortener config.")
+            except Exception as e:
+                logger.error(f"Error saving shortener config for admin {user_id}: {e}", exc_info=True)
+                await message.reply("❌ Failed to save shortener config. Please try again. 🐛")
+                del admin_shortener_setup_state[user_id] # Clear state on error
+        # If the message is not part of the shortener setup, let other handlers process it
+    # else:
+    #     logger.debug(f"Message from admin {user_id} not part of shortener setup. Message: '{message.text}'")
+
+@app.on_message(filters.command("shortener") & filters.private & filters.user(config.ADMIN_IDS))
+async def view_shortener_config_cmd(client: Client, message: Message):
+    """Admin command to view current shortener configuration."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} requested shortener config view.")
+    shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
+
+    if shortener_config:
+        base_url = shortener_config.get('base_url', 'Not Set')
+        api_key = shortener_config.get('api_key', 'Not Set')
+        # Mask API key for security
+        masked_api_key = f"{api_key[:4]}..." if api_key and len(api_key) > 4 else api_key
+        await message.reply(
+            f"⚙️ <b>Current Shortener Configuration:</b>\n\n"
+            f"<b>Base URL:</b> <code>{html.escape(base_url)}</code>\n"
+            f"<b>API Key:</b> <code>{html.escape(masked_api_key)}</code>\n\n"
+            f"Use /setshortener to change these settings. 📝"
+        )
+        logger.info(f"Admin {user_id} viewed shortener config.")
+    else:
+        await message.reply(
+            "😔 No shortener configuration found. Use /setshortener to set it up. 🚀"
+        )
+        logger.info(f"Admin {user_id} requested shortener config but none was found.")
+
 # --- Database Cleanup (No longer deletes messages from chats) ---
 async def cleanup_expired_data():
     """Periodically cleans up expired tokens and handles bookmark truncation for non-premium users."""
@@ -2507,5 +2615,4 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
-
 
