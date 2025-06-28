@@ -35,7 +35,6 @@ class BotConfig:
     VIDEO_CHANNEL_ID = -1002621716446
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
-    # Removed URL_SHORTENER and SHORTENER_API_KEY from here, now loaded from DB
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
@@ -73,9 +72,6 @@ media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
-
-# The 'premium_until' field is no longer used for premium status TTL.
-# users_collection.create_index([("premium_until", ASCENDING)], expireAfterSeconds=0)
 
 # --- Pyrogram Client ---
 app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
@@ -158,24 +154,14 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         logger.warning("URL shortener configuration not found in DB. Returning original URL.")
         return long_url
 
-    base_url = shortener_config.get('base_url')
+    base_url = shortener_config.get('base_url') # This should now be the exact API endpoint
     api_key = shortener_config.get('api_key')
 
     if not base_url or not api_key:
         logger.warning("Missing base_url or api_key in shortener config. Returning original URL.")
         return long_url
         
-    # Ensure base_url ends with a slash if it's meant to be a directory
-    # and has a path component, or if it's an API endpoint.
-    # The example given `https://linkshortify.com/` suggests it might not need a further path.
-    # However, `https://api.linkshortify.com/st` suggests a specific endpoint.
-    # We should use the exact URL as configured by the admin.
-    shortener_api_endpoint = base_url if base_url.endswith('/') else f"{base_url}/"
-    # Assuming the API expects the 'st' endpoint from the original config, if it's not part of the base_url.
-    # Let's be flexible: if the base_url provided by admin looks like an API endpoint already, use it.
-    # Otherwise, append a default /st if not present.
-    if not shortener_api_endpoint.endswith('/st') and 'api.' in shortener_api_endpoint:
-        shortener_api_endpoint = f"{shortener_api_endpoint}st" # Append if not already there, and looks like an API domain
+    shortener_api_endpoint = base_url # Use the exact base_url as the API endpoint
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -184,15 +170,17 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
                 'url': long_url
             }, timeout=ClientTimeout(total=10)) as resp:
                 logger.info(f"URL shortener API response status: {resp.status} for endpoint: {shortener_api_endpoint}")
+                response_data = await resp.json()
+                logger.info(f"URL shortener API response data: {response_data}")
+                
                 if resp.status == 200:
-                    data = await resp.json()
-                    if data.get('shortenedUrl'):
-                        logger.info(f"URL shortened successfully to: {data['shortenedUrl']}")
-                        return data['shortenedUrl']
+                    if response_data.get('shortenedUrl'):
+                        logger.info(f"URL shortened successfully to: {response_data['shortenedUrl']}")
+                        return response_data['shortenedUrl']
                     else:
-                        logger.warning(f"URL shortening API returned 200 but no 'shortenedUrl' key: {data}")
+                        logger.warning(f"URL shortening API returned 200 but no 'shortenedUrl' key: {response_data}")
                 else:
-                    logger.warning(f"URL shortening API returned non-200 status {resp.status}, response: {await resp.text()}")
+                    logger.warning(f"URL shortening API returned non-200 status {resp.status}, response: {response_data}")
         logger.warning(f"URL shortening failed for {long_url} after API call (no shortenedUrl or non-200 status).")
         return long_url
     except aiohttp.ClientError as ce:
@@ -750,20 +738,37 @@ async def start_cmd(client: Client, message: Message):
                 if deep_link_type == 'referral':
                     referrer_id = handle_referral(user_id, deep_link_data)
                     if referrer_id:
-                        await message.reply(f"🥳 **Congratulations {first_name_safe}!** You have received {config.NEW_USER_TOKENS} token to continue. Enjoy! 🍿", reply_markup=await get_main_keyboard(user_id))
+                        await message.reply(
+                            f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", 
+                            reply_markup=await get_main_keyboard(user_id)
+                        )
                         await client.send_message(referrer_id, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
                 elif deep_link_type == 'video_share' and referrer_id_from_video_link and referrer_id_from_video_link != user_id:
                     referrer_user_obj = users_collection.find_one({'user_id': referrer_id_from_video_link})
                     if referrer_user_obj:
-                        await message.reply(f"🥳 **Congratulations {first_name_safe}!** You have received {config.NEW_USER_TOKENS} token to continue. Enjoy! 🍿", reply_markup=await get_main_keyboard(user_id))
+                        await message.reply(
+                            f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", 
+                            reply_markup=await get_main_keyboard(user_id)
+                        )
                         await client.send_message(referrer_id_from_video_link, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your shared video link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
                     else:
                         logger.warning(f"Referrer {referrer_id_from_video_link} not found for new user {user_id} via video share. Still sending new user welcome.")
-                        await message.reply(f"🥳 **Congratulations {first_name_safe}!** You have received {config.NEW_USER_TOKENS} token to continue. Enjoy! 🍿", reply_markup=await get_main_keyboard(user_id))
+                        await message.reply(
+                            f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", 
+                            reply_markup=await get_main_keyboard(user_id)
+                        )
                 else:
-                    await message.reply(f"👋 dear {first_name_safe}! Welcome to Spicy Nyraa Bot! 🌶️ To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", reply_markup=await get_main_keyboard(user_id))
+                    # New user with no referral/video deep link
+                    await message.reply(
+                        f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", 
+                        reply_markup=await get_main_keyboard(user_id)
+                    )
             elif not deep_link_type:
-                await message.reply(f"👋 dear {first_name_safe}! Welcome back to Spicy Nyraa Bot! 🌶️ To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", reply_markup=await get_main_keyboard(user_id))
+                # Existing user, no deep link
+                await message.reply(
+                    f"👋 Welcome back, {first_name_safe}! 🌶️ To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", 
+                    reply_markup=await get_main_keyboard(user_id)
+                )
 
             if deep_link_type == 'token_refresh':
                 success, msg = await handle_token_refresh(user_id, deep_link_data)
@@ -1428,14 +1433,17 @@ async def refresh_token_btn(client: Client, message: Message):
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-        ad_url = await get_shortener_config_and_shorten_url(long_url) # Changed to new function
+        
+        # Use the updated get_shortener_config_and_shorten_url
+        ad_url = await get_shortener_config_and_shorten_url(long_url) 
         logger.info(f"User {user_id}: get_shortener_config_and_shorten_url call completed. Result: {ad_url}")
         
         if temp_msg:
             await temp_msg.delete()
 
         disable_preview = False
-        if ad_url.startswith(f"https://t.me/{config.BOT_USERNAME[1:]}"):
+        # If the returned URL is the original long Telegram URL, disable web page preview
+        if ad_url == long_url:
             logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
             disable_preview = True
 
@@ -1472,10 +1480,13 @@ async def send_token_earning_options(client: Client, message: Message):
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-        ad_url = await get_shortener_config_and_shorten_url(long_url) # Changed to new function
+        
+        # Use the updated get_shortener_config_and_shorten_url
+        ad_url = await get_shortener_config_and_shorten_url(long_url) 
         
         disable_preview = False
-        if ad_url.startswith(f"https://t.me/{config.BOT_USERNAME[1:]}"):
+        # If the returned URL is the original long Telegram URL, disable web page preview
+        if ad_url == long_url:
             logger.warning(f"User {user_id} URL shortening failed for send_token_earning_options. Using long URL: {ad_url}")
             disable_preview = True
 
@@ -2406,7 +2417,7 @@ async def setshortener_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated /setshortener command.")
     admin_shortener_setup_state[user_id] = {'step': 'await_base_url'}
-    await message.reply("Send your Shortener Base URL (e.g., `https://api.linkshortify.com/st`).")
+    await message.reply("Send your Shortener Base URL (e.g., `https://api.linkshortify.com/st`). This should be the exact API endpoint.")
 
 @app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_setshortener_input(client: Client, message: Message):
@@ -2615,4 +2626,3 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
-
