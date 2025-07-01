@@ -74,8 +74,21 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
+# Define the directory for the session file
+SESSION_DIR = "/data"
+SESSION_NAME = "spicynyraa"
+
+# Ensure the session directory exists
+try:
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    logger.info(f"Ensured session directory '{SESSION_DIR}' exists.")
+except OSError as e:
+    logger.critical(f"Failed to create session directory '{SESSION_DIR}': {e}")
+    # If the directory cannot be created, the bot cannot run, so re-raise
+    raise
+
 # Modified line: Specify the session_name with the full path to the persistent disk
-app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+app = Client(os.path.join(SESSION_DIR, SESSION_NAME), api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
