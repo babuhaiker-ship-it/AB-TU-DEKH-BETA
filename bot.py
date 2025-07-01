@@ -74,7 +74,8 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
-app = Client("spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+# Modified line: Specify the session_name with the full path to the persistent disk
+app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
