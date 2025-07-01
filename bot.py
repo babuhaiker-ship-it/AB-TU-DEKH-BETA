@@ -9,7 +9,7 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, ChatAdminRequired, ChatWriteForbidden
 from pymongo import MongoClient, ASCENDING, ReturnDocument
 import aiohttp
 from aiohttp import ClientTimeout
@@ -32,7 +32,7 @@ class BotConfig:
     BOT_USERNAME = '@Testingnyraa_bot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    VIDEO_CHANNEL_ID = -1002621716446
+    VIDEO_CHANNEL_ID = -1002621716446 # Ensure this includes the -100 prefix for private channels
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
@@ -453,14 +453,58 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
 
     try:
         if new_message_type == "video" and video_data:
-            sent_message = await client.send_video(
-                chat_id,
-                video_data['file_id'],
-                caption=f"Category: {html.escape(video_data['category'])}",
-                reply_markup=reply_markup,
-                protect_content=protect_content_for_user
-            )
-            success = True
+            # --- FALLBACK LOGIC FOR SENDING VIDEO ---
+            try:
+                sent_message = await client.send_video(
+                    chat_id,
+                    video_data['file_id'],
+                    caption=f"Category: {html.escape(video_data['category'])}",
+                    reply_markup=reply_markup,
+                    protect_content=protect_content_for_user
+                )
+                success = True
+            except (MessageIdInvalid, ValueError) as e:
+                # File ID might be invalid/expired, try fetching from channel
+                logger.warning(f"Failed to send video with file_id {video_data.get('file_id')} for user {chat_id}: {e}. Attempting fallback via channel message_id.")
+                if video_data.get('message_id') and config.VIDEO_CHANNEL_ID:
+                    try:
+                        # Fetch the message from the channel
+                        msg_from_channel = await client.get_messages(config.VIDEO_CHANNEL_ID, video_data['message_id'])
+                        if msg_from_channel and msg_from_channel.video:
+                            new_file_id = msg_from_channel.video.file_id
+                            logger.info(f"Fallback successful: Retrieved new file_id {new_file_id} from channel for video {video_data.get('uuid')}.")
+                            
+                            # Update the file_id in the database for future use
+                            media_collection.update_one(
+                                {'uuid': video_data['uuid']},
+                                {'$set': {'file_id': new_file_id}}
+                            )
+                            video_data['file_id'] = new_file_id # Update in current dict
+                            
+                            sent_message = await client.send_video(
+                                chat_id,
+                                new_file_id,
+                                caption=f"Category: {html.escape(video_data['category'])}",
+                                reply_markup=reply_markup,
+                                protect_content=protect_content_for_user
+                            )
+                            success = True
+                        else:
+                            error_message = "⚠️ Video not found in channel. It might have been removed. 😔"
+                            logger.error(f"Fallback failed: Video {video_data.get('uuid')} (message_id: {video_data.get('message_id')}) not found or not a video in channel.")
+                    except Exception as fallback_e:
+                        error_message = f"❌ Failed to send video. Reason: {fallback_e}\nPlease try again later. 😥"
+                        logger.error(f"Critical fallback error for video {video_data.get('uuid')}: {fallback_e}", exc_info=True)
+                else:
+                    error_message = "❌ Video data incomplete or channel ID missing for fallback. 😥"
+                    logger.error(f"Fallback not possible for video {video_data.get('uuid')}: message_id or VIDEO_CHANNEL_ID missing.")
+            except (ChatWriteForbidden, ChatAdminRequired) as e:
+                error_message = f"❌ <b>Bot lacks permissions in this chat or channel.</b>\nReason: {e}\nPlease ensure the bot is an admin with 'Post Messages' rights. 😥"
+                logger.error(f"Bot lacks permissions to send video to chat {chat_id}: {e}", exc_info=True)
+            except Exception as e:
+                error_message = f"❌ <b>Failed to send video.</b>\nReason: {e}\nPlease try again later. 😥"
+                logger.error(f"General error sending video to chat {chat_id}: {e}", exc_info=True)
+
         elif new_message_type == "text" and text_content:
             sent_message = await client.send_message(
                 chat_id,
@@ -665,6 +709,9 @@ async def handle_error(client: Client, message: Message, error: Exception):
     if isinstance(error, FloodWait):
         logger.warning(f"FloodWait: {error.value} seconds for user {message.from_user.id}")
         await message.reply_text(f"⚠️ <b>Too Many Requests!</b>\nPlease wait <b>{error.value}</b> seconds before trying again. ⏳")
+    elif isinstance(error, (ChatWriteForbidden, ChatAdminRequired)):
+        logger.error(f"Bot lacks permissions to send message to user {message.from_user.id}: {error}")
+        # No need to reply here, as the bot might not have permission to reply
     else:
         logger.error(f"An unexpected error occurred for user {message.from_user.id}: {error}", exc_info=True)
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later. 🥺")
@@ -2567,6 +2614,7 @@ async def verify_and_cleanup_media():
                     continue
 
                 try:
+                    # Attempt to get the message to verify its existence
                     await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
                     logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
