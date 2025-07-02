@@ -461,21 +461,22 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     success = True
                 except MessageNotModified:
                     logger.info(f"Message {old_message_id} in chat {chat_id} not modified (same video).")
-                    sent_message = await client.get_messages(chat_id, old_message_id)
+                    sent_message = await client.get_messages(chat_id, old_message_id) # Get current message to update active_video_message
                     success = True
-                except Exception as e:
-                    logger.warning(f"Failed to edit message media for {old_message_id} in chat {chat_id}: {e}. Attempting to delete old and send new.")
-                    try:
-                        # Only delete the old message if it exists and was the one we tried to edit
-                        if active_video_message.get(chat_id, {}).get('message_id') == old_message_id:
-                            await client.delete_messages(chat_id, old_message_id)
-                            clear_active_video_message(chat_id) # Clear tracking for the deleted message
-                    except MessageIdInvalid:
-                        logger.info(f"Message {old_message_id} already deleted by user or not found when attempting to clean up.")
-                    except Exception as delete_e:
-                        logger.error(f"Error deleting old message {old_message_id} after edit failure: {delete_e}")
-
-                    # Fallback to sending a new message if editing fails or old message deleted
+                except MessageIdInvalid: # Specific handling for message not found
+                    logger.warning(f"Failed to edit message media for {old_message_id} in chat {chat_id}: Message ID Invalid. Sending new message.")
+                    clear_active_video_message(chat_id) # Clear tracking if old message is truly gone
+                    sent_message = await client.send_video( # Fallback to sending a new message
+                        chat_id,
+                        video_data['file_id'],
+                        caption=None,
+                        reply_markup=reply_markup,
+                        protect_content=protect_content_for_user
+                    )
+                    success = True
+                except Exception as e: # Catch other unexpected errors during edit
+                    logger.error(f"Unexpected error editing message media for {old_message_id} in chat {chat_id}: {e}", exc_info=True)
+                    # Do NOT delete the message here. Just send a new one as a fallback.
                     sent_message = await client.send_video(
                         chat_id,
                         video_data['file_id'],
@@ -484,7 +485,7 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                         protect_content=protect_content_for_user
                     )
                     success = True
-            else:
+            else: # old_message_id is None, so always send a new message
                 sent_message = await client.send_video(
                     chat_id,
                     video_data['file_id'],
@@ -506,27 +507,27 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     success = True
                 except MessageNotModified:
                     logger.info(f"Message {old_message_id} in chat {chat_id} not modified (same text).")
-                    sent_message = await client.get_messages(chat_id, old_message_id)
+                    sent_message = await client.get_messages(chat_id, old_message_id) # Get current message to update active_video_message
                     success = True
-                except Exception as e:
-                    logger.warning(f"Failed to edit message text for {old_message_id} in chat {chat_id}: {e}. Attempting to delete old and send new.")
-                    try:
-                        # Only delete the old message if it exists and was the one we tried to edit
-                        if active_video_message.get(chat_id, {}).get('message_id') == old_message_id:
-                            await client.delete_messages(chat_id, old_message_id)
-                            clear_active_video_message(chat_id) # Clear tracking for the deleted message
-                    except MessageIdInvalid:
-                        logger.info(f"Message {old_message_id} already deleted by user or not found when attempting to clean up.")
-                    except Exception as delete_e:
-                        logger.error(f"Error deleting old message {old_message_id} after edit failure: {delete_e}")
-
+                except MessageIdInvalid: # Specific handling for message not found
+                    logger.warning(f"Failed to edit message text for {old_message_id} in chat {chat_id}: Message ID Invalid. Sending new message.")
+                    clear_active_video_message(chat_id) # Clear tracking if old message is truly gone
+                    sent_message = await client.send_message( # Fallback to sending a new message
+                        chat_id,
+                        text_content,
+                        reply_markup=reply_markup
+                    )
+                    success = True
+                except Exception as e: # Catch other unexpected errors during edit
+                    logger.error(f"Unexpected error editing message text for {old_message_id} in chat {chat_id}: {e}", exc_info=True)
+                    # Do NOT delete the message here. Just send a new one as a fallback.
                     sent_message = await client.send_message(
                         chat_id,
                         text_content,
                         reply_markup=reply_markup
                     )
                     success = True
-            else:
+            else: # old_message_id is None, so always send a new message
                 sent_message = await client.send_message(
                     chat_id,
                     text_content,
@@ -537,8 +538,8 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
             error_message = "Invalid new_message_type or missing data for sending/editing."
             logger.error(error_message)
 
-    except Exception as e:
-        logger.error(f"Failed to send/edit message of type {new_message_type} to chat {chat_id}: {e}")
+    except Exception as e: # This outer catch is for errors during the initial send_video/send_message if old_message_id is None
+        logger.error(f"Failed to send/edit message of type {new_message_type} to chat {chat_id}: {e}", exc_info=True)
         error_message = f"❌ <b>Failed to send/edit message.</b>\nReason: {e}\nPlease try again later. 😥"
         success = False
 
@@ -1902,7 +1903,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         await callback_query.answer()
         logger.info(f"User {user_id} viewed saved video {video_uuid}.")
     else:
-        await callback_query.answer("❌ Failed to load saved video. Please try again. 😥", show_alert=True)
+        await callback_query.answer("❌ Failed to load saved video. Please try again.😥", show_alert=True)
         logger.error(f"User {user_id} failed to load saved video {video_uuid}: {sent_message_or_error}")
 
 
