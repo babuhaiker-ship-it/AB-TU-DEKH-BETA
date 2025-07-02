@@ -17,6 +17,7 @@ from aiohttp import ClientTimeout
 from collections import defaultdict
 import re
 import html
+import urllib.parse # Added for URL encoding
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -194,23 +195,22 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         logger.warning("URL shortener configuration not found in DB. Returning original URL.")
         return long_url
 
-    base_url = shortener_config.get('base_url') # This should now be the exact API endpoint
-    api_key = shortener_config.get('api_key')
+    # The template_url should now contain the full API endpoint with a placeholder
+    template_url = shortener_config.get('template_url')
 
-    if not base_url or not api_key:
-        logger.warning("Missing base_url or api_key in shortener config. Returning original URL.")
+    if not template_url or '{long_url}' not in template_url:
+        logger.warning("Missing or invalid 'template_url' in shortener config (no {long_url} placeholder). Returning original URL.")
         return long_url
         
-    shortener_api_endpoint = base_url # Use the exact base_url as the API endpoint
+    # Construct the final URL for the shortener API call
+    # Ensure the long_url is URL-encoded before inserting it into the template
+    encoded_long_url = urllib.parse.quote_plus(long_url)
+    shortener_api_endpoint = template_url.replace('{long_url}', encoded_long_url)
 
     try:
         async with aiohttp.ClientSession() as session:
-            # For Get2Short.com and similar APIs, the parameters are usually 'api' and 'url'
-            payload = {
-                'api': api_key,
-                'url': long_url
-            }
-            async with session.post(shortener_api_endpoint, json=payload, timeout=ClientTimeout(total=10)) as resp:
+            # Most URL shorteners with parameters in the URL use GET requests
+            async with session.get(shortener_api_endpoint, timeout=ClientTimeout(total=10)) as resp:
                 response_text = await resp.text() # Get raw response text for better debugging
                 logger.info(f"URL shortener API response status: {resp.status} for endpoint: {shortener_api_endpoint}")
                 logger.info(f"URL shortener API raw response: {response_text}")
@@ -2615,8 +2615,13 @@ async def setshortener_cmd(client: Client, message: Message):
     """Admin command to initiate URL shortener configuration."""
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated /setshortener command.")
-    admin_shortener_setup_state[user_id] = {'step': 'await_base_url'}
-    await message.reply("Send your Shortener API Endpoint URL (e.g., `https://api.linkshortify.com/st` or `http://Get2Short.com/api`). This should be the exact API endpoint for shortening, not just the base domain. 📝")
+    admin_shortener_setup_state[user_id] = {'step': 'await_template_url'}
+    await message.reply(
+        "Send your Shortener API Template URL.\n\n"
+        "This URL should include `{long_url}` as a placeholder for the URL you want to shorten.\n\n"
+        "<b>Example:</b> `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n\n"
+        "Make sure to replace `YOUR_API_KEY` with your actual API key if it's part of the URL. 📝"
+    )
 
 @app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_setshortener_input(client: Client, message: Message):
@@ -2626,41 +2631,34 @@ async def handle_setshortener_input(client: Client, message: Message):
     if user_id in admin_shortener_setup_state:
         current_step = admin_shortener_setup_state[user_id].get('step')
         
-        if current_step == 'await_base_url':
-            base_url = message.text.strip()
-            if not base_url.startswith("http://") and not base_url.startswith("https://"):
+        if current_step == 'await_template_url':
+            template_url = message.text.strip()
+            
+            if not template_url.startswith("http://") and not template_url.startswith("https://"):
                 await message.reply("Invalid URL. Please send a valid URL starting with `http://` or `https://`.")
-                logger.warning(f"Admin {user_id} provided invalid base URL format: {base_url}")
+                logger.warning(f"Admin {user_id} provided invalid template URL format: {template_url}")
                 return
             
-            # Suggest adding an endpoint path if it looks like just a domain
-            if not re.search(r'/[a-zA-Z0-9_-]+$', base_url.rstrip('/')): # Checks for /something at the end
-                await message.reply("💡 It looks like you provided a base domain. Please ensure this is the *exact API endpoint* for shortening (e.g., `https://api.linkshortify.com/st` or `http://Get2Short.com/api`). If it is, proceed. Otherwise, please send the correct endpoint.")
-            
-            admin_shortener_setup_state[user_id]['base_url'] = base_url
-            admin_shortener_setup_state[user_id]['step'] = 'await_api_key'
-            await message.reply("Send your API Token (e.g., `5cd923c490f64017cffa6e3bb6cc724560a8cfc6`).")
-            logger.info(f"Admin {user_id} provided base URL: {base_url}")
-            
-        elif current_step == 'await_api_key':
-            api_key = message.text.strip()
-            if not api_key:
-                await message.reply("API Token cannot be empty. Please send your API Token.")
-                logger.warning(f"Admin {user_id} provided empty API key.")
+            if '{long_url}' not in template_url:
+                await message.reply(
+                    "❌ Error: The template URL must contain `{long_url}` as a placeholder for the URL to be shortened.\n\n"
+                    "Please send the correct template URL. 📝"
+                )
+                logger.warning(f"Admin {user_id} provided template URL without {{long_url}} placeholder: {template_url}")
                 return
 
             try:
                 settings_collection.update_one(
                     {'_id': 'shortener_config'},
-                    {'$set': {'base_url': admin_shortener_setup_state[user_id]['base_url'], 'api_key': api_key}},
+                    {'$set': {'template_url': template_url}},
                     upsert=True
                 )
                 del admin_shortener_setup_state[user_id] # Clear state
-                await message.reply("✅ Shortener Set Successfully")
-                logger.info(f"Admin {user_id} successfully set shortener config.")
+                await message.reply("✅ Shortener API Template URL Set Successfully!")
+                logger.info(f"Admin {user_id} successfully set shortener template URL: {template_url}")
             except Exception as e:
-                logger.error(f"Error saving shortener config for admin {user_id}: {e}", exc_info=True)
-                await message.reply("❌ Failed to save shortener config. Please try again. 🐛")
+                logger.error(f"Error saving shortener template URL for admin {user_id}: {e}", exc_info=True)
+                await message.reply("❌ Failed to save shortener configuration. Please try again. 🐛")
                 del admin_shortener_setup_state[user_id] # Clear state on error
         # If the message is not part of the shortener setup, let other handlers process it
     # else:
@@ -2674,15 +2672,11 @@ async def view_shortener_config_cmd(client: Client, message: Message):
     shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
 
     if shortener_config:
-        base_url = shortener_config.get('base_url', 'Not Set')
-        api_key = shortener_config.get('api_key', 'Not Set')
-        # Mask API key for security
-        masked_api_key = f"{api_key[:4]}..." if api_key and len(api_key) > 4 else api_key
+        template_url = shortener_config.get('template_url', 'Not Set')
         await message.reply(
             f"⚙️ <b>Current Shortener Configuration:</b>\n\n"
-            f"<b>Base URL:</b> <code>{html.escape(base_url)}</code>\n"
-            f"<b>API Key:</b> <code>{html.escape(masked_api_key)}</code>\n\n"
-            f"Use /setshortener to change these settings. 📝"
+            f"<b>API Template URL:</b> <code>{html.escape(template_url)}</code>\n\n"
+            f"Use /setshortener to change this setting. 📝"
         )
         logger.info(f"Admin {user_id} viewed shortener config.")
     else:
