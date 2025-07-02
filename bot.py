@@ -460,7 +460,8 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     chat_id=chat_id,
                     from_chat_id=config.VIDEO_CHANNEL_ID,
                     message_id=video_data.get('message_id'),
-                    protect_content=protect_content_for_user
+                    protect_content=protect_content_for_user,
+                    reply_markup=reply_markup # Pass the reply_markup here
                 )
                 success = True
             except Exception as e:
@@ -470,7 +471,7 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     sent_message = await client.send_video(
                         chat_id,
                         video_data['file_id'],
-                        caption=f"Category: {html.escape(video_data['category'])}",
+                        caption=None, # Removed caption as per user request
                         reply_markup=reply_markup,
                         protect_content=protect_content_for_user
                     )
@@ -1587,7 +1588,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
         await client.send_video(
             chat_id,
             video=video['file_id'],
-            caption="Here's your download! Enjoy! 🎉",
+            caption=None, # Removed caption as per user request
             protect_content=False # Ensure content can be forwarded/saved by user
         )
         await callback_query.answer("Download initiated! 🚀")
@@ -2024,7 +2025,7 @@ async def deletecategory_cmd(client: Client, message: Message):
         await message.reply_text(
             """Select a category to delete:
 
-⚠️ All videos in the selected category will be deleted permanently. This action cannot be undone. Click on a category name below to confirm deletion. 🚨""",
+⚠️ All videos in the selected category will be deleted permanently. This action cannot be undone. Click on a category name below to confirm deletion.🚨""",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
         logger.info(f"Admin {user_id}: Delete category options sent.")
