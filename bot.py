@@ -350,7 +350,7 @@ def add_category(name: str) -> tuple[bool, str]:
         return False, "Failed to add category. Please try again."
 
 def delete_category(name: str) -> tuple[bool, str, int]:
-    """Deletes a category and its associated videos. Returns (success, message, deleted_count)"""
+    """Deles a category and its associated videos. Returns (success, message, deleted_count)"""
     try:
         if not categories_collection.find_one({'name': name}):
             return False, f"Category '{html.escape(name)}' does not exist."
@@ -448,7 +448,8 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
             input_media = InputMediaVideo(
                 media=video_data['file_id'],
                 caption=None, # Removed caption as per user request
-                protect_content=protect_content_for_user
+                # 'protect_content' is not a valid argument for InputMediaVideo.__init__()
+                # It should be passed to client.edit_message_media or client.send_video
             )
             
             if old_message_id:
@@ -458,7 +459,8 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                         chat_id=chat_id,
                         message_id=old_message_id,
                         media=input_media,
-                        reply_markup=reply_markup
+                        reply_markup=reply_markup,
+                        protect_content=protect_content_for_user # Pass here
                     )
                     # No need to edit caption separately if it's part of InputMediaVideo
                     success = True
@@ -474,7 +476,7 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                         video_data['file_id'],
                         caption=None, # Removed caption as per user request
                         reply_markup=reply_markup,
-                        protect_content=protect_content_for_user
+                        protect_content=protect_content_for_user # Pass here
                     )
                     success = True
             else:
@@ -484,7 +486,7 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     video_data['file_id'],
                     caption=None, # Removed caption as per user request
                     reply_markup=reply_markup,
-                    protect_content=protect_content_for_user
+                    protect_content=protect_content_for_user # Pass here
                 )
                 success = True
 
@@ -1711,7 +1713,7 @@ async def saved_videos_btn(client: Client, message: Message):
         bookmarked_videos_data = bookmarked_videos_data[:config.FREE_USER_SAVE_LIMIT]
         users_collection.update_one(
             {'user_id': user_id},
-            {'$set': {'bookmarked_videos': bookmarked_videos_data}}
+            {'$set': {'bookmarked_videos': truncated_bookmarks}}
         )
         logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT} as premium expired or was never premium.")
 
