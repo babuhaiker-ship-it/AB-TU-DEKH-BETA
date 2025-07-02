@@ -7,9 +7,9 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery, InputMediaVideo
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, MessageNotModified
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait
 from pymongo import MongoClient, ASCENDING, ReturnDocument
 import aiohttp
 from aiohttp import ClientTimeout
@@ -431,10 +431,19 @@ def clear_active_video_message(user_id: int):
 
 async def send_and_replace_message(client: Client, chat_id: int, old_message_id: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None) -> tuple[bool, Message | str]:
     """
-    Edits the old message (if provided) to display new video or text content,
-    preserving the inline keyboard. If old_message_id is not provided, sends a new message.
+    Deletes the old message (if provided) and sends a new video or text message.
+    Updates the active_video_message tracking.
     Returns (success: bool, sent_message: Message | error_message: str)
     """
+    if old_message_id:
+        try:
+            await client.delete_messages(chat_id, old_message_id)
+            logger.info(f"Deleted old message {old_message_id} in chat {chat_id}.")
+        except MessageIdInvalid:
+            logger.warning(f"Old message {old_message_id} for deletion in chat {chat_id} was already invalid or deleted.")
+        except Exception as e:
+            logger.error(f"Failed to delete old message {old_message_id} in chat {chat_id}: {e}")
+    
     sent_message = None
     success = False
     error_message = ""
@@ -444,31 +453,21 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
 
     try:
         if new_message_type == "video" and video_data:
-            # Prepare InputMediaVideo
-            input_media = InputMediaVideo(
-                media=video_data['file_id'],
-                caption=None, # Removed caption as per user request
-                protect_content=protect_content_for_user
-            )
-            
-            if old_message_id:
+            # Try to send by copying from channel (if possible)
+            try:
+                # Try to copy the message from the channel using message_id
+                sent_message = await client.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=config.VIDEO_CHANNEL_ID,
+                    message_id=video_data.get('message_id'),
+                    protect_content=protect_content_for_user,
+                    reply_markup=reply_markup # Pass the reply_markup here
+                )
+                success = True
+            except Exception as e:
+                logger.warning(f"Failed to copy video from channel by message_id: {e}. Falling back to file_id.")
+                # Fallback: send by file_id
                 try:
-                    # Edit the existing message
-                    sent_message = await client.edit_message_media(
-                        chat_id=chat_id,
-                        message_id=old_message_id,
-                        media=input_media,
-                        reply_markup=reply_markup
-                    )
-                    # No need to edit caption separately if it's part of InputMediaVideo
-                    success = True
-                except MessageNotModified:
-                    logger.info(f"Message {old_message_id} in chat {chat_id} not modified (same video).")
-                    sent_message = await client.get_messages(chat_id, old_message_id) # Get the existing message object
-                    success = True
-                except Exception as e:
-                    logger.warning(f"Failed to edit message media for {old_message_id} in chat {chat_id}: {e}. Falling back to send new.")
-                    # Fallback to sending a new message if editing fails
                     sent_message = await client.send_video(
                         chat_id,
                         video_data['file_id'],
@@ -477,62 +476,32 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                         protect_content=protect_content_for_user
                     )
                     success = True
-            else:
-                # Send a new message if no old_message_id is provided
-                sent_message = await client.send_video(
-                    chat_id,
-                    video_data['file_id'],
-                    caption=None, # Removed caption as per user request
-                    reply_markup=reply_markup,
-                    protect_content=protect_content_for_user
-                )
-                success = True
-
+                except Exception as e2:
+                    logger.error(f"Failed to send video by file_id: {e2}")
+                    error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
+                    success = False
         elif new_message_type == "text" and text_content:
-            if old_message_id:
-                try:
-                    sent_message = await client.edit_message_text(
-                        chat_id,
-                        old_message_id,
-                        text_content,
-                        reply_markup=reply_markup
-                    )
-                    success = True
-                except MessageNotModified:
-                    logger.info(f"Message {old_message_id} in chat {chat_id} not modified (same text).")
-                    sent_message = await client.get_messages(chat_id, old_message_id) # Get the existing message object
-                    success = True
-                except Exception as e:
-                    logger.warning(f"Failed to edit message text for {old_message_id} in chat {chat_id}: {e}. Falling back to send new.")
-                    sent_message = await client.send_message(
-                        chat_id,
-                        text_content,
-                        reply_markup=reply_markup
-                    )
-                    success = True
-            else:
-                sent_message = await client.send_message(
-                    chat_id,
-                    text_content,
-                    reply_markup=reply_markup
-                )
-                success = True
+            sent_message = await client.send_message(
+                chat_id,
+                text_content,
+                reply_markup=reply_markup
+            )
+            success = True
         else:
-            error_message = "Invalid new_message_type or missing data for sending/editing."
+            error_message = "Invalid new_message_type or missing data for sending."
             logger.error(error_message)
 
     except Exception as e:
-        logger.error(f"Failed to send/edit message of type {new_message_type} to chat {chat_id}: {e}")
-        error_message = f"❌ <b>Failed to send/edit message.</b>\nReason: {e}\nPlease try again later. 😥"
+        logger.error(f"Failed to send new message of type {new_message_type} to chat {chat_id}: {e}")
+        error_message = f"❌ <b>Failed to send message.</b>\nReason: {e}\nPlease try again later. 😥"
         success = False
 
     if success and isinstance(sent_message, Message):
-        # Update the active message ID only if a new message was sent or successfully edited
         set_active_video_message(chat_id, sent_message.id, chat_id)
-        logger.info(f"Message {sent_message.id} of type {new_message_type} sent/edited and active video message updated for user {chat_id}.")
+        logger.info(f"New message {sent_message.id} of type {new_message_type} sent and active video message updated for user {chat_id}.")
         return True, sent_message
     else:
-        logger.error(f"Failed to send/edit message in send_and_replace_message: {error_message}")
+        logger.error(f"Failed to send new message in send_and_replace_message: {error_message}")
         return False, error_message
 
 # --- Keyboards ---
@@ -859,18 +828,17 @@ async def start_cmd(client: Client, message: Message):
 
                     video = result_or_msg
                     
-                    old_message_id_to_edit = None
+                    old_message_id_to_delete = None
                     if user_id in active_video_message:
-                        old_message_id_to_edit = active_video_message[user_id]['message_id']
-                        # Do NOT clear active_video_message here, as we are editing it.
-                        # It will be updated by send_and_replace_message if successful.
+                        old_message_id_to_delete = active_video_message[user_id]['message_id']
+                        clear_active_video_message(user_id)
                     
                     # Pass is_saved=True if it came from a saved video link
                     is_saved_video_link = (deep_link_type == 'view_saved_video')
                     sent_success, sent_message_or_error = await send_and_replace_message(
                         client,
                         message.chat.id,
-                        old_message_id=old_message_id_to_edit, # Pass the message to be edited
+                        old_message_id=old_message_id_to_delete,
                         new_message_type="video",
                         video_data=video,
                         reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved_video_link)
@@ -992,23 +960,20 @@ async def get_video(client: Client, message: Message):
         await send_token_earning_options(client, message)
         return
     
-    old_message_id_to_edit = None
+    old_message_id_to_delete = None
     if user_id in active_video_message:
-        old_message_id_to_edit = active_video_message[user_id]['message_id']
-        # Do NOT clear active_video_message here, as we are editing it.
-        # It will be updated by send_and_replace_message if successful.
+        old_message_id_to_delete = active_video_message[user_id]['message_id']
+        clear_active_video_message(user_id)
 
     cats = get_categories()
     if not cats:
-        # If no categories, send a new message instead of trying to edit a non-existent one.
-        if old_message_id_to_edit:
+        if old_message_id_to_delete:
             try:
-                await client.delete_messages(chat_id, old_message_id_to_edit)
-                clear_active_video_message(user_id) # Clear if deleted
+                await client.delete_messages(chat_id, old_message_id_to_delete)
             except MessageIdInvalid:
                 pass
             except Exception as e:
-                logger.warning(f"Failed to delete old message {old_message_id_to_edit} for user {user_id}: {e}")
+                logger.warning(f"Failed to delete old message {old_message_id_to_delete} for user {user_id}: {e}")
 
         await message.reply("😔 No categories available. Please ask an admin to add some! 🛠️")
         logger.info(f"No categories found for user {user_id}.")
@@ -1019,7 +984,7 @@ async def get_video(client: Client, message: Message):
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        old_message_id=old_message_id_to_edit, # Pass the message to be edited
+        old_message_id=old_message_id_to_delete,
         new_message_type="text",
         text_content="🎬 <b>Choose a Category:</b>",
         reply_markup=category_keyboard()
@@ -1049,8 +1014,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
         logger.warning(f"User {user_id} tried to select category but current menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
-        # If the message ID doesn't match, it means the user clicked an old inline keyboard.
-        # We should delete the old message if it's not the one we're tracking, and then send a new one.
         if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
             try:
                 await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
@@ -1058,7 +1021,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
                 pass
             except Exception as e:
                 logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
-        clear_active_video_message(user_id) # Clear the outdated tracking
+        clear_active_video_message(user_id)
         await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
         return
 
@@ -1067,7 +1030,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         user = users_collection.find_one({'user_id': user_id})
         if not user or not user.get('bookmarked_videos'):
             await callback_query.answer("You haven't saved any videos yet. ❤️", show_alert=True)
-            # Edit the message to reflect no saved videos, keeping the category keyboard
             await callback_query.message.edit_text(
                 "You haven't saved any videos yet. ❤️",
                 reply_markup=category_keyboard() 
@@ -1112,11 +1074,11 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             )
             return
 
-        # Send the video directly by editing the current message
+        # Send the video directly
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
-            old_message_id=callback_query.message.id, # Edit the current message
+            old_message_id=callback_query.message.id,
             new_message_type="video",
             video_data=video,
             reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True)
@@ -1127,7 +1089,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             await callback_query.answer()
         else:
             await callback_query.answer("❌ Failed to load saved video. Please try again. 😥", show_alert=True)
-            # If sending fails, clear the active message tracking as it's no longer valid
             clear_active_video_message(user_id)
         return # Important: Exit after handling saved_videos category
 
@@ -1154,7 +1115,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        old_message_id=callback_query.message.id, # Edit the current message
+        old_message_id=callback_query.message.id,
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], category, user_id)
@@ -1257,7 +1218,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
-            old_message_id=callback_query.message.id, # Edit the current message
+            old_message_id=callback_query.message.id,
             new_message_type="video",
             video_data=video,
             reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=(category == "saved_videos"))
@@ -1337,7 +1298,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
-            old_message_id=callback_query.message.id, # Edit the current message
+            old_message_id=callback_query.message.id,
             new_message_type="video",
             video_data=found_video,
             reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id, is_saved=is_saved_for_prev)
@@ -1383,28 +1344,29 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
         
-        # We now edit the message to show category options, instead of deleting and sending new
+        try:
+            await client.delete_messages(chat_id, callback_query.message.id)
+            logger.info(f"Deleted current video message {callback_query.message.id} for user {user_id} to show category menu.")
+            clear_active_video_message(user_id)
+        except MessageIdInvalid:
+            logger.warning(f"Message {callback_query.message.id} for user {user_id} was already invalid/deleted when changing category.")
+            clear_active_video_message(user_id)
+        except Exception as e:
+            logger.error(f"Failed to delete current video message {callback_query.message.id} for user {user_id} during change category: {e}")
+            
         cats = get_categories()
         if not cats:
             await callback_query.answer("😔 No categories available. Please ask an admin to add some! 🛠️", show_alert=True)
             return
 
-        sent_success, sent_message_or_error = await send_and_replace_message(
-            client,
+        sent_message = await client.send_message(
             chat_id,
-            old_message_id=callback_query.message.id, # Edit the current message
-            new_message_type="text",
-            text_content="🎬 <b>Choose a Category:</b>",
+            "🎬 <b>Choose a Category:</b>",
             reply_markup=category_keyboard()
         )
-        
-        if sent_success:
-            await callback_query.answer()
-            logger.info(f"User {user_id} edited message to show change category menu.")
-        else:
-            await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
-            logger.error(f"User {user_id} failed to edit message to show change category menu: {sent_message_or_error}")
-
+        set_active_video_message(user_id, sent_message.id, chat_id)
+        await callback_query.answer()
+        logger.info(f"User {user_id} sent new message to show change category menu.")
 
     except Exception as e:
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
@@ -1746,22 +1708,24 @@ async def saved_videos_btn(client: Client, message: Message):
         )
         return
 
-    old_message_id_to_edit = None
+    old_message_id_to_delete = None
     if user_id in active_video_message:
-        old_message_id_to_edit = active_video_message[user_id]['message_id']
-        # Do NOT clear active_video_message here, as we are editing it.
-        # It will be updated by send_and_replace_message if successful.
+        old_message_id_to_delete = active_video_message[user_id]['message_id']
+        clear_active_video_message(user_id)
 
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        old_message_id=old_message_id_to_edit, # Edit the current message
+        old_message_id=old_message_id_to_delete,
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True) # Pass is_saved=True
     )
 
-    if not sent_success:
+    if sent_success:
+        save_history(user_id, video['uuid'], "saved_videos")
+        logger.info(f"User {user_id} displayed latest saved video {video_uuid}.")
+    else:
         await message.reply(sent_message_or_error)
         logger.error(f"User {user_id} failed to send latest saved video: {sent_message_or_error}")
 
@@ -1811,27 +1775,27 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                     sent_success, sent_message_or_error = await send_and_replace_message(
                         client,
                         chat_id,
-                        old_message_id=callback_query.message.id, # Edit the current message
+                        old_message_id=callback_query.message.id,
                         new_message_type="video",
                         video_data=next_video,
                         reply_markup=video_nav_keyboard(next_video['uuid'], "saved_videos", user_id, is_saved=True)
                     )
-                    if not sent_success:
+                    if sent_success:
+                        save_history(user_id, next_video['uuid'], "saved_videos")
+                    else:
                         await client.send_message(chat_id, "❌ Failed to load next saved video. Please try again. 😥")
                 else:
                     await client.send_message(chat_id, "The next saved video was not found. It may have been removed. 😔")
             else:
-                # No saved videos left, edit to a text message
-                sent_success, sent_message_or_error = await send_and_replace_message(
+                # No saved videos left
+                await send_and_replace_message(
                     client,
                     chat_id,
-                    old_message_id=callback_query.message.id, # Edit the current message
+                    old_message_id=callback_query.message.id,
                     new_message_type="text",
                     text_content="You have no more saved videos. ❤️ Click 'Get Video' to find new ones!",
-                    reply_markup=await get_main_keyboard(user_id) # Optionally revert to main keyboard
+                    reply_markup=await get_main_keyboard(user_id)
                 )
-                if not sent_success:
-                    await client.send_message(chat_id, "❌ Failed to update message after removing last saved video. 😥")
         else:
             await callback_query.answer("Video not found in your saved videos. 🧐", show_alert=True)
     except Exception as e:
@@ -1873,14 +1837,13 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         )
         return
 
-    old_message_id_to_edit = callback_query.message.id
-    # Do NOT clear active_video_message here, as we are editing it.
-    # It will be updated by send_and_replace_message if successful.
+    old_message_id_to_delete = callback_query.message.id
+    clear_active_video_message(user_id) # Clear previous message state
 
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        old_message_id=old_message_id_to_edit, # Edit the current message
+        old_message_id=old_message_id_to_delete,
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True) # Ensure is_saved is true for this path
