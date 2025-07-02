@@ -9,7 +9,8 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InlineQueryResultArticle, InputTextMessageContent, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid
+from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient, ASCENDING, ReturnDocument
 import aiohttp
 from aiohttp import ClientTimeout
@@ -45,11 +46,13 @@ class BotConfig:
     PREMIUM_MONTH_PRICE_INR = 169
     SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
+    FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
+    FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -124,6 +127,43 @@ async def cancel_all_active_tasks():
 def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
     return user_id in config.ADMIN_IDS
+
+# --- Force Subscribe Check ---
+async def check_membership(client: Client, user_id: int) -> bool:
+    """
+    Checks if the user is a member of the force subscribe channel.
+    Returns True if a member (or admin), False otherwise.
+    """
+    if is_admin(user_id):
+        return True # Admins bypass force subscribe
+
+    try:
+        member = await client.get_chat_member(config.FORCE_SUB_CHANNEL_ID, user_id)
+        if member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            logger.info(f"User {user_id} is a member of force sub channel {config.FORCE_SUB_CHANNEL_ID}.")
+            return True
+        else:
+            logger.info(f"User {user_id} is NOT a member of force sub channel {config.FORCE_SUB_CHANNEL_ID}. Status: {member.status}")
+            return False
+    except PeerIdInvalid:
+        logger.error(f"Force subscribe channel ID {config.FORCE_SUB_CHANNEL_ID} is invalid. Please check config.")
+        return True # Treat as member if channel ID is invalid to avoid blocking all users
+    except Exception as e:
+        logger.error(f"Error checking membership for user {user_id} in channel {config.FORCE_SUB_CHANNEL_ID}: {e}", exc_info=True)
+        return False # Default to false on error
+
+async def send_force_subscribe_message(client: Client, chat_id: int):
+    """Sends a message prompting the user to join the force subscribe channel."""
+    logger.info(f"Sending force subscribe message to user {chat_id}.")
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Join Channel", url=config.FORCE_SUB_CHANNEL_LINK)]
+    ])
+    await client.send_message(
+        chat_id,
+        "<b>⚠️ You must join our channel to use this bot.</b>\n\n"
+        "Please join the channel below and then try again. Once you join, click the '🎞️ Get Video' button or send /start again.",
+        reply_markup=reply_markup
+    )
 
 # --- Utility Functions ---
 def str_to_b64(string: str) -> str:
@@ -552,7 +592,7 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
         InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"),
         InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")
     ]
-    if is_premium_user(user_id):
+    if is_premium_user(user_id): # This check correctly determines visibility
         row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
 
@@ -698,6 +738,11 @@ async def start_cmd(client: Client, message: Message):
 
     for attempt in range(max_retries):
         try:
+            # Force Subscribe Check
+            if not await check_membership(client, user_id):
+                await send_force_subscribe_message(client, user_id)
+                return # Stop processing if not a member
+
             if await is_rate_limited(user_id):
                 raise FloodWait(10)
         
@@ -871,6 +916,11 @@ async def start_cmd(client: Client, message: Message):
 async def help_cmd(client: Client, message: Message):
     """Handles the /help command."""
     user_id = message.from_user.id
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
     user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
@@ -892,6 +942,11 @@ async def profile_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested profile.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -947,6 +1002,11 @@ async def get_video(client: Client, message: Message):
     chat_id = message.chat.id
     logger.info(f"User {user_id} requested Get Video.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1002,6 +1062,12 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     category = callback_query.data[4:]
     logger.info(f"User {user_id} selected category: {category}.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1137,6 +1203,12 @@ async def next_video(client: Client, callback_query: CallbackQuery):
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested next video.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1241,6 +1313,12 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested previous video.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1325,6 +1403,12 @@ async def change_category(client: Client, callback_query: CallbackQuery):
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested to change category.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1377,6 +1461,10 @@ async def profile_btn(client: Client, message: Message):
     """Handles 'Profile' button click."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Profile button.")
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
     try:
         await profile_cmd(client, message)
         logger.info(f"User {user_id}: Profile command triggered from button.")
@@ -1390,6 +1478,11 @@ async def refer_btn(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Refer & Earn button.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1412,6 +1505,11 @@ async def buy_token_btn(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Buy Token button.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1427,6 +1525,11 @@ async def refresh_token_btn(client: Client, message: Message):
     """Handles 'Refresh Token' button click."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested token refresh. Handler entered.")
+
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
 
     temp_msg = None
     try:
@@ -1488,6 +1591,12 @@ async def send_token_earning_options(client: Client, message: Message):
     """Sends messages to a user detailing how to earn tokens."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} is being sent token earning options.")
+    
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
     try:
         # Check and notify about premium status change
         create_tracked_task(check_premium_status_and_notify(client, user_id))
@@ -1525,6 +1634,12 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1560,11 +1675,17 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
 
     logger.info(f"User {user_id} requested download for video {video_uuid}.")
 
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change BEFORE checking is_premium_user
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
-        if not is_premium_user(user_id): # This now relies on the new premium logic
+        if not is_premium_user(user_id): # This check correctly determines visibility
             logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
             support_bot_link = f"https://t.me/{config.SUPPORT_BOT_USERNAME}"
             reply_markup = InlineKeyboardMarkup([
@@ -1607,6 +1728,12 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
 
     logger.info(f"User {user_id} requested to bookmark video {video_uuid}.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1651,6 +1778,11 @@ async def saved_videos_btn(client: Client, message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     logger.info(f"User {user_id} clicked Saved Videos button.")
+
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
 
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
@@ -1737,6 +1869,12 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested to remove saved video {video_uuid}.")
 
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1814,6 +1952,12 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
 
     logger.info(f"User {user_id} requested to view saved video {video_uuid}.")
 
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1864,6 +2008,12 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     await callback_query.answer("This video is no longer available. It may have been removed. 😔", show_alert=True)
     # Optionally remove from saved list if confirmed unavailable.
     users_collection.update_one(
@@ -1878,6 +2028,12 @@ async def confirm_clear_all_saved_callback(client: Client, callback_query: Callb
     user_id = callback_query.from_user.id
     logger.info(f"User {user_id} requested to confirm clearing all saved videos.")
     
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Yes, Clear All", callback_data="clear_all_saved_videos")],
         [InlineKeyboardButton("❌ No, Keep Them", callback_data="cancel_clear_saved")]
@@ -1894,6 +2050,12 @@ async def clear_all_saved_videos_callback(client: Client, callback_query: Callba
     """Clears all saved videos for the user."""
     user_id = callback_query.from_user.id
     logger.info(f"User {user_id} confirmed clearing all saved videos.")
+
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
 
     try:
         users_collection.update_one(
@@ -1913,6 +2075,13 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     """Cancels clearing all saved videos."""
     user_id = callback_query.from_user.id
     logger.info(f"User {user_id} cancelled clearing all saved videos.")
+    
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
     await callback_query.message.edit_text("Operation cancelled. Your saved videos are safe! ✅")
     await callback_query.answer("Operation cancelled.")
 
@@ -2611,6 +2780,9 @@ async def health_check():
         # Try to fetch a real message_id if possible, else 1
         msg = await app.get_messages(config.VIDEO_CHANNEL_ID, 1)
         print("Fetched message:", msg)
+        # Also check the force subscribe channel
+        force_sub_member = await app.get_chat_member(config.FORCE_SUB_CHANNEL_ID, me.id)
+        print(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
     except Exception as e:
         print("Health check failed:", e)
 
@@ -2652,3 +2824,4 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
+
