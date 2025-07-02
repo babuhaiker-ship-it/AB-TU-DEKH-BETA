@@ -444,49 +444,51 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
 
     try:
         if new_message_type == "video" and video_data:
-            # Prepare InputMediaVideo
             input_media = InputMediaVideo(
                 media=video_data['file_id'],
                 caption=None, # Removed caption as per user request
-                # 'protect_content' is not a valid argument for InputMediaVideo.__init__()
-                # It should be passed to client.edit_message_media or client.send_video
             )
             
             if old_message_id:
                 try:
-                    # Edit the existing message
                     sent_message = await client.edit_message_media(
                         chat_id=chat_id,
                         message_id=old_message_id,
                         media=input_media,
                         reply_markup=reply_markup,
-                        protect_content=protect_content_for_user # Pass here
+                        protect_content=protect_content_for_user
                     )
-                    # No need to edit caption separately if it's part of InputMediaVideo
                     success = True
                 except MessageNotModified:
                     logger.info(f"Message {old_message_id} in chat {chat_id} not modified (same video).")
-                    sent_message = await client.get_messages(chat_id, old_message_id) # Get the existing message object
+                    sent_message = await client.get_messages(chat_id, old_message_id)
                     success = True
                 except Exception as e:
-                    logger.warning(f"Failed to edit message media for {old_message_id} in chat {chat_id}: {e}. Falling back to send new.")
-                    # Fallback to sending a new message if editing fails
+                    logger.warning(f"Failed to edit message media for {old_message_id} in chat {chat_id}: {e}. Attempting to delete old and send new.")
+                    try:
+                        await client.delete_messages(chat_id, old_message_id)
+                        clear_active_video_message(chat_id) # Clear tracking for the deleted message
+                    except MessageIdInvalid:
+                        logger.info(f"Message {old_message_id} already deleted by user or not found when attempting to clean up.")
+                    except Exception as delete_e:
+                        logger.error(f"Error deleting old message {old_message_id} after edit failure: {delete_e}")
+
+                    # Fallback to sending a new message if editing fails or old message deleted
                     sent_message = await client.send_video(
                         chat_id,
                         video_data['file_id'],
-                        caption=None, # Removed caption as per user request
+                        caption=None,
                         reply_markup=reply_markup,
-                        protect_content=protect_content_for_user # Pass here
+                        protect_content=protect_content_for_user
                     )
                     success = True
             else:
-                # Send a new message if no old_message_id is provided
                 sent_message = await client.send_video(
                     chat_id,
                     video_data['file_id'],
-                    caption=None, # Removed caption as per user request
+                    caption=None,
                     reply_markup=reply_markup,
-                    protect_content=protect_content_for_user # Pass here
+                    protect_content=protect_content_for_user
                 )
                 success = True
 
@@ -502,10 +504,18 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     success = True
                 except MessageNotModified:
                     logger.info(f"Message {old_message_id} in chat {chat_id} not modified (same text).")
-                    sent_message = await client.get_messages(chat_id, old_message_id) # Get the existing message object
+                    sent_message = await client.get_messages(chat_id, old_message_id)
                     success = True
                 except Exception as e:
-                    logger.warning(f"Failed to edit message text for {old_message_id} in chat {chat_id}: {e}. Falling back to send new.")
+                    logger.warning(f"Failed to edit message text for {old_message_id} in chat {chat_id}: {e}. Attempting to delete old and send new.")
+                    try:
+                        await client.delete_messages(chat_id, old_message_id)
+                        clear_active_video_message(chat_id) # Clear tracking for the deleted message
+                    except MessageIdInvalid:
+                        logger.info(f"Message {old_message_id} already deleted by user or not found when attempting to clean up.")
+                    except Exception as delete_e:
+                        logger.error(f"Error deleting old message {old_message_id} after edit failure: {delete_e}")
+
                     sent_message = await client.send_message(
                         chat_id,
                         text_content,
@@ -529,7 +539,6 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
         success = False
 
     if success and isinstance(sent_message, Message):
-        # Update the active message ID only if a new message was sent or successfully edited
         set_active_video_message(chat_id, sent_message.id, chat_id)
         logger.info(f"Message {sent_message.id} of type {new_message_type} sent/edited and active video message updated for user {chat_id}.")
         return True, sent_message
@@ -1713,7 +1722,7 @@ async def saved_videos_btn(client: Client, message: Message):
         bookmarked_videos_data = bookmarked_videos_data[:config.FREE_USER_SAVE_LIMIT]
         users_collection.update_one(
             {'user_id': user_id},
-            {'$set': {'bookmarked_videos': truncated_bookmarks}}
+            {'$set': {'bookmarked_videos': bookmarked_videos_data}}
         )
         logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT} as premium expired or was never premium.")
 
