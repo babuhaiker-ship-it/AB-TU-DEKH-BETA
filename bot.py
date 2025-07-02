@@ -2565,7 +2565,7 @@ async def cleanup_expired_data():
         await asyncio.sleep(86400) # Run once every 24 hours
 
 async def verify_and_cleanup_media():
-    """Periodically verifies if media files still exist in the channel and cleans up invalid entries."""
+    """Periodically verifies if media files still exist in the channel and logs missing/inaccessible entries, but does NOT delete anything."""
     while True:
         logger.info("Starting media verification and cleanup task.")
         try:
@@ -2575,28 +2575,21 @@ async def verify_and_cleanup_media():
                 message_id_in_channel = media_item.get('message_id')
                 
                 if not message_id_in_channel:
-                    logger.warning(f"Media item {video_uuid} has no message_id in channel. Deleting from DB and user bookmarks.")
-                    media_collection.delete_one({'uuid': video_uuid})
-                    # Also remove from all user bookmarks
-                    users_collection.update_many(
-                        {},
-                        {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
-                    )
+                    logger.warning(f"Media item {video_uuid} has no message_id in channel. (Would delete, but deletion is disabled)")
                     continue
 
                 try:
                     await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
                     logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
-                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. Deleting from DB and user bookmarks.")
-                    media_collection.delete_one({'uuid': video_uuid})
-                    # Also remove from all user bookmarks
-                    users_collection.update_many(
-                        {},
-                        {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
-                    )
+                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. (Would delete, but deletion is disabled)")
+                    continue
                 except Exception as e:
                     logger.error(f"Error verifying media {video_uuid} in channel {config.VIDEO_CHANNEL_ID}: {e}", exc_info=True)
+                    if "not enough rights" in str(e).lower() or "permission" in str(e).lower() or "access" in str(e).lower():
+                        logger.warning(f"Bot has no access to channel. Skipping deletion for {video_uuid}.")
+                        continue
+                    continue
 
             logger.info("Media verification and cleanup task completed.")
         except asyncio.CancelledError:
