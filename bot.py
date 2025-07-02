@@ -205,10 +205,12 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(shortener_api_endpoint, json={
+            # For Get2Short.com and similar APIs, the parameters are usually 'api' and 'url'
+            payload = {
                 'api': api_key,
                 'url': long_url
-            }, timeout=ClientTimeout(total=10)) as resp:
+            }
+            async with session.post(shortener_api_endpoint, json=payload, timeout=ClientTimeout(total=10)) as resp:
                 response_text = await resp.text() # Get raw response text for better debugging
                 logger.info(f"URL shortener API response status: {resp.status} for endpoint: {shortener_api_endpoint}")
                 logger.info(f"URL shortener API raw response: {response_text}")
@@ -216,11 +218,17 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
                 if resp.status == 200:
                     try:
                         response_data = await resp.json()
-                        if response_data.get('shortenedUrl'):
-                            logger.info(f"URL shortened successfully to: {response_data['shortenedUrl']}")
-                            return response_data['shortenedUrl']
+                        # Check for common keys used by shorteners for the shortened URL
+                        shortened_url = response_data.get('shortenedUrl') or \
+                                        response_data.get('shorturl') or \
+                                        response_data.get('link') or \
+                                        response_data.get('id') # Some APIs might return 'id' which is the short URL
+                                        
+                        if shortened_url:
+                            logger.info(f"URL shortened successfully to: {shortened_url}")
+                            return shortened_url
                         else:
-                            logger.warning(f"URL shortening API returned 200 but no 'shortenedUrl' key in JSON: {response_data}")
+                            logger.warning(f"URL shortening API returned 200 but no recognized 'shortenedUrl', 'shorturl', 'link', or 'id' key in JSON: {response_data}")
                     except aiohttp.ContentTypeError:
                         logger.warning(f"URL shortening API returned 200 but response is not JSON. Raw response: {response_text}")
                 else:
@@ -1496,7 +1504,7 @@ async def refer_btn(client: Client, message: Message):
             return
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        await message.reply(f"🔗 <b>Share & Earn!</b>\nShare this link to earn tokens:\n<code>{html.escape(ref_link)}</code>\n\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉", reply_markup=referral_keyboard(ref_link))
+        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢", reply_markup=referral_keyboard(ref_link))
         logger.info(f"User {user_id}: Referral link sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
@@ -2608,7 +2616,7 @@ async def setshortener_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated /setshortener command.")
     admin_shortener_setup_state[user_id] = {'step': 'await_base_url'}
-    await message.reply("Send your Shortener API Endpoint URL (e.g., `https://api.linkshortify.com/st`). This should be the exact API endpoint for shortening, not just the base domain. 📝")
+    await message.reply("Send your Shortener API Endpoint URL (e.g., `https://api.linkshortify.com/st` or `http://Get2Short.com/api`). This should be the exact API endpoint for shortening, not just the base domain. 📝")
 
 @app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_setshortener_input(client: Client, message: Message):
@@ -2627,7 +2635,7 @@ async def handle_setshortener_input(client: Client, message: Message):
             
             # Suggest adding an endpoint path if it looks like just a domain
             if not re.search(r'/[a-zA-Z0-9_-]+$', base_url.rstrip('/')): # Checks for /something at the end
-                await message.reply("💡 It looks like you provided a base domain. Please ensure this is the *exact API endpoint* for shortening (e.g., `https://api.linkshortify.com/st`). If it is, proceed. Otherwise, please send the correct endpoint.")
+                await message.reply("💡 It looks like you provided a base domain. Please ensure this is the *exact API endpoint* for shortening (e.g., `https://api.linkshortify.com/st` or `http://Get2Short.com/api`). If it is, proceed. Otherwise, please send the correct endpoint.")
             
             admin_shortener_setup_state[user_id]['base_url'] = base_url
             admin_shortener_setup_state[user_id]['step'] = 'await_api_key'
