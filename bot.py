@@ -190,6 +190,7 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
     """
     logger.info(f"Attempting to shorten URL: {long_url}")
     shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
+    logger.info(f"Retrieved shortener_config from DB: {shortener_config}")
 
     if not shortener_config:
         logger.warning("URL shortener configuration not found in DB. Returning original URL.")
@@ -197,6 +198,7 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
 
     # The template_url should now contain the full API endpoint with a placeholder
     template_url = shortener_config.get('template_url')
+    logger.info(f"Template URL from config: {template_url}")
 
     if not template_url or '{long_url}' not in template_url:
         logger.warning("Missing or invalid 'template_url' in shortener config (no {long_url} placeholder). Returning original URL.")
@@ -206,6 +208,7 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
     # Ensure the long_url is URL-encoded before inserting it into the template
     encoded_long_url = urllib.parse.quote_plus(long_url)
     shortener_api_endpoint = template_url.replace('{long_url}', encoded_long_url)
+    logger.info(f"Constructed shortener API endpoint: {shortener_api_endpoint}")
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -224,13 +227,19 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
                                         response_data.get('link') or \
                                         response_data.get('id') # Some APIs might return 'id' which is the short URL
                                         
-                        if shortened_url:
-                            logger.info(f"URL shortened successfully to: {shortened_url}")
+                        if shortened_url and (shortened_url.startswith("http://") or shortened_url.startswith("https://")):
+                            logger.info(f"URL shortened successfully (JSON) to: {shortened_url}")
                             return shortened_url
                         else:
-                            logger.warning(f"URL shortening API returned 200 but no recognized 'shortenedUrl', 'shorturl', 'link', or 'id' key in JSON: {response_data}")
+                            logger.warning(f"URL shortening API returned 200 but no recognized 'shortenedUrl', 'shorturl', 'link', or 'id' key in JSON or URL invalid: {response_data}")
                     except aiohttp.ContentTypeError:
-                        logger.warning(f"URL shortening API returned 200 but response is not JSON. Raw response: {response_text}")
+                        logger.warning(f"URL shortening API returned 200 but response is not JSON. Attempting to use raw text as URL.")
+                        # If not JSON, try to use the raw text directly if it looks like a URL
+                        if response_text.startswith("http://") or response_text.startswith("https://"):
+                            logger.info(f"URL shortened successfully (raw text) to: {response_text}")
+                            return response_text
+                        else:
+                            logger.warning(f"Raw response text is not a valid URL: {response_text}")
                 else:
                     logger.warning(f"URL shortening API returned non-200 status {resp.status}, raw response: {response_text}")
         logger.warning(f"URL shortening failed for {long_url} after API call (no shortenedUrl or non-200 status).")
