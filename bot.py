@@ -209,18 +209,22 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
                 'api': api_key,
                 'url': long_url
             }, timeout=ClientTimeout(total=10)) as resp:
+                response_text = await resp.text() # Get raw response text for better debugging
                 logger.info(f"URL shortener API response status: {resp.status} for endpoint: {shortener_api_endpoint}")
-                response_data = await resp.json()
-                logger.info(f"URL shortener API response data: {response_data}")
-                
+                logger.info(f"URL shortener API raw response: {response_text}")
+
                 if resp.status == 200:
-                    if response_data.get('shortenedUrl'):
-                        logger.info(f"URL shortened successfully to: {response_data['shortenedUrl']}")
-                        return response_data['shortenedUrl']
-                    else:
-                        logger.warning(f"URL shortening API returned 200 but no 'shortenedUrl' key: {response_data}")
+                    try:
+                        response_data = await resp.json()
+                        if response_data.get('shortenedUrl'):
+                            logger.info(f"URL shortened successfully to: {response_data['shortenedUrl']}")
+                            return response_data['shortenedUrl']
+                        else:
+                            logger.warning(f"URL shortening API returned 200 but no 'shortenedUrl' key in JSON: {response_data}")
+                    except aiohttp.ContentTypeError:
+                        logger.warning(f"URL shortening API returned 200 but response is not JSON. Raw response: {response_text}")
                 else:
-                    logger.warning(f"URL shortening API returned non-200 status {resp.status}, response: {response_data}")
+                    logger.warning(f"URL shortening API returned non-200 status {resp.status}, raw response: {response_text}")
         logger.warning(f"URL shortening failed for {long_url} after API call (no shortenedUrl or non-200 status).")
         return long_url
     except aiohttp.ClientError as ce:
@@ -577,7 +581,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
 def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: bool = False) -> InlineKeyboardMarkup:
     """
     Keyboard for navigating videos, with button arrangements based on whether it's a saved video.
-    The 'Download' button is shown only to premium users.
+    The 'Download' button is now always shown.
     """
     buttons = []
 
@@ -587,13 +591,12 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
         InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category}")
     ])
 
-    # Row 2: Categories, Share, and Download (if premium)
+    # Row 2: Categories, Share, and Download (always visible)
     row_2_buttons = [
         InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"),
-        InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}")
+        InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
+        InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}") # Always visible
     ]
-    if is_premium_user(user_id): # This check correctly determines visibility
-        row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
 
     # Row 3: Bookmark or Remove and Bookmark based on is_saved
@@ -1054,7 +1057,7 @@ async def get_video(client: Client, message: Message):
         await message.reply(sent_message_or_error)
         logger.error(f"User {user_id} failed to send category selection message: {sent_message_or_error}")
 
-@app.on_callback_query(filters.regex(r"^cat_(.+)"))
+@app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
     """Handles category selection callback."""
     user_id = callback_query.from_user.id
@@ -2605,7 +2608,7 @@ async def setshortener_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated /setshortener command.")
     admin_shortener_setup_state[user_id] = {'step': 'await_base_url'}
-    await message.reply("Send your Shortener Base URL (e.g., `https://api.linkshortify.com/st`). This should be the exact API endpoint.")
+    await message.reply("Send your Shortener API Endpoint URL (e.g., `https://api.linkshortify.com/st`). This should be the exact API endpoint for shortening, not just the base domain. 📝")
 
 @app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_setshortener_input(client: Client, message: Message):
@@ -2622,9 +2625,13 @@ async def handle_setshortener_input(client: Client, message: Message):
                 logger.warning(f"Admin {user_id} provided invalid base URL format: {base_url}")
                 return
             
+            # Suggest adding an endpoint path if it looks like just a domain
+            if not re.search(r'/[a-zA-Z0-9_-]+$', base_url.rstrip('/')): # Checks for /something at the end
+                await message.reply("💡 It looks like you provided a base domain. Please ensure this is the *exact API endpoint* for shortening (e.g., `https://api.linkshortify.com/st`). If it is, proceed. Otherwise, please send the correct endpoint.")
+            
             admin_shortener_setup_state[user_id]['base_url'] = base_url
             admin_shortener_setup_state[user_id]['step'] = 'await_api_key'
-            await message.reply("Send your API Token (e.g., `sk_XXXXXX...`).")
+            await message.reply("Send your API Token (e.g., `5cd923c490f64017cffa6e3bb6cc724560a8cfc6`).")
             logger.info(f"Admin {user_id} provided base URL: {base_url}")
             
         elif current_step == 'await_api_key':
@@ -2714,7 +2721,7 @@ async def cleanup_expired_data():
                         {'user_id': user_id},
                         {'$set': {'bookmarked_videos': truncated_bookmarks}}
                     )
-                    logger.info(f"User {user_id} is no longer premium or never was. Bookmarks truncated to {config.FREE_USER_SAVE_LIMIT}.")
+                    logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT}.")
                 
                 # The "no longer premium" message is handled at user interaction points
                 # via `check_premium_status_and_notify`.
