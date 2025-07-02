@@ -453,14 +453,32 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
 
     try:
         if new_message_type == "video" and video_data:
-            sent_message = await client.send_video(
-                chat_id,
-                video_data['file_id'],
-                caption=f"Category: {html.escape(video_data['category'])}",
-                reply_markup=reply_markup,
-                protect_content=protect_content_for_user
-            )
-            success = True
+            # Try to send by copying from channel (if possible)
+            try:
+                # Try to copy the message from the channel using message_id
+                sent_message = await client.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=config.VIDEO_CHANNEL_ID,
+                    message_id=video_data.get('message_id'),
+                    protect_content=protect_content_for_user
+                )
+                success = True
+            except Exception as e:
+                logger.warning(f"Failed to copy video from channel by message_id: {e}. Falling back to file_id.")
+                # Fallback: send by file_id
+                try:
+                    sent_message = await client.send_video(
+                        chat_id,
+                        video_data['file_id'],
+                        caption=f"Category: {html.escape(video_data['category'])}",
+                        reply_markup=reply_markup,
+                        protect_content=protect_content_for_user
+                    )
+                    success = True
+                except Exception as e2:
+                    logger.error(f"Failed to send video by file_id: {e2}")
+                    error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
+                    success = False
         elif new_message_type == "text" and text_content:
             sent_message = await client.send_message(
                 chat_id,
@@ -2589,6 +2607,19 @@ async def verify_and_cleanup_media():
         
         await asyncio.sleep(6 * 3600) # Run every 6 hours
 
+async def health_check():
+    print("Session file exists:", os.path.exists("/data/spicynyraa.session"))
+    try:
+        me = await app.get_me()
+        print(f"Bot username: {me.username}")
+        member = await app.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
+        print(f"Bot status in channel: {member.status}")
+        # Try to fetch a real message_id if possible, else 1
+        msg = await app.get_messages(config.VIDEO_CHANNEL_ID, 1)
+        print("Fetched message:", msg)
+    except Exception as e:
+        print("Health check failed:", e)
+
 async def main_bot_logic():
     """
     Main function to start the bot and schedule background tasks.
@@ -2598,6 +2629,7 @@ async def main_bot_logic():
     
     # Start the Pyrogram client
     await app.start()
+    await health_check()  # Run health check after starting app
     logger.info("Bot has connected to Telegram.")
 
     # Schedule background tasks
