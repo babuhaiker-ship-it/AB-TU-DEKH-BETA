@@ -4,3 +4,4 @@ aiohttp==3.11.18
 pymongo[srv]==4.13.0
 dnspython==2.7.0 
 python-dotenv
+shortzy
