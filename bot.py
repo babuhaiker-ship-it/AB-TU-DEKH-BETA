@@ -18,6 +18,7 @@ from collections import defaultdict
 import re
 import html
 import urllib.parse # Added for URL encoding
+from shortzy import Shortzy # Import the Shortzy library
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -185,8 +186,8 @@ def get_current_time() -> int:
 
 async def get_shortener_config_and_shorten_url(long_url: str) -> str:
     """
-    Shortens a given URL using the configured URL shortener service
-    fetched from the database. If no config or API error, returns original URL.
+    Shortens a given URL using the configured URL shortener service (Shortzy).
+    Fetches configuration from the database. If no config or API error, returns original URL.
     """
     logger.info(f"Attempting to shorten URL: {long_url}")
     shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
@@ -196,7 +197,6 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         logger.warning("URL shortener configuration not found in DB. Returning original URL.")
         return long_url
 
-    # The template_url should now contain the full API endpoint with a placeholder
     template_url = shortener_config.get('template_url')
     logger.info(f"Template URL from config: {template_url}")
 
@@ -204,51 +204,47 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         logger.warning("Missing or invalid 'template_url' in shortener config (no {long_url} placeholder). Returning original URL.")
         return long_url
         
-    # Construct the final URL for the shortener API call
-    # Ensure the long_url is URL-encoded before inserting it into the template
-    encoded_long_url = urllib.parse.quote_plus(long_url)
-    shortener_api_endpoint = template_url.replace('{long_url}', encoded_long_url)
-    logger.info(f"Constructed shortener API endpoint: {shortener_api_endpoint}")
-
+    # Parse the template_url to extract base_site and api_key for Shortzy
     try:
-        async with aiohttp.ClientSession() as session:
-            # Most URL shorteners with parameters in the URL use GET requests
-            async with session.get(shortener_api_endpoint, timeout=ClientTimeout(total=10)) as resp:
-                response_text = await resp.text() # Get raw response text for better debugging
-                logger.info(f"URL shortener API response status: {resp.status} for endpoint: {shortener_api_endpoint}")
-                logger.info(f"URL shortener API raw response: {response_text}")
+        parsed_url = urllib.parse.urlparse(template_url)
+        base_site = parsed_url.netloc # e.g., 'get2short.com'
+        
+        # Extract API key from query parameters
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        api_key_list = query_params.get('api')
+        
+        if not api_key_list:
+            logger.warning("No 'api' key found in the template_url query parameters. Cannot initialize Shortzy. Returning original URL.")
+            return long_url
+        
+        api_key = api_key_list[0] # Take the first API key if multiple are present
+        
+        # Shortzy expects base_site without http/https prefix
+        if base_site.startswith("http://"):
+            base_site = base_site[len("http://"):]
+        elif base_site.startswith("https://"):
+            base_site = base_site[len("https://"):]
 
-                if resp.status == 200:
-                    try:
-                        response_data = await resp.json()
-                        # Check for common keys used by shorteners for the shortened URL
-                        shortened_url = response_data.get('shortenedUrl') or \
-                                        response_data.get('shorturl') or \
-                                        response_data.get('link') or \
-                                        response_data.get('id') # Some APIs might return 'id' which is the short URL
-                                        
-                        if shortened_url and (shortened_url.startswith("http://") or shortened_url.startswith("https://")):
-                            logger.info(f"URL shortened successfully (JSON) to: {shortened_url}")
-                            return shortened_url
-                        else:
-                            logger.warning(f"URL shortening API returned 200 but no recognized 'shortenedUrl', 'shorturl', 'link', or 'id' key in JSON or URL invalid: {response_data}")
-                    except aiohttp.ContentTypeError:
-                        logger.warning(f"URL shortening API returned 200 but response is not JSON. Attempting to use raw text as URL.")
-                        # If not JSON, try to use the raw text directly if it looks like a URL
-                        if response_text.startswith("http://") or response_text.startswith("https://"):
-                            logger.info(f"URL shortened successfully (raw text) to: {response_text}")
-                            return response_text
-                        else:
-                            logger.warning(f"Raw response text is not a valid URL: {response_text}")
-                else:
-                    logger.warning(f"URL shortening API returned non-200 status {resp.status}, raw response: {response_text}")
-        logger.warning(f"URL shortening failed for {long_url} after API call (no shortenedUrl or non-200 status).")
-        return long_url
-    except aiohttp.ClientError as ce:
-        logger.error(f"Aiohttp client error during URL shortening for {long_url}: {ce}", exc_info=True)
-        return long_url
+        # If there's a path in the base_site, Shortzy might expect just the domain.
+        # Let's try with just the netloc first.
+        base_site = parsed_url.netloc
+
+        # Initialize Shortzy client
+        shortzy_client = Shortzy(api_key=api_key, base_site=base_site)
+        logger.info(f"Initialized Shortzy with base_site: {base_site}, api_key: {'*' * len(api_key)}")
+
+        # Shorten the URL
+        shortened_url = await shortzy_client.convert(long_url)
+        
+        if shortened_url and (shortened_url.startswith("http://") or shortened_url.startswith("https://")):
+            logger.info(f"URL shortened successfully (Shortzy) to: {shortened_url}")
+            return shortened_url
+        else:
+            logger.warning(f"Shortzy returned an invalid or non-URL string: {shortened_url}. Returning original URL.")
+            return long_url
+
     except Exception as e:
-        logger.error(f"General error shortening URL {long_url}: {e}", exc_info=True)
+        logger.error(f"Error using Shortzy to shorten URL {long_url}: {e}", exc_info=True)
         return long_url
 
 # --- Token and Premium Management ---
@@ -2627,9 +2623,10 @@ async def setshortener_cmd(client: Client, message: Message):
     admin_shortener_setup_state[user_id] = {'step': 'await_template_url'}
     await message.reply(
         "Send your Shortener API Template URL.\n\n"
-        "This URL should include `{long_url}` as a placeholder for the URL you want to shorten.\n\n"
+        "This URL should include `{long_url}` as a placeholder for the URL you want to shorten, "
+        "and also contain your API key as a query parameter (e.g., `api=YOUR_API_KEY`).\n\n"
         "<b>Example:</b> `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n\n"
-        "Make sure to replace `YOUR_API_KEY` with your actual API key if it's part of the URL. 📝"
+        "Make sure to replace `YOUR_API_KEY` with your actual API key. 📝"
     )
 
 @app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
@@ -2654,6 +2651,16 @@ async def handle_setshortener_input(client: Client, message: Message):
                     "Please send the correct template URL. 📝"
                 )
                 logger.warning(f"Admin {user_id} provided template URL without {{long_url}} placeholder: {template_url}")
+                return
+            
+            # Additional check for 'api=' in the URL, as Shortzy needs an API key
+            if 'api=' not in template_url:
+                await message.reply(
+                    "❌ Error: The template URL must contain an 'api=' parameter with your API key.\n\n"
+                    "Example: `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n"
+                    "Please send the correct template URL. 📝"
+                )
+                logger.warning(f"Admin {user_id} provided template URL without 'api=' parameter: {template_url}")
                 return
 
             try:
@@ -2842,4 +2849,5 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
+
 
