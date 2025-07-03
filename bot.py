@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic'
+    BOT_TOKEN = '7965872423:AAHkSMJVeM1ROKlPJGgsP_GcLb8iNvCic'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Testingnyraa_bot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
@@ -64,7 +64,7 @@ db = client[config.MONGO_DB_NAME]
 users_collection = db['users']
 tokens_collection = db['tokens']
 media_collection = db['media']
-history_collection = db['history']
+history_collection = db['history'] # General history, no longer used for prev/next navigation
 categories_collection = db['categories']
 settings_collection = db['settings'] # This collection will now store shortener config
 
@@ -87,6 +87,13 @@ active_tasks = set()
 # --- Admin State for Shortener Setup ---
 # Stores the current step for each admin in the /setshortener flow
 admin_shortener_setup_state = defaultdict(dict) 
+
+# --- Admin State for Delete Video ---
+admin_delete_video_state = defaultdict(bool)
+
+# --- Admin State for Category Rename ---
+admin_rename_category_state = defaultdict(dict)
+
 
 def create_tracked_task(coro):
     """
@@ -435,23 +442,36 @@ def get_video_by_uuid(uuid_: str) -> dict | None:
     return media_collection.find_one({'uuid': uuid_})
 
 def save_history(user_id: int, video_uuid: str, category: str):
-    """Saves a video viewing entry to a user's history, limiting to the last 100 entries."""
+    """
+    Saves a video viewing entry to a user's general history (limited to 100 entries)
+    AND updates the last viewed video for the specific category.
+    """
     now = datetime.utcnow()
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
+        # Update general history (for profile view count, etc.)
         history_collection.update_one(
             {'user_id': user_id},
             {'$push': {'history': {'$each': [entry], '$slice': -100}}},
             upsert=True
         )
-        logger.info(f"History saved for user {user_id}, video {video_uuid}. History size limited to 100.")
+        logger.info(f"General history saved for user {user_id}, video {video_uuid}. History size limited to 100.")
+
+        # Update last viewed video for this specific category
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {f'last_viewed_per_category.{category}': video_uuid}},
+            upsert=True # Ensure the user document exists
+        )
+        logger.info(f"Last viewed video for category '{category}' updated to '{video_uuid}' for user {user_id}.")
+
     except Exception as e:
-        logger.error(f"Error saving history for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        logger.error(f"Error saving history/last viewed for user {user_id}, video {video_uuid}: {e}", exc_info=True)
 
 def get_last_video_from_history(user_id: int) -> dict | None:
     """
-    Retrieves the last viewed video from a user's history (the one before the current latest).
-    If there's only one entry, it returns that entry.
+    Retrieves the last viewed video from a user's general history (the one before the current latest).
+    This function is primarily for general history purposes, not for prev/next navigation in categories.
     """
     doc = history_collection.find_one({'user_id': user_id})
     if doc and doc.get('history'):
@@ -510,6 +530,12 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
 
     try:
         if new_message_type == "video" and video_data:
+            caption_text = None
+            if video_data.get('custom_caption'):
+                caption_text = video_data['custom_caption']
+            elif video_data.get('category'):
+                caption_text = f"Category: {html.escape(video_data['category'])}"
+            
             # Try to send by copying from channel (if possible)
             try:
                 # Try to copy the message from the channel using message_id
@@ -517,6 +543,7 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     chat_id=chat_id,
                     from_chat_id=config.VIDEO_CHANNEL_ID,
                     message_id=video_data.get('message_id'),
+                    caption=caption_text, # Use the determined caption
                     protect_content=protect_content_for_user,
                     reply_markup=reply_markup # Pass the reply_markup here
                 )
@@ -528,11 +555,27 @@ async def send_and_replace_message(client: Client, chat_id: int, old_message_id:
                     sent_message = await client.send_video(
                         chat_id,
                         video_data['file_id'],
-                        caption=None, # Removed caption as per user request
+                        caption=caption_text, # Use the determined caption
                         reply_markup=reply_markup,
                         protect_content=protect_content_for_user
                     )
                     success = True
+                except FloodWait as fw:
+                    logger.warning(f"FloodWait encountered when sending video by file_id: {fw.value}s. Retrying after delay.")
+                    await asyncio.sleep(fw.value + 1) # Wait and retry
+                    try:
+                        sent_message = await client.send_video(
+                            chat_id,
+                            video_data['file_id'],
+                            caption=caption_text, # Use the determined caption
+                            reply_markup=reply_markup,
+                            protect_content=protect_content_for_user
+                        )
+                        success = True
+                    except Exception as e2:
+                        logger.error(f"Failed to send video by file_id after FloodWait: {e2}")
+                        error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
+                        success = False
                 except Exception as e2:
                     logger.error(f"Failed to send video by file_id: {e2}")
                     error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
@@ -776,7 +819,8 @@ async def start_cmd(client: Client, message: Message):
                     'joined_date': datetime.utcnow(),
                     'referral_count': 0,
                     'bookmarked_videos': [],
-                    'last_premium_check_status': False # Track last premium status for notifications
+                    'last_premium_check_status': False, # Track last premium status for notifications
+                    'last_viewed_per_category': {} # New field to store last viewed video per category
                 })
                 # New user token is NOT an admin-granted premium token
                 add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
@@ -1184,7 +1228,18 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         )
         return
     
-    video = get_random_video(category)
+    # Try to get the last viewed video for this category
+    user_doc = users_collection.find_one({'user_id': user_id})
+    last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category)
+    video = None
+    if last_viewed_uuid:
+        video = get_video_by_uuid(last_viewed_uuid)
+        if not video:
+            logger.warning(f"Last viewed video {last_viewed_uuid} for category '{category}' not found. Getting random.")
+            video = get_random_video(category)
+    else:
+        video = get_random_video(category)
+
     if not video:
         logger.warning(f"No videos found in category '{category}' for user {user_id}.")
         await callback_query.answer("No videos in this category. Try another! 😔", show_alert=True)
@@ -1204,7 +1259,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     )
     
     if sent_success:
-        save_history(user_id, video['uuid'], category)
+        save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
         logger.info(f"User {user_id} selected category {category} and new video {video['uuid']} sent.")
         await callback_query.answer()
     else:
@@ -1292,7 +1347,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
                 )
                 return
         else:
-            # Regular category behavior
+            # Regular category behavior: always get a new random video
             if category not in get_categories(): # Re-check if category is valid for non-saved videos
                 logger.warning(f"User {user_id} used invalid category '{category}' for next video (non-saved).")
                 await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
@@ -1313,7 +1368,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         )
         
         if sent_success:
-            save_history(user_id, video['uuid'], category)
+            save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
             await callback_query.answer()
         else:
             await callback_query.answer("❌ Failed to load next video. Please try again. 😥", show_alert=True)
@@ -1324,7 +1379,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^prev\|")) # Updated regex to match new format
 async def prev_video(client: Client, callback_query: CallbackQuery):
-    """Handles 'Previous' video navigation."""
+    """Handles 'Previous' video navigation, showing the last viewed video in the current category."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested previous video.")
@@ -1366,28 +1421,24 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
-        found_video = get_last_video_from_history(user_id)
+        # Retrieve the last viewed video for the CURRENT category from user's document
+        user_doc = users_collection.find_one({'user_id': user_id})
+        last_viewed_uuid_in_category = user_doc.get('last_viewed_per_category', {}).get(category)
+        
+        found_video = None
+        if last_viewed_uuid_in_category:
+            found_video = get_video_by_uuid(last_viewed_uuid_in_category)
         
         if not found_video:
-            logger.warning(f"User {user_id} has no previous video history (or only one entry).")
+            logger.warning(f"User {user_id} has no previous video for category '{category}'.")
             await callback_query.answer(
-                "No previous videos available. Try '🎞️ Get Video' to start! 🧐",
+                f"No previous video found for category '{html.escape(category)}'. 🧐",
                 show_alert=True
             )
             return
             
         # Determine if the previous video was from the 'saved_videos' category to pass is_saved=True
-        # This assumes history also stores the category. If not, you might need to adjust.
-        history_entry = None
-        doc = history_collection.find_one({'user_id': user_id})
-        if doc and doc.get('history') and len(doc['history']) >= 2:
-            history_entry = doc['history'][-2] # Get the entry before the current one
-        elif doc and doc.get('history') and len(doc['history']) == 1:
-            history_entry = doc['history'][-1] # If only one, treat that as previous if we just moved to it.
-
-        is_saved_for_prev = False
-        if history_entry and history_entry.get('category') == "saved_videos":
-            is_saved_for_prev = True
+        is_saved_for_prev = (category == "saved_videos")
             
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
@@ -1395,10 +1446,11 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             old_message_id=callback_query.message.id,
             new_message_type="video",
             video_data=found_video,
-            reply_markup=video_nav_keyboard(found_video['uuid'], found_video['category'], user_id, is_saved=is_saved_for_prev)
+            reply_markup=video_nav_keyboard(found_video['uuid'], category, user_id, is_saved=is_saved_for_prev)
         )
         
         if sent_success:
+            # We don't call save_history here because 'prev' is just showing the last one, not a new view.
             logger.info(f"User {user_id} navigated to previous video {found_video['uuid']} in category {found_video['category']}.")
             await callback_query.answer()
         else:
@@ -2418,9 +2470,90 @@ async def done_cmd(client: Client, message: Message):
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
 @app.on_message(filters.video & filters.private & filters.user(config.ADMIN_IDS))
-async def handle_video_batch_add(client: Client, message: Message):
-    """Handles incoming video messages for batch adding mode."""
+async def handle_video_batch_add_or_delete(client: Client, message: Message):
+    """
+    Handles incoming video messages for either batch adding mode or delete video mode.
+    Prioritizes delete video mode if active.
+    """
     user_id = message.from_user.id
+    
+    # --- Handle /deletevideo mode ---
+    if user_id in admin_delete_video_state and admin_delete_video_state[user_id]:
+        logger.info(f"Admin {user_id} sent a video for deletion.")
+        try:
+            if not message.video:
+                await message.reply_text("❌ Please send a video file to delete. 🎥")
+                return
+
+            file_unique_id = message.video.file_unique_id
+            video_to_delete = media_collection.find_one({"file_unique_id": file_unique_id})
+
+            if not video_to_delete:
+                await message.reply_text("❌ Video not found in the database. Please ensure you sent the original video file. 🧐")
+                return
+
+            video_uuid = video_to_delete['uuid']
+            message_id_in_channel = video_to_delete.get('message_id')
+
+            # Delete from media_collection
+            media_collection.delete_one({'uuid': video_uuid})
+            logger.info(f"Video {video_uuid} deleted from media_collection.")
+
+            # Remove from all users' bookmarked_videos
+            users_collection.update_many(
+                {},
+                {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+            )
+            logger.info(f"Video {video_uuid} removed from all users' bookmarked_videos.")
+
+            # Remove from all users' history_collection
+            history_collection.update_many(
+                {},
+                {'$pull': {'history': {'video_uuid': video_uuid}}}
+            )
+            logger.info(f"Video {video_uuid} removed from all users' history_collection.")
+
+            # Remove from all users' last_viewed_per_category
+            # This requires iterating through users and their last_viewed_per_category map
+            all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
+            for user_doc in all_users_with_last_viewed:
+                user_id_to_update = user_doc['user_id']
+                updated_last_viewed = {}
+                changed = False
+                for cat, vid_uuid in user_doc['last_viewed_per_category'].items():
+                    if vid_uuid == video_uuid:
+                        changed = True
+                    else:
+                        updated_last_viewed[cat] = vid_uuid
+                if changed:
+                    users_collection.update_one(
+                        {'user_id': user_id_to_update},
+                        {'$set': {'last_viewed_per_category': updated_last_viewed}}
+                    )
+                    logger.info(f"Video {video_uuid} removed from last_viewed_per_category for user {user_id_to_update}.")
+
+
+            # Delete from channel
+            if message_id_in_channel:
+                try:
+                    await client.delete_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                    logger.info(f"Video message {message_id_in_channel} deleted from channel {config.VIDEO_CHANNEL_ID}.")
+                except MessageIdInvalid:
+                    logger.warning(f"Video message {message_id_in_channel} already deleted or invalid in channel {config.VIDEO_CHANNEL_ID}.")
+                except Exception as channel_delete_e:
+                    logger.error(f"Failed to delete video message {message_id_in_channel} from channel {config.VIDEO_CHANNEL_ID}: {channel_delete_e}", exc_info=True)
+                    await message.reply_text(f"⚠️ Video deleted from database, but failed to delete from channel. Reason: {channel_delete_e}")
+
+            await message.reply_text(f"✅ Video (UUID: <code>{video_uuid}</code>) and its data have been deleted from the database and channel. 🗑️")
+
+        except Exception as e:
+            logger.error(f"Admin {user_id} error deleting video: {e}", exc_info=True)
+            await message.reply("❌ An error occurred while deleting the video. Please try again. 🐛")
+        finally:
+            del admin_delete_video_state[user_id] # Always clear state after attempt
+        return # Exit after handling delete video
+
+    # --- Handle batch add mode (original logic) ---
     logger.info(f"Admin {user_id} sent a video for batch adding.")
 
     try:
@@ -2453,6 +2586,7 @@ async def handle_video_batch_add(client: Client, message: Message):
         file_id = message.video.file_id
         file_unique_id = message.video.file_unique_id
         file_size = message.video.file_size
+        custom_caption = message.caption # Get the caption provided by the admin
 
         if media_collection.find_one({"file_unique_id": file_unique_id}):
             logger.warning(f"Admin {user_id} attempted to add duplicate video: {file_unique_id}.")
@@ -2461,14 +2595,32 @@ async def handle_video_batch_add(client: Client, message: Message):
 
         video_uuid = str(uuid.uuid4())
         
+        # Determine caption for forwarding to channel
+        channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
+
         try:
             forwarded_message = await client.send_video(
                 chat_id=config.VIDEO_CHANNEL_ID,
                 video=file_id,
-                caption=f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}",
+                caption=channel_caption, # Use custom caption or default
                 protect_content=False
             )
             message_id_in_channel = forwarded_message.id
+        except FloodWait as fw:
+            logger.warning(f"FloodWait encountered when forwarding video to channel: {fw.value}s. Retrying after delay.")
+            await asyncio.sleep(fw.value + 1) # Wait and retry
+            try:
+                forwarded_message = await client.send_video(
+                    chat_id=config.VIDEO_CHANNEL_ID,
+                    video=file_id,
+                    caption=channel_caption,
+                    protect_content=False
+                )
+                message_id_in_channel = forwarded_message.id
+            except Exception as forward_e_retry:
+                logger.error(f"Failed to forward video {file_unique_id} to channel after FloodWait: {forward_e_retry}", exc_info=True)
+                await message.reply_text("❌ Failed to forward video to channel after retry. Please check bot's permissions. 🐛")
+                return
         except Exception as forward_e:
             logger.error(f"Failed to forward video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
             await message.reply_text("❌ Failed to forward video to channel. Please check bot's permissions. 🐛")
@@ -2482,18 +2634,25 @@ async def handle_video_batch_add(client: Client, message: Message):
             "size_bytes": file_size,
             "timestamp": get_current_time(),
             "message_id": message_id_in_channel,
-            "banned": False
+            "banned": False,
+            "custom_caption": custom_caption # Store the custom caption
         }
         media_collection.insert_one(video_data)
         batch_add_state[user_id]['count'] = batch_add_state[user_id].get('count', 0) + 1
         logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}. Message ID in channel: {message_id_in_channel}")
-        await message.reply_text(
-            f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>! 🎉\n"
+        
+        # Reply to admin with details, including custom caption if present
+        admin_reply_caption = f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>! 🎉\n"
+        if custom_caption:
+            admin_reply_caption += f"📝 Custom Caption: <i>{html.escape(custom_caption)}</i>\n"
+        admin_reply_caption += (
             f"📁 Category: {html.escape(category)}\n"
             f"📊 Size: {format_size(file_size)}\n"
             f"🆔 File ID: <code>{file_id}</code>\n"
             f"Videos added in this batch: <b>{batch_add_state[user_id]['count']}</b> 🔢"
         )
+        await message.reply_text(admin_reply_caption)
+
     except Exception as e:
         logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
         await message.reply("❌ Failed to add video. Please try again. 🐛")
@@ -2583,6 +2742,165 @@ async def stats_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to retrieve stats: {e}", exc_info=True)
         await message.reply("❌ An error occurred while fetching stats. Please try again. 🐛")
 
+# --- New Admin Commands ---
+
+@app.on_message(filters.command("deletevideo") & filters.private & filters.user(config.ADMIN_IDS))
+async def deletevideo_cmd(client: Client, message: Message):
+    """Admin command to initiate video deletion mode."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /deletevideo command.")
+    admin_delete_video_state[user_id] = True
+    await message.reply("Send the <b>video file from the database</b> to delete it. This must be the original video file, not a forwarded one. 🎥")
+
+@app.on_message(filters.command("categoryrename") & filters.private & filters.user(config.ADMIN_IDS))
+async def categoryrename_cmd(client: Client, message: Message):
+    """Admin command to initiate category renaming flow."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /categoryrename command.")
+    admin_rename_category_state[user_id] = {'step': 'await_old_name'}
+    await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
+
+@app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
+async def handle_admin_text_input(client: Client, message: Message):
+    """Handles admin's text input for various multi-step commands."""
+    user_id = message.from_user.id
+
+    # --- Handle /setshortener input ---
+    if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
+        template_url = message.text.strip()
+        
+        if not template_url.startswith("http://") and not template_url.startswith("https://"):
+            await message.reply("Invalid URL. Please send a valid URL starting with `http://` or `https://`.")
+            logger.warning(f"Admin {user_id} provided invalid template URL format for shortener: {template_url}")
+            return
+        
+        if '{long_url}' not in template_url:
+            await message.reply(
+                "❌ Error: The template URL must contain `{long_url}` as a placeholder for the URL to be shortened.\n\n"
+                "Please send the correct template URL. 📝"
+            )
+            logger.warning(f"Admin {user_id} provided template URL without {{long_url}} placeholder for shortener: {template_url}")
+            return
+        
+        if 'api=' not in template_url:
+            await message.reply(
+                "❌ Error: The template URL must contain an 'api=' parameter with your API key.\n\n"
+                "Example: `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n"
+                "Please send the correct template URL. 📝"
+            )
+            logger.warning(f"Admin {user_id} provided template URL without 'api=' parameter for shortener: {template_url}")
+            return
+
+        try:
+            settings_collection.update_one(
+                {'_id': 'shortener_config'},
+                {'$set': {'template_url': template_url}},
+                upsert=True
+            )
+            del admin_shortener_setup_state[user_id] # Clear state
+            await message.reply("✅ Shortener API Template URL Set Successfully!")
+            logger.info(f"Admin {user_id} successfully set shortener template URL: {template_url}")
+        except Exception as e:
+            logger.error(f"Error saving shortener template URL for admin {user_id}: {e}", exc_info=True)
+            await message.reply("❌ Failed to save shortener configuration. Please try again. 🐛")
+            del admin_shortener_setup_state[user_id] # Clear state on error
+        return # Exit after handling shortener input
+
+    # --- Handle /categoryrename input ---
+    if user_id in admin_rename_category_state:
+        current_step = admin_rename_category_state[user_id].get('step')
+        
+        if current_step == 'await_old_name':
+            old_name = message.text.strip()
+            valid, error = validate_category_name(old_name)
+            if not valid:
+                await message.reply(f"❌ Invalid old category name: {error}. Please try again. 📝")
+                logger.warning(f"Admin {user_id} provided invalid old category name for rename: {old_name}")
+                return
+            
+            if not categories_collection.find_one({'name': old_name}):
+                await message.reply(f"❌ Category '<b>{html.escape(old_name)}</b>' does not exist. Please send an existing category name. 🧐")
+                logger.warning(f"Admin {user_id} tried to rename non-existent category: {old_name}")
+                return
+            
+            admin_rename_category_state[user_id]['old_name'] = old_name
+            admin_rename_category_state[user_id]['step'] = 'await_new_name'
+            await message.reply(f"Okay, the current category is '<b>{html.escape(old_name)}</b>'. Now send the <b>new name</b> for this category. 📝")
+            logger.info(f"Admin {user_id} set old category name to '{old_name}'. Awaiting new name.")
+            return
+
+        elif current_step == 'await_new_name':
+            new_name = message.text.strip()
+            old_name = admin_rename_category_state[user_id].get('old_name')
+
+            valid, error = validate_category_name(new_name)
+            if not valid:
+                await message.reply(f"❌ Invalid new category name: {error}. Please try again. 📝")
+                logger.warning(f"Admin {user_id} provided invalid new category name for rename: {new_name}")
+                return
+            
+            if categories_collection.find_one({'name': new_name}):
+                await message.reply(f"❌ Category '<b>{html.escape(new_name)}</b>' already exists. Please choose a different new name. 🧐")
+                logger.warning(f"Admin {user_id} tried to rename to an existing category: {new_name}")
+                return
+
+            try:
+                # 1. Rename in categories_collection
+                categories_collection.update_one({'name': old_name}, {'$set': {'name': new_name}})
+                logger.info(f"Category '{old_name}' renamed to '{new_name}' in categories_collection.")
+
+                # 2. Update category field in media_collection
+                media_collection.update_many({'category': old_name}, {'$set': {'category': new_name}})
+                logger.info(f"Updated media_collection documents from '{old_name}' to '{new_name}'.")
+
+                # 3. Update category field in users' bookmarked_videos (array of objects)
+                # Use arrayFilters to update elements within the array
+                users_collection.update_many(
+                    {'bookmarked_videos.category': old_name}, # Filter for documents that have the old category in their bookmarks
+                    {'$set': {'bookmarked_videos.$[elem].category': new_name}},
+                    array_filters=[{'elem.category': old_name}]
+                )
+                logger.info(f"Updated bookmarked_videos in users_collection from '{old_name}' to '{new_name}'.")
+
+                # 4. Update category field in users' history (array of objects)
+                history_collection.update_many(
+                    {'history.category': old_name}, # Filter for documents that have the old category in their history
+                    {'$set': {'history.$[elem].category': new_name}},
+                    array_filters=[{'elem.category': old_name}]
+                )
+                logger.info(f"Updated history in history_collection from '{old_name}' to '{new_name}'.")
+
+                # 5. Update category key in users' last_viewed_per_category (map/object)
+                # This requires iterating through users to handle the dynamic key rename
+                all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
+                for user_doc in all_users_with_last_viewed:
+                    user_id_to_update = user_doc['user_id']
+                    last_viewed_map = user_doc['last_viewed_per_category']
+                    if old_name in last_viewed_map:
+                        video_uuid_to_move = last_viewed_map.pop(old_name)
+                        last_viewed_map[new_name] = video_uuid_to_move
+                        users_collection.update_one(
+                            {'user_id': user_id_to_update},
+                            {'$set': {'last_viewed_per_category': last_viewed_map}}
+                        )
+                        logger.info(f"Updated last_viewed_per_category for user {user_id_to_update} from '{old_name}' to '{new_name}'.")
+
+
+                await message.reply(f"✅ Category '<b>{html.escape(old_name)}</b>' successfully renamed to '<b>{html.escape(new_name)}</b>'! 🎉")
+                logger.info(f"Admin {user_id} successfully renamed category from '{old_name}' to '{new_name}'.")
+
+            except Exception as e:
+                logger.error(f"Error renaming category for admin {user_id}: {e}", exc_info=True)
+                await message.reply("❌ An error occurred while renaming the category. Please try again. 🐛")
+            finally:
+                del admin_rename_category_state[user_id] # Clear state
+            return # Exit after handling rename input
+    
+    # If the message is not part of any ongoing admin multi-step command, ignore it.
+    # This prevents non-command text from admins triggering unintended actions.
+    logger.debug(f"Admin {user_id} sent text message '{message.text}' not part of any active multi-step command. Ignoring.")
+
+
 # --- Auto-Delete & Protect Content Settings ---
 @app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.user(config.ADMIN_IDS))
 async def toggle_auto_delete(client: Client, message: Message):
@@ -2613,93 +2931,6 @@ async def toggle_protect(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Admin {user_id} failed to toggle content protection: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling content protection. Please try again. 🐛")
-
-# --- ADMIN SHORTENER SETUP FLOW ---
-@app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
-async def setshortener_cmd(client: Client, message: Message):
-    """Admin command to initiate URL shortener configuration."""
-    user_id = message.from_user.id
-    logger.info(f"Admin {user_id} initiated /setshortener command.")
-    admin_shortener_setup_state[user_id] = {'step': 'await_template_url'}
-    await message.reply(
-        "Send your Shortener API Template URL.\n\n"
-        "This URL should include `{long_url}` as a placeholder for the URL you want to shorten, "
-        "and also contain your API key as a query parameter (e.g., `api=YOUR_API_KEY`).\n\n"
-        "<b>Example:</b> `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n\n"
-        "Make sure to replace `YOUR_API_KEY` with your actual API key. 📝"
-    )
-
-@app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
-async def handle_setshortener_input(client: Client, message: Message):
-    """Handles admin's input for URL shortener configuration."""
-    user_id = message.from_user.id
-    
-    if user_id in admin_shortener_setup_state:
-        current_step = admin_shortener_setup_state[user_id].get('step')
-        
-        if current_step == 'await_template_url':
-            template_url = message.text.strip()
-            
-            if not template_url.startswith("http://") and not template_url.startswith("https://"):
-                await message.reply("Invalid URL. Please send a valid URL starting with `http://` or `https://`.")
-                logger.warning(f"Admin {user_id} provided invalid template URL format: {template_url}")
-                return
-            
-            if '{long_url}' not in template_url:
-                await message.reply(
-                    "❌ Error: The template URL must contain `{long_url}` as a placeholder for the URL to be shortened.\n\n"
-                    "Please send the correct template URL. 📝"
-                )
-                logger.warning(f"Admin {user_id} provided template URL without {{long_url}} placeholder: {template_url}")
-                return
-            
-            # Additional check for 'api=' in the URL, as Shortzy needs an API key
-            if 'api=' not in template_url:
-                await message.reply(
-                    "❌ Error: The template URL must contain an 'api=' parameter with your API key.\n\n"
-                    "Example: `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n"
-                    "Please send the correct template URL. 📝"
-                )
-                logger.warning(f"Admin {user_id} provided template URL without 'api=' parameter: {template_url}")
-                return
-
-            try:
-                settings_collection.update_one(
-                    {'_id': 'shortener_config'},
-                    {'$set': {'template_url': template_url}},
-                    upsert=True
-                )
-                del admin_shortener_setup_state[user_id] # Clear state
-                await message.reply("✅ Shortener API Template URL Set Successfully!")
-                logger.info(f"Admin {user_id} successfully set shortener template URL: {template_url}")
-            except Exception as e:
-                logger.error(f"Error saving shortener template URL for admin {user_id}: {e}", exc_info=True)
-                await message.reply("❌ Failed to save shortener configuration. Please try again. 🐛")
-                del admin_shortener_setup_state[user_id] # Clear state on error
-        # If the message is not part of the shortener setup, let other handlers process it
-    # else:
-    #     logger.debug(f"Message from admin {user_id} not part of shortener setup. Message: '{message.text}'")
-
-@app.on_message(filters.command("shortener") & filters.private & filters.user(config.ADMIN_IDS))
-async def view_shortener_config_cmd(client: Client, message: Message):
-    """Admin command to view current shortener configuration."""
-    user_id = message.from_user.id
-    logger.info(f"Admin {user_id} requested shortener config view.")
-    shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
-
-    if shortener_config:
-        template_url = shortener_config.get('template_url', 'Not Set')
-        await message.reply(
-            f"⚙️ <b>Current Shortener Configuration:</b>\n\n"
-            f"<b>API Template URL:</b> <code>{html.escape(template_url)}</code>\n\n"
-            f"Use /setshortener to change this setting. 📝"
-        )
-        logger.info(f"Admin {user_id} viewed shortener config.")
-    else:
-        await message.reply(
-            "😔 No shortener configuration found. Use /setshortener to set it up. 🚀"
-        )
-        logger.info(f"Admin {user_id} requested shortener config but none was found.")
 
 # --- Database Cleanup (No longer deletes messages from chats) ---
 async def cleanup_expired_data():
@@ -2849,5 +3080,3 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
-
-
