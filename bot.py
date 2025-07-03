@@ -94,10 +94,6 @@ admin_delete_video_state = defaultdict(bool)
 # --- Admin State for Category Rename ---
 admin_rename_category_state = defaultdict(dict)
 
-# --- Admin State for Batch Add FloodWait ---
-# Stores the message ID of the FloodWait notification for each admin
-admin_batch_flood_wait_message = defaultdict(int)
-
 
 def create_tracked_task(coro):
     """
@@ -438,7 +434,6 @@ def get_random_video(category: str) -> dict | None:
     """Retrieves a random video from the specified category."""
     videos = list(media_collection.find({'category': category}))
     if not videos:
-        logger.info(f"No videos found in category: {category}")
         return None
     return random.choice(videos)
 
@@ -1327,9 +1322,9 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         video = get_video_by_uuid(last_viewed_uuid)
         if not video:
             logger.warning(f"Last viewed video {last_viewed_uuid} for category '{category}' not found. Getting random.")
-            video = get_random_video(category) # Fallback to random if last viewed is gone
+            video = get_random_video(category)
     else:
-        video = get_random_video(category) # Get random if no last viewed for this category
+        video = get_random_video(category)
 
     if not video:
         logger.warning(f"No videos found in category '{category}' for user {user_id}.")
@@ -2554,14 +2549,6 @@ async def done_cmd(client: Client, message: Message):
         if user_id in batch_add_state and batch_add_state[user_id].get('batch_mode'):
             total_added = batch_add_state[user_id].get('count', 0)
             del batch_add_state[user_id]
-            # Clear any pending FloodWait message for this admin
-            if user_id in admin_batch_flood_wait_message:
-                try:
-                    await client.delete_messages(message.chat.id, admin_batch_flood_wait_message[user_id])
-                    del admin_batch_flood_wait_message[user_id]
-                except Exception as e:
-                    logger.warning(f"Failed to delete FloodWait message for admin {user_id} on /done: {e}")
-
             await message.reply(f"Batch add mode disabled. Added <b>{total_added}</b> videos. 🎉")
             logger.info(f"Admin {user_id}: Batch add mode disabled. Total videos added: {total_added}.")
         else:
@@ -2701,14 +2688,6 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
         try:
-            # Clear previous FloodWait message if exists
-            if user_id in admin_batch_flood_wait_message and admin_batch_flood_wait_message[user_id]:
-                try:
-                    await client.delete_messages(message.chat.id, admin_batch_flood_wait_message[user_id])
-                    del admin_batch_flood_wait_message[user_id]
-                except Exception as e:
-                    logger.warning(f"Failed to delete old FloodWait message for admin {user_id}: {e}")
-
             forwarded_message = await client.send_video(
                 chat_id=config.VIDEO_CHANNEL_ID,
                 video=file_id,
@@ -2717,25 +2696,8 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             )
             message_id_in_channel = forwarded_message.id
         except FloodWait as fw:
-            logger.warning(f"FloodWait encountered when forwarding video to channel: {fw.value}s. Admin {user_id} will be notified.")
-            
-            # Notify admin about FloodWait
-            wait_msg = await message.reply_text(
-                f"⚠️ Flood control triggered! Please wait for <b>{fw.value} seconds</b>. "
-                f"Video upload will resume automatically after this delay. ⏳"
-            )
-            admin_batch_flood_wait_message[user_id] = wait_msg.id # Store message ID for later deletion
-
+            logger.warning(f"FloodWait encountered when forwarding video to channel: {fw.value}s. Retrying after delay.")
             await asyncio.sleep(fw.value + 1) # Wait and retry
-            
-            # Attempt to delete the FloodWait notification message
-            if user_id in admin_batch_flood_wait_message and admin_batch_flood_wait_message[user_id]:
-                try:
-                    await client.delete_messages(message.chat.id, admin_batch_flood_wait_message[user_id])
-                    del admin_batch_flood_wait_message[user_id]
-                except Exception as e:
-                    logger.warning(f"Failed to delete FloodWait message for admin {user_id} after wait: {e}")
-
             try:
                 forwarded_message = await client.send_video(
                     chat_id=config.VIDEO_CHANNEL_ID,
@@ -2745,7 +2707,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
                 )
                 message_id_in_channel = forwarded_message.id
             except Exception as forward_e_retry:
-                logger.error(f"Failed to forward video {file_unique_id} to channel after FloodWait retry: {forward_e_retry}", exc_info=True)
+                logger.error(f"Failed to forward video {file_unique_id} to channel after FloodWait: {forward_e_retry}", exc_info=True)
                 await message.reply_text("❌ Failed to forward video to channel after retry. Please check bot's permissions. 🐛")
                 return
         except Exception as forward_e:
