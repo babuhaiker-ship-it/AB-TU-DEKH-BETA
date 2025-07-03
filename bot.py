@@ -508,7 +508,8 @@ def clear_active_video_message(user_id: int):
 
 async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None) -> tuple[bool, Message | str]:
     """
-    Attempts to edit an existing message or deletes the old message (if provided) and sends a new one.
+    Deletes the old message (if provided) and sends a new one.
+    This function is designed to replace one message with another, regardless of type.
     Updates the active_video_message tracking.
     Returns (success: bool, sent_message: Message | error_message: str)
     """
@@ -520,122 +521,51 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
     protect_content_for_user = settings.get('protect_content', True)
 
     try:
-        # --- Attempt to EDIT existing message ---
+        # Always attempt to delete the old message first when replacing with a different type of content
         if message_id_to_edit_or_delete:
-            if new_message_type == "video" and video_data:
-                caption_text = None
-                if video_data.get('custom_caption'):
-                    caption_text = video_data['custom_caption']
-                elif video_data.get('category'):
-                    caption_text = f"Category: {html.escape(video_data['category'])}"
-
-                try:
-                    # Pyrogram's edit_message_media requires an InputMedia object
-                    # For video, it's InputMediaVideo
-                    sent_message = await client.edit_message_media(
-                        chat_id=chat_id,
-                        message_id=message_id_to_edit_or_delete,
-                        media=InputMediaVideo(
-                            media=video_data['file_id'],
-                            caption=caption_text
-                        ),
-                        reply_markup=reply_markup
-                    )
-                    success = True
-                    logger.info(f"Edited message {message_id_to_edit_or_delete} in chat {chat_id} with new video {video_data['uuid']}.")
-                except MessageIdInvalid:
-                    logger.warning(f"Message {message_id_to_edit_or_delete} for editing in chat {chat_id} was invalid or deleted. Falling back to send new.")
-                    # Fallback to sending a new message if edit fails due to invalid message ID
-                    pass # Will proceed to the 'send new message' block below
-                except FloodWait as fw:
-                    logger.warning(f"FloodWait encountered when editing video: {fw.value}s. Retrying after delay.")
-                    await asyncio.sleep(fw.value + 1)
-                    try:
-                        sent_message = await client.edit_message_media(
-                            chat_id=chat_id,
-                            message_id=message_id_to_edit_or_delete,
-                            media=InputMediaVideo(
-                                media=video_data['file_id'],
-                                caption=caption_text
-                            ),
-                            reply_markup=reply_markup
-                        )
-                        success = True
-                        logger.info(f"Edited message {message_id_to_edit_or_delete} after FloodWait.")
-                    except Exception as e2:
-                        logger.error(f"Failed to edit video after FloodWait: {e2}")
-                        error_message = f"❌ <b>Failed to update message.</b>\nReason: {e2}\nPlease try again later. 😥"
-                        success = False
-                except Exception as e:
-                    logger.error(f"Failed to edit message {message_id_to_edit_or_delete} with new video: {e}", exc_info=True)
-                    pass # Will proceed to the 'send new message' block below
-
-            elif new_message_type == "text" and text_content:
-                try:
-                    sent_message = await client.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id_to_edit_or_delete,
-                        text=text_content,
-                        reply_markup=reply_markup
-                    )
-                    success = True
-                    logger.info(f"Edited message {message_id_to_edit_or_delete} in chat {chat_id} with new text.")
-                except MessageIdInvalid:
-                    logger.warning(f"Message {message_id_to_edit_or_delete} for editing in chat {chat_id} was invalid or deleted. Falling back to send new.")
-                    pass # Will proceed to the 'send new message' block below
-                except FloodWait as fw:
-                    logger.warning(f"FloodWait encountered when editing text: {fw.value}s. Retrying after delay.")
-                    await asyncio.sleep(fw.value + 1)
-                    try:
-                        sent_message = await client.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id_to_edit_or_delete,
-                            text=text_content,
-                            reply_markup=reply_markup
-                        )
-                        success = True
-                        logger.info(f"Edited message {message_id_to_edit_or_delete} after FloodWait.")
-                    except Exception as e2:
-                        logger.error(f"Failed to edit text after FloodWait: {e2}")
-                        error_message = f"❌ <b>Failed to update message.</b>\nReason: {e2}\nPlease try again later. 😥"
-                        success = False
-                except Exception as e:
-                    logger.error(f"Failed to edit message {message_id_to_edit_or_delete} with new text: {e}", exc_info=True)
-                    pass # Will proceed to the 'send new message' block below
-
-        # --- If editing was not attempted or failed, proceed to SEND a new message ---
-        if not success: # Only proceed if editing failed or was not attempted
-            if message_id_to_edit_or_delete: # If there was an old message, try to delete it before sending new
-                try:
-                    await client.delete_messages(chat_id, message_id_to_edit_or_delete)
-                    logger.info(f"Deleted old message {message_id_to_edit_or_delete} in chat {chat_id} before sending new.")
-                except MessageIdInvalid:
-                    logger.warning(f"Old message {message_id_to_edit_or_delete} for deletion in chat {chat_id} was already invalid or deleted.")
-                except Exception as e:
-                    logger.error(f"Failed to delete old message {message_id_to_edit_or_delete} in chat {chat_id}: {e}")
+            try:
+                await client.delete_messages(chat_id, message_id_to_edit_or_delete)
+                logger.info(f"Deleted old message {message_id_to_edit_or_delete} in chat {chat_id} before sending new.")
+            except MessageIdInvalid:
+                logger.warning(f"Old message {message_id_to_edit_or_delete} for deletion in chat {chat_id} was already invalid or deleted.")
+            except Exception as e:
+                logger.error(f"Failed to delete old message {message_id_to_edit_or_delete} in chat {chat_id}: {e}")
+        
+        # Now send the new message
+        if new_message_type == "video" and video_data:
+            caption_text = None
+            if video_data.get('custom_caption'):
+                caption_text = video_data['custom_caption']
+            elif video_data.get('category'):
+                caption_text = f"Category: {html.escape(video_data['category'])}"
             
-            # Now send the new message
-            if new_message_type == "video" and video_data:
-                caption_text = None
-                if video_data.get('custom_caption'):
-                    caption_text = video_data['custom_caption']
-                elif video_data.get('category'):
-                    caption_text = f"Category: {html.escape(video_data['category'])}"
-                
+            try:
+                # Try to send by copying from channel (if possible)
+                sent_message = await client.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=config.VIDEO_CHANNEL_ID,
+                    message_id=video_data.get('message_id'),
+                    caption=caption_text,
+                    protect_content=protect_content_for_user,
+                    reply_markup=reply_markup
+                )
+                success = True
+            except Exception as e:
+                logger.warning(f"Failed to copy video from channel by message_id: {e}. Falling back to file_id.")
+                # Fallback: send by file_id
                 try:
-                    # Try to send by copying from channel (if possible)
-                    sent_message = await client.copy_message(
-                        chat_id=chat_id,
-                        from_chat_id=config.VIDEO_CHANNEL_ID,
-                        message_id=video_data.get('message_id'),
+                    sent_message = await client.send_video(
+                        chat_id,
+                        video_data['file_id'],
                         caption=caption_text,
-                        protect_content=protect_content_for_user,
-                        reply_markup=reply_markup
+                        reply_markup=reply_markup,
+                        protect_content=protect_content_for_user
                     )
                     success = True
-                except Exception as e:
-                    logger.warning(f"Failed to copy video from channel by message_id: {e}. Falling back to file_id.")
-                    # Fallback: send by file_id
+                except FloodWait as fw:
+                    logger.warning(f"FloodWait encountered when sending video by file_id: {fw.value}s. Retrying after delay.")
+                    await client.send_message(chat_id, f"⚠️ Flood control triggered! Waiting for {fw.value} seconds before sending video. ⏳")
+                    await asyncio.sleep(fw.value + 1)
                     try:
                         sent_message = await client.send_video(
                             chat_id,
@@ -645,36 +575,44 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                             protect_content=protect_content_for_user
                         )
                         success = True
-                    except FloodWait as fw:
-                        logger.warning(f"FloodWait encountered when sending video by file_id: {fw.value}s. Retrying after delay.")
-                        await asyncio.sleep(fw.value + 1)
-                        try:
-                            sent_message = await client.send_video(
-                                chat_id,
-                                video_data['file_id'],
-                                caption=caption_text,
-                                reply_markup=reply_markup,
-                                protect_content=protect_content_for_user
-                            )
-                            success = True
-                        except Exception as e2:
-                            logger.error(f"Failed to send video by file_id after FloodWait: {e2}")
-                            error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
-                            success = False
                     except Exception as e2:
-                        logger.error(f"Failed to send video by file_id: {e2}")
+                        logger.error(f"Failed to send video by file_id after FloodWait: {e2}")
                         error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
                         success = False
-            elif new_message_type == "text" and text_content:
+                except Exception as e2:
+                    logger.error(f"Failed to send video by file_id: {e2}")
+                    error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
+                    success = False
+        elif new_message_type == "text" and text_content:
+            try:
                 sent_message = await client.send_message(
                     chat_id,
                     text_content,
                     reply_markup=reply_markup
                 )
                 success = True
-            else:
-                error_message = "Invalid new_message_type or missing data for sending."
-                logger.error(error_message)
+            except FloodWait as fw:
+                logger.warning(f"FloodWait encountered when sending text: {fw.value}s. Retrying after delay.")
+                await client.send_message(chat_id, f"⚠️ Flood control triggered! Waiting for {fw.value} seconds before sending text message. ⏳")
+                await asyncio.sleep(fw.value + 1)
+                try:
+                    sent_message = await client.send_message(
+                        chat_id,
+                        text_content,
+                        reply_markup=reply_markup
+                    )
+                    success = True
+                except Exception as e2:
+                    logger.error(f"Failed to send text after FloodWait: {e2}")
+                    error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
+                    success = False
+            except Exception as e:
+                logger.error(f"Failed to send text message: {e}")
+                error_message = f"❌ <b>Failed to send message.</b>\nReason: {e}\nPlease try again later. 😥"
+                success = False
+        else:
+            error_message = "Invalid new_message_type or missing data for sending."
+            logger.error(error_message)
 
     except Exception as e:
         logger.error(f"An unexpected error occurred in send_and_replace_message: {e}", exc_info=True)
@@ -683,10 +621,10 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
 
     if success and isinstance(sent_message, Message):
         set_active_video_message(chat_id, sent_message.id, chat_id) # Always update the active message, even if ID is same
-        logger.info(f"Message {sent_message.id} of type {new_message_type} sent/edited and active video message updated for user {chat_id}.")
+        logger.info(f"Message {sent_message.id} of type {new_message_type} sent and active video message updated for user {chat_id}.")
         return True, sent_message
     else:
-        logger.error(f"Failed to send/edit message in send_and_replace_message: {error_message}")
+        logger.error(f"Failed to send message in send_and_replace_message: {error_message}")
         return False, error_message
 
 # --- Keyboards ---
@@ -1346,7 +1284,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     )
     
     if sent_success:
-        save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
+        save_history(user_id, video['uuid'], video['category']) # This now updates last_viewed_per_category
         logger.info(f"User {user_id} selected category {category} and new video {video['uuid']} sent.")
         await callback_query.answer()
     else:
@@ -2696,8 +2634,10 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             )
             message_id_in_channel = forwarded_message.id
         except FloodWait as fw:
-            logger.warning(f"FloodWait encountered when forwarding video to channel: {fw.value}s. Retrying after delay.")
-            await asyncio.sleep(fw.value + 1) # Wait and retry
+            wait_time = fw.value
+            logger.warning(f"FloodWait encountered when forwarding video to channel: {wait_time}s. Notifying admin and retrying after delay.")
+            await message.reply_text(f"⚠️ Flood control triggered! Waiting for <b>{wait_time}</b> seconds before resuming video upload. Next video will be uploaded in approximately <b>{int((wait_time + 5) / 60) + 1}</b> minutes. ⏳") # Add a buffer for calculation
+            await asyncio.sleep(wait_time + 1) # Wait and retry
             try:
                 forwarded_message = await client.send_video(
                     chat_id=config.VIDEO_CHANNEL_ID,
@@ -2707,7 +2647,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
                 )
                 message_id_in_channel = forwarded_message.id
             except Exception as forward_e_retry:
-                logger.error(f"Failed to forward video {file_unique_id} to channel after FloodWait: {forward_e_retry}", exc_info=True)
+                logger.error(f"Failed to forward video {file_unique_id} to channel after FloodWait retry: {forward_e_retry}", exc_info=True)
                 await message.reply_text("❌ Failed to forward video to channel after retry. Please check bot's permissions. 🐛")
                 return
         except Exception as forward_e:
