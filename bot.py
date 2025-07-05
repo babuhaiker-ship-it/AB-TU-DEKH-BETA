@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7946785578:AAGzx5tFfZyIT6LxtvEQnkX9EA1TdqSgkCs'
+    BOT_TOKEN = '7965872423:AAHkSMJVeM1ROKlPJGgsP_GcLb8iNvCic'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@rosyrotibot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
+    BOT_USERNAME = '@Testingnyraa_bot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446
@@ -506,14 +506,11 @@ def clear_active_video_message(user_id: int):
         del active_video_message[user_id]
         logger.info(f"Active video message cleared for user {user_id}.")
 
-async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False) -> tuple[bool, Message | str]:
+async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None) -> tuple[bool, Message | str]:
     """
     Attempts to edit an existing message or deletes the old message (if provided) and sends a new one.
     Updates the active_video_message tracking.
     Returns (success: bool, sent_message: Message | error_message: str)
-    
-    Added `force_new_message` parameter. If True, it will always delete the old message
-    and send a new one, bypassing the edit attempt.
     """
     sent_message = None
     success = False
@@ -523,8 +520,8 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
     protect_content_for_user = settings.get('protect_content', True)
 
     try:
-        # --- Attempt to EDIT existing message OR force new message ---
-        if message_id_to_edit_or_delete and not force_new_message:
+        # --- Attempt to EDIT existing message ---
+        if message_id_to_edit_or_delete:
             if new_message_type == "video" and video_data:
                 caption_text = None
                 if video_data.get('custom_caption'):
@@ -607,7 +604,7 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     pass # Will proceed to the 'send new message' block below
 
         # --- If editing was not attempted or failed, proceed to SEND a new message ---
-        if not success or force_new_message: # Only proceed if editing failed, was not attempted, or forced
+        if not success: # Only proceed if editing failed or was not attempted
             if message_id_to_edit_or_delete: # If there was an old message, try to delete it before sending new
                 try:
                     await client.delete_messages(chat_id, message_id_to_edit_or_delete)
@@ -1032,8 +1029,7 @@ async def start_cmd(client: Client, message: Message):
                         message_id_to_edit_or_delete=message_id_to_edit_or_delete,
                         new_message_type="video",
                         video_data=video,
-                        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved_video_link),
-                        force_new_message=True # Force new message for deep links to ensure video renders
+                        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved_video_link)
                     )
                     
                     if sent_success:
@@ -1290,15 +1286,14 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             )
             return
 
-        # Send the video directly, DELETING the category selection message and sending a NEW video message
+        # Send the video directly, editing the category selection message
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
-            message_id_to_edit_or_delete=callback_query.message.id, # Delete the current message
+            message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
             new_message_type="video",
             video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True),
-            force_new_message=True # Force a new message for a clean transition
+            reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True)
         )
         
         if sent_success:
@@ -1341,15 +1336,13 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         return
     
     # Edit the existing message with the new video
-    # Changed force_new_message to True here to resolve the bug
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        message_id_to_edit_or_delete=callback_query.message.id, # Delete the current message
+        message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], category, user_id),
-        force_new_message=True # Force a new message for a clean transition from text to video
+        reply_markup=video_nav_keyboard(video['uuid'], category, user_id)
     )
     
     if sent_success:
@@ -2016,8 +2009,7 @@ async def saved_videos_btn(client: Client, message: Message):
         message_id_to_edit_or_delete=message_id_to_edit_or_delete, # Pass the message ID to be edited/deleted
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True), # Pass is_saved=True
-        force_new_message=True # Force new message for saved videos to ensure video renders
+        reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True) # Pass is_saved=True
     )
 
     if sent_success:
@@ -2082,8 +2074,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                         message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
                         new_message_type="video",
                         video_data=next_video,
-                        reply_markup=video_nav_keyboard(next_video['uuid'], "saved_videos", user_id, is_saved=True),
-                        force_new_message=True # Force new message for saved videos
+                        reply_markup=video_nav_keyboard(next_video['uuid'], "saved_videos", user_id, is_saved=True)
                     )
                     if sent_success:
                         save_history(user_id, next_video['uuid'], "saved_videos")
@@ -2155,8 +2146,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True), # Ensure is_saved is true for this path
-        force_new_message=True # Force new message for saved videos
+        reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True) # Ensure is_saved is true for this path
     )
 
     if sent_success:
