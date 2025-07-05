@@ -84,12 +84,7 @@ categories_collection.create_index([("name", ASCENDING)], unique=True)
 # --- Pyrogram Client ---
 # WARNING: This setup will likely cause "unable to open database file" errors on ephemeral filesystems like Render.
 # The bot will attempt to create a session file at /data/spicynyraa.session, which will be lost on restarts.
-app = Client(
-    name="/data/spicynyraa", # Path for session file. This will NOT persist on Render.
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
-    bot_token=config.BOT_TOKEN
-)
+app = Client("spicynyraa_session", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)app = Client("spicynyraa_session", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 logger.warning("Pyrogram Client initialized to use a session file. This may cause 'unable to open database file' errors on ephemeral filesystems like Render.")
 
 
