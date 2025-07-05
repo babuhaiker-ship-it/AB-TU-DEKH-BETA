@@ -49,7 +49,7 @@ class BotConfig:
     SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
-    FORCE_SUB_CHANNEL_LINK = "https.me/SpicyNyraa" # New: Link to the force subscribe channel
+    FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
     UPLOAD_VIDEO_COUNT = 2 # Number of videos a user needs to upload to get a token (for testing, set to 2)
     UPLOAD_TOKEN_REWARD = 1 # Tokens granted for completing an upload session
     ADMIN_UPLOAD_CHANNEL_ID = -1002237890457 # IMPORTANT: REPLACE WITH YOUR ACTUAL ADMIN UPLOAD CHANNEL ID
@@ -82,11 +82,7 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
-# WARNING: This setup will likely cause "unable to open database file" errors on ephemeral filesystems like Render.
-# The bot will attempt to create a session file at /data/spicynyraa.session, which will be lost on restarts.
-app = Client("spicynyraa_session", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)app = Client("spicynyraa_session", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
-logger.warning("Pyrogram Client initialized to use a session file. This may cause 'unable to open database file' errors on ephemeral filesystems like Render.")
-
+app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -1252,7 +1248,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         # If the callback message is different from the tracked one, delete it to clean up.
         if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
             try:
-                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                await client.delete_messages(chat_id, callback_query.message.id)
             except MessageIdInvalid:
                 pass
             except Exception as e:
@@ -1415,7 +1411,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
                 try:
-                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                    await client.delete_messages(chat_id, callback_query.message.id)
                 except MessageIdInvalid:
                     pass
                 except Exception as e:
@@ -1524,7 +1520,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
                 try:
-                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                    await client.delete_messages(chat_id, callback_query.message.id)
                 except MessageIdInvalid:
                     pass
                 except Exception as e:
@@ -1602,7 +1598,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
             if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
                 try:
-                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                    await client.delete_messages(chat_id, callback_query.message.id)
                 except MessageIdInvalid:
                     pass
                 except Exception as e:
@@ -2079,7 +2075,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
             user = users_collection.find_one({'user_id': user_id})
             bookmarked_videos = user.get('bookmarked_videos', [])
             
-            # Filter out any videos that no longer exist in media_collection or are not 'accepted' before processing
+            # Filter out any videos that no longer exist in media_collection before processing
             existing_bookmarked_videos = []
             for bookmark in bookmarked_videos:
                 video_data = get_video_by_uuid(bookmark['uuid'])
@@ -3333,6 +3329,109 @@ async def handle_incoming_video(client: Client, message: Message):
     if user_id not in config.ADMIN_IDS:
         await message.reply("I only accept videos through the /upload command. Please use /upload to share your videos! 🎥")
 
+# --- Admin Callback Handlers for Video Review ---
+@app.on_callback_query(filters.regex(r"^admin_accept_(.+)$") & filters.user(config.ADMIN_IDS))
+async def admin_accept_video_callback(client: Client, callback_query: CallbackQuery):
+    admin_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 2)[2]
+    logger.info(f"Admin {admin_id} is attempting to accept video {video_uuid}.")
+
+    try:
+        video_data = media_collection.find_one({'uuid': video_uuid})
+        if not video_data:
+            await callback_query.answer("Video not found in database. It might have been deleted or already processed.", show_alert=True)
+            await callback_query.message.edit_text(f"Video (UUID: <code>{video_uuid}</code>) not found or already processed.")
+            return
+
+        if video_data['status'] == 'accepted':
+            await callback_query.answer("This video has already been accepted.", show_alert=True)
+            return
+
+        # Forward the video to the main video channel
+        try:
+            # Re-fetch the message to ensure it's still available in the admin upload channel
+            original_admin_message = await client.get_messages(config.ADMIN_UPLOAD_CHANNEL_ID, video_data['admin_message_id'])
+            
+            # Use original_admin_message.video.file_id for forwarding
+            forwarded_message = await client.send_video(
+                chat_id=config.VIDEO_CHANNEL_ID,
+                video=original_admin_message.video.file_id,
+                caption=video_data.get('custom_caption') or f"Category: {html.escape(video_data['category'])}\nUUID: {video_data['uuid']}",
+                protect_content=True # Protect content in main channel
+            )
+            message_id_in_channel = forwarded_message.id
+            logger.info(f"Video {video_uuid} forwarded to main video channel {config.VIDEO_CHANNEL_ID} with message ID {message_id_in_channel}.")
+
+        except Exception as e:
+            logger.error(f"Failed to forward video {video_uuid} to main channel: {e}", exc_info=True)
+            await callback_query.answer("Failed to forward video to main channel. Check bot permissions.", show_alert=True)
+            await callback_query.message.edit_text(f"❌ Failed to accept video {video_uuid}. Reason: Could not forward to main channel. Check bot permissions. 🐛")
+            return
+
+        # Update video status in DB
+        media_collection.update_one(
+            {'uuid': video_uuid},
+            {'$set': {'status': 'accepted', 'message_id': message_id_in_channel}}
+        )
+        logger.info(f"Video {video_uuid} status updated to 'accepted'.")
+
+        # Notify uploader
+        uploader_id = video_data.get('uploaded_by_user_id')
+        if uploader_id:
+            try:
+                await client.send_message(uploader_id, f"🎉 <b>Good news!</b> Your video (UUID: <code>{video_uuid}</code>) has been <b>accepted</b> by the admins and is now available in the bot! 🚀\n\nShare it with others: <code>https://t.me/{config.BOT_USERNAME[1:]}?start=video_{video_uuid}_{uploader_id}</code>")
+            except (UserIsBlocked, ChatInvalid):
+                logger.warning(f"Could not notify uploader {uploader_id} about video acceptance; user blocked or chat invalid.")
+            except Exception as e:
+                logger.error(f"Failed to notify uploader {uploader_id} about video acceptance: {e}")
+
+        await callback_query.message.edit_text(f"✅ Video (UUID: <code>{video_uuid}</code>) <b>accepted</b>! Moved to main channel. 🎉")
+        await callback_query.answer("Video accepted!")
+
+    except Exception as e:
+        logger.error(f"Error accepting video {video_uuid} by admin {admin_id}: {e}", exc_info=True)
+        await callback_query.answer("An error occurred while accepting the video.", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^admin_reject_(.+)$") & filters.user(config.ADMIN_IDS))
+async def admin_reject_video_callback(client: Client, callback_query: CallbackQuery):
+    admin_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 2)[2]
+    logger.info(f"Admin {admin_id} is attempting to reject video {video_uuid}.")
+
+    try:
+        video_data = media_collection.find_one({'uuid': video_uuid})
+        if not video_data:
+            await callback_query.answer("Video not found in database. It might have been deleted or already processed.", show_alert=True)
+            await callback_query.message.edit_text(f"Video (UUID: <code>{video_uuid}</code>) not found or already processed.")
+            return
+
+        if video_data['status'] == 'rejected':
+            await callback_query.answer("This video has already been rejected.", show_alert=True)
+            return
+        
+        # Update video status in DB
+        media_collection.update_one(
+            {'uuid': video_uuid},
+            {'$set': {'status': 'rejected'}}
+        )
+        logger.info(f"Video {video_uuid} status updated to 'rejected'.")
+
+        # Notify uploader
+        uploader_id = video_data.get('uploaded_by_user_id')
+        if uploader_id:
+            try:
+                await client.send_message(uploader_id, f"😔 <b>Update on your video upload:</b> Your video (UUID: <code>{video_uuid}</code>) has been <b>rejected</b> by the admins. It will not be added to the bot. You can try uploading a different video! 🎥")
+            except (UserIsBlocked, ChatInvalid):
+                logger.warning(f"Could not notify uploader {uploader_id} about video rejection; user blocked or chat invalid.")
+            except Exception as e:
+                logger.error(f"Failed to notify uploader {uploader_id} about video rejection: {e}")
+
+        await callback_query.message.edit_text(f"❌ Video (UUID: <code>{video_uuid}</code>) <b>rejected</b>. 🗑️")
+        await callback_query.answer("Video rejected!")
+
+    except Exception as e:
+        logger.error(f"Error rejecting video {video_uuid} by admin {admin_id}: {e}", exc_info=True)
+        await callback_query.answer("An error occurred while rejecting the video.", show_alert=True)
 
 # --- Database Cleanup (No longer deletes messages from chats) ---
 async def cleanup_expired_data():
