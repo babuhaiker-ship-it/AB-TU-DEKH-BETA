@@ -50,11 +50,17 @@ class BotConfig:
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
+    
+    # New configurations for /upload command
+    VIDEOS_PER_UPLOAD_BATCH = 2 # Configurable number of videos a user needs to upload
+    TOKENS_FOR_UPLOAD = 1 # Configurable number of tokens granted for a successful upload batch
+    ADMIN_APPROVAL_CHANNEL_ID = -1002621716446 # Channel where videos await admin approval (can be same as VIDEO_CHANNEL_ID or different)
+
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK, config.ADMIN_APPROVAL_CHANNEL_ID]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK, ADMIN_APPROVAL_CHANNEL_ID.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -67,6 +73,7 @@ media_collection = db['media']
 history_collection = db['history'] # General history, no longer used for prev/next navigation
 categories_collection = db['categories']
 settings_collection = db['settings'] # This collection will now store shortener config
+pending_media_collection = db['pending_media'] # New collection for videos awaiting admin approval
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -77,6 +84,8 @@ media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
+pending_media_collection.create_index([("uuid", ASCENDING)], unique=True) # New index for pending media
+pending_media_collection.create_index([("file_unique_id", ASCENDING)], unique=True) # New index for pending media
 
 # --- Pyrogram Client ---
 app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
@@ -94,6 +103,8 @@ admin_delete_video_state = defaultdict(bool)
 # --- Admin State for Category Rename ---
 admin_rename_category_state = defaultdict(dict)
 
+# --- User State for /upload command ---
+upload_state = defaultdict(dict) # Stores user's progress for /upload command
 
 def create_tracked_task(coro):
     """
@@ -548,7 +559,6 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     logger.info(f"Edited message {message_id_to_edit_or_delete} in chat {chat_id} with new video {video_data['uuid']}.")
                 except MessageIdInvalid:
                     logger.warning(f"Message {message_id_to_edit_or_delete} for editing in chat {chat_id} was invalid or deleted. Falling back to send new.")
-                    # Fallback to sending a new message if edit fails due to invalid message ID
                     pass # Will proceed to the 'send new message' block below
                 except FloodWait as fw:
                     logger.warning(f"FloodWait encountered when editing video: {fw.value}s. Retrying after delay.")
@@ -698,7 +708,8 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton("🎞️ Get Video"), KeyboardButton("👤 Profile")],
         [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
-        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")] # Added Saved Videos button
+        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")],
+        [KeyboardButton("⬆️ Upload Video")] # New Upload Video button
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -721,6 +732,16 @@ def category_keyboard() -> InlineKeyboardMarkup:
     # Add "Saved Videos" button
     buttons.append([InlineKeyboardButton("🔖 Saved Videos", callback_data="cat_saved_videos")])
     return InlineKeyboardMarkup(buttons)
+
+def upload_category_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard for selecting video categories for upload."""
+    cats = get_categories()
+    if not cats:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("😔 No Categories Available", callback_data="no_cat_upload")]])
+    
+    buttons = [[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"uploadselcat_{cat}")] for cat in cats]
+    return InlineKeyboardMarkup(buttons)
+
 
 def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: bool = False) -> InlineKeyboardMarkup:
     """
@@ -1078,7 +1099,8 @@ async def help_cmd(client: Client, message: Message):
         "- Each token gives you 24 hours access. ⏳\n"
         "- Earn tokens by referral, refreshing ads, or buying them. 💰\n"
         "- Use '👤 Profile' to check your stats. 📈\n"
-        "- Use '🔖 Saved Videos' to view your bookmarked videos. ❤️\n\n"
+        "- Use '🔖 Saved Videos' to view your bookmarked videos. ❤️\n"
+        "- Use '⬆️ Upload Video' to upload videos and earn tokens! 🚀\n\n"
         "Enjoy your spicy journey! 🌶️",
         reply_markup=await get_main_keyboard(user_id)
     )
@@ -2569,7 +2591,7 @@ async def done_cmd(client: Client, message: Message):
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
 @app.on_message(filters.video & filters.private & filters.user(config.ADMIN_IDS))
-async def handle_video_batch_add_or_delete(client: Client, message: Message):
+async def handle_admin_video_input(client: Client, message: Message):
     """
     Handles incoming video messages for either batch adding mode or delete video mode.
     Prioritizes delete video mode if active.
@@ -2835,8 +2857,15 @@ async def stats_cmd(client: Client, message: Message):
         total_users = users_collection.count_documents({})
         total_videos = media_collection.count_documents({})
         total_categories = categories_collection.count_documents({})
-        await message.reply(f"📊 <b>Bot Statistics</b> 📈\n\n<b>Total Users:</b> {total_users} 👥\n<b>Total Videos:</b> {total_videos} 🎞️\n<b>Total Categories:</b> {total_categories} 🗂️")
-        logger.info(f"Admin {user_id} retrieved stats: Users={total_users}, Videos={total_videos}, Categories={total_categories}.")
+        total_pending_videos = pending_media_collection.count_documents({'status': 'pending'}) # New stat
+        await message.reply(
+            f"📊 <b>Bot Statistics</b> 📈\n\n"
+            f"<b>Total Users:</b> {total_users} 👥\n"
+            f"<b>Total Videos (Approved):</b> {total_videos} 🎞️\n"
+            f"<b>Total Categories:</b> {total_categories} 🗂️\n"
+            f"<b>Videos Awaiting Approval:</b> {total_pending_videos} ⏳" # New stat
+        )
+        logger.info(f"Admin {user_id} retrieved stats: Users={total_users}, Videos={total_videos}, Categories={total_categories}, Pending={total_pending_videos}.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to retrieve stats: {e}", exc_info=True)
         await message.reply("❌ An error occurred while fetching stats. Please try again. 🐛")
@@ -2858,6 +2887,18 @@ async def categoryrename_cmd(client: Client, message: Message):
     logger.info(f"Admin {user_id} initiated /categoryrename command.")
     admin_rename_category_state[user_id] = {'step': 'await_old_name'}
     await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
+
+# --- Admin command to set shortener ---
+@app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
+async def setshortener_cmd(client: Client, message: Message):
+    """Admin command to set the URL shortener template URL."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /setshortener command.")
+    admin_shortener_setup_state[user_id] = {'step': 'await_template_url'}
+    await message.reply(
+        "Please send the <b>URL shortener template URL</b>. This URL must contain `{long_url}` as a placeholder for the URL to be shortened and an `api=` parameter for your API key.\n\n"
+        "Example: `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}` 📝"
+    )
 
 @app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_admin_text_input(client: Client, message: Message):
@@ -3138,6 +3179,12 @@ async def health_check():
         # Also check the force subscribe channel
         force_sub_member = await app.get_chat_member(config.FORCE_SUB_CHANNEL_ID, me.id)
         print(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
+        
+        # Check admin approval channel if different
+        if config.ADMIN_APPROVAL_CHANNEL_ID != config.VIDEO_CHANNEL_ID:
+            admin_approval_member = await app.get_chat_member(config.ADMIN_APPROVAL_CHANNEL_ID, me.id)
+            print(f"Bot status in admin approval channel ({config.ADMIN_APPROVAL_CHANNEL_ID}): {admin_approval_member.status}")
+
     except Exception as e:
         print("Health check failed:", e)
 
@@ -3179,3 +3226,339 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
+
+# --- New /upload command handlers ---
+
+@app.on_message(filters.regex("^⬆️ Upload Video$") & filters.private)
+@app.on_message(filters.command("upload") & filters.private)
+async def upload_cmd(client: Client, message: Message):
+    user_id = message.from_user.id
+    logger.info(f"User {user_id} initiated /upload command.")
+
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    create_tracked_task(check_premium_status_and_notify(client, user_id))
+
+    if await is_rate_limited(user_id):
+        await handle_error(client, message, FloodWait(10))
+        logger.warning(f"User {user_id} hit rate limit in upload_cmd.")
+        return
+    
+    # Clear any previous upload state for this user
+    upload_state[user_id] = {
+        'step': 'await_category',
+        'category': None,
+        'videos_received': [],
+        'videos_to_upload_count': config.VIDEOS_PER_UPLOAD_BATCH
+    }
+
+    categories = get_categories()
+    if not categories:
+        await message.reply("😔 No categories available for upload. Please ask an admin to add some! 🛠️")
+        del upload_state[user_id] # Clear state if no categories
+        return
+
+    await message.reply(
+        "🎬 <b>Select a Category for your videos:</b>",
+        reply_markup=upload_category_keyboard()
+    )
+    logger.info(f"User {user_id} prompted to select category for upload.")
+
+@app.on_callback_query(filters.regex(r"^uploadselcat_(.+)$"))
+async def upload_select_category_callback(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    category = callback_query.data[13:]
+    logger.info(f"User {user_id} selected category for upload: {category}.")
+
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channel first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    if user_id not in upload_state or upload_state[user_id].get('step') != 'await_category':
+        await callback_query.answer("Your upload session expired. Please use /upload again. ⏰", show_alert=True)
+        await client.send_message(chat_id, "Your upload session expired. Please use /upload again. ⏰", reply_markup=await get_main_keyboard(user_id))
+        return
+
+    if category not in get_categories():
+        await callback_query.answer("Invalid category. Please select from the available options. 🧐", show_alert=True)
+        await callback_query.message.edit_text(
+            "Category not found. Please try again! 🧐",
+            reply_markup=upload_category_keyboard()
+        )
+        return
+
+    upload_state[user_id]['category'] = category
+    upload_state[user_id]['step'] = 'await_videos'
+    
+    await callback_query.message.edit_text(
+        f"✅ Category set to <b>{html.escape(category)}</b>. Now, please send me <b>{config.VIDEOS_PER_UPLOAD_BATCH}</b> unique video files. 🎥\n"
+        f"You have sent <b>{len(upload_state[user_id]['videos_received'])}</b> of {config.VIDEOS_PER_UPLOAD_BATCH} videos."
+    )
+    await callback_query.answer(f"Category set to '{html.escape(category)}'")
+    logger.info(f"User {user_id} is now awaiting {config.VIDEOS_PER_UPLOAD_BATCH} videos for category '{category}'.")
+
+@app.on_message(filters.video & filters.private)
+async def handle_user_uploaded_video(client: Client, message: Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    logger.info(f"User {user_id} sent a video.")
+
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    if user_id not in upload_state or upload_state[user_id].get('step') != 'await_videos':
+        logger.warning(f"User {user_id} sent video outside of /upload flow. Ignoring.")
+        await message.reply("I'm not expecting a video right now. If you want to upload videos, please use the /upload command. ⬆️", reply_markup=await get_main_keyboard(user_id))
+        return
+
+    current_category = upload_state[user_id]['category']
+    videos_received = upload_state[user_id]['videos_received']
+    videos_to_upload_count = upload_state[user_id]['videos_to_upload_count']
+
+    if not message.video:
+        await message.reply("❌ Please send a video file. Other file types are not accepted for upload. 🎥")
+        return
+
+    file_id = message.video.file_id
+    file_unique_id = message.video.file_unique_id
+    file_size = message.video.file_size
+    original_caption = message.caption if message.caption else ""
+    
+    # Check for duplicates in media_collection (approved videos)
+    if media_collection.find_one({"file_unique_id": file_unique_id}):
+        await message.reply("⚠️ This video already exists in our approved database. Please send a new, unique video. ⏩")
+        logger.info(f"User {user_id} attempted to upload duplicate video (approved): {file_unique_id}.")
+        return
+
+    # Check for duplicates in pending_media_collection (awaiting approval)
+    if pending_media_collection.find_one({"file_unique_id": file_unique_id}):
+        await message.reply("⚠️ This video is already awaiting approval. Please send a new, unique video. ⏳")
+        logger.info(f"User {user_id} attempted to upload duplicate video (pending): {file_unique_id}.")
+        return
+
+    # Check for duplicates in the current batch being uploaded by the user
+    if any(v['file_unique_id'] == file_unique_id for v in videos_received):
+        await message.reply("⚠️ You have already sent this video in the current batch. Please send a new, unique video. 🔄")
+        logger.info(f"User {user_id} attempted to upload duplicate video (current batch): {file_unique_id}.")
+        return
+
+    video_uuid = str(uuid.uuid4())
+    
+    # Store video data temporarily
+    videos_received.append({
+        "uuid": video_uuid,
+        "file_id": file_id,
+        "file_unique_id": file_unique_id,
+        "category": current_category,
+        "size_bytes": file_size,
+        "uploader_id": user_id,
+        "uploader_username": message.from_user.username,
+        "original_caption": original_caption,
+        "uploaded_at": datetime.utcnow()
+    })
+    
+    upload_state[user_id]['videos_received'] = videos_received # Update the state
+    
+    current_count = len(videos_received)
+    await message.reply(
+        f"✅ Video received! You have sent <b>{current_count}</b> of {videos_to_upload_count} videos. Keep them coming! 🎬"
+    )
+    logger.info(f"User {user_id} sent video {current_count}/{videos_to_upload_count} for upload.")
+
+    if current_count >= videos_to_upload_count:
+        await message.reply("🎉 All videos received! Processing for admin approval... Please wait. ⏳")
+        logger.info(f"User {user_id} completed sending {videos_to_upload_count} videos. Initiating approval process.")
+        
+        # Change state to prevent further video uploads
+        upload_state[user_id]['step'] = 'completed'
+
+        uploaded_video_links = []
+        
+        for video_data in videos_received:
+            try:
+                # Prepare caption for admin approval channel
+                admin_caption = (
+                    f"<b>New Video Upload Request</b>\n"
+                    f"Uploaded by: @{html.escape(video_data['uploader_username'] or 'N/A')} (ID: <code>{video_data['uploader_id']}</code>)\n"
+                    f"Category: <b>{html.escape(video_data['category'])}</b>\n"
+                    f"Size: {format_size(video_data['size_bytes'])}\n"
+                    f"UUID: <code>{video_data['uuid']}</code>\n"
+                    f"Original Caption: <i>{html.escape(video_data['original_caption'] or 'None')}</i>"
+                )
+                
+                approval_message = await client.send_video(
+                    chat_id=config.ADMIN_APPROVAL_CHANNEL_ID,
+                    video=video_data['file_id'],
+                    caption=admin_caption,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Accept", callback_data=f"approve_{video_data['uuid']}"),
+                         InlineKeyboardButton("❌ Reject", callback_data=f"reject_{video_data['uuid']}")]
+                    ]),
+                    protect_content=False # Admins need to be able to access the file
+                )
+                
+                # Store pending video details in pending_media_collection
+                pending_media_collection.insert_one({
+                    "uuid": video_data['uuid'],
+                    "file_id": video_data['file_id'],
+                    "file_unique_id": video_data['file_unique_id'],
+                    "category": video_data['category'],
+                    "size_bytes": video_data['size_bytes'],
+                    "uploader_id": video_data['uploader_id'],
+                    "uploader_username": video_data['uploader_username'],
+                    "original_caption": video_data['original_caption'],
+                    "uploaded_at": video_data['uploaded_at'],
+                    "admin_message_id": approval_message.id,
+                    "status": "pending"
+                })
+                logger.info(f"Video {video_data['uuid']} sent to admin approval channel {config.ADMIN_APPROVAL_CHANNEL_ID}.")
+
+                # Generate shareable link for the user
+                share_payload = f"video_{video_data['uuid']}_{user_id}"
+                share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start={share_payload}"
+                uploaded_video_links.append(f"• <a href='{share_link}'>{html.escape(video_data['original_caption'] or 'Your Uploaded Video')}</a>")
+
+            except FloodWait as fw:
+                logger.warning(f"FloodWait encountered when sending video to admin approval: {fw.value}s. Skipping this video for now but continuing.")
+                await client.send_message(chat_id, f"⚠️ Encountered a temporary issue sending one of your videos for approval. Please wait {fw.value} seconds. It will be processed later.")
+                await asyncio.sleep(fw.value + 1)
+            except Exception as e:
+                logger.error(f"Failed to send video {video_data['uuid']} to admin approval channel: {e}", exc_info=True)
+                await client.send_message(chat_id, f"❌ Failed to process one of your videos for approval due to an error. Please try again later. 🐛")
+        
+        # Grant tokens to the user
+        add_token(user_id, config.TOKENS_FOR_UPLOAD * 86400, is_admin_granted=False)
+        logger.info(f"User {user_id} granted {config.TOKENS_FOR_UPLOAD} tokens for uploading videos.")
+
+        await client.send_message(
+            chat_id,
+            f"🎉 <b>Congratulations!</b> You have successfully uploaded {current_count} videos and earned <b>{config.TOKENS_FOR_UPLOAD} token</b>! 🥳\n\n"
+            "Your videos are now awaiting admin approval. Once approved, they will be available to other users.\n\n"
+            "Here are the links to your uploaded videos (you can share these!):\n" + "\n".join(uploaded_video_links) + "\n\n"
+            "Sharing your videos to new users will grant you more tokens! 🚀",
+            disable_web_page_preview=True,
+            reply_markup=await get_main_keyboard(user_id)
+        )
+        del upload_state[user_id] # Clear state after completion
+        logger.info(f"User {user_id} upload process completed and state cleared.")
+
+# --- Admin Approval Callbacks for /upload ---
+
+@app.on_callback_query(filters.regex(r"^approve_(.+)$"))
+async def approve_uploaded_video(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 1)[1]
+    logger.info(f"Admin {user_id} clicked APPROVE for video {video_uuid}.")
+
+    if not is_admin(user_id):
+        await callback_query.answer("❌ You are not authorized to perform this action. 🚫", show_alert=True)
+        return
+
+    pending_video = pending_media_collection.find_one({'uuid': video_uuid})
+
+    if not pending_video:
+        await callback_query.answer("Video not found in pending list. It might have been processed already. 🧐", show_alert=True)
+        return
+
+    if pending_video.get('status') != 'pending':
+        await callback_query.answer(f"This video has already been {pending_video.get('status')}. ℹ️", show_alert=True)
+        return
+
+    try:
+        # Move video from pending to approved media collection
+        media_collection.insert_one({
+            "uuid": pending_video['uuid'],
+            "file_id": pending_video['file_id'],
+            "file_unique_id": pending_video['file_unique_id'],
+            "category": pending_video['category'],
+            "size_bytes": pending_video['size_bytes'],
+            "timestamp": get_current_time(), # Use current time for approval
+            "message_id": pending_video.get('admin_message_id'), # Reuse the message_id from admin channel
+            "banned": False,
+            "custom_caption": pending_video['original_caption'],
+            "uploaded_by": pending_video['uploader_id'], # Store uploader ID
+            "uploaded_username": pending_video['uploader_username'] # Store uploader username
+        })
+        logger.info(f"Video {video_uuid} moved from pending to media_collection by admin {user_id}.")
+
+        # Update status in pending_media_collection
+        pending_media_collection.update_one(
+            {'uuid': video_uuid},
+            {'$set': {'status': 'accepted', 'approved_by': user_id, 'approved_at': datetime.utcnow()}}
+        )
+        logger.info(f"Pending video {video_uuid} status updated to 'accepted'.")
+
+        # Edit the admin message
+        original_caption = callback_query.message.caption
+        new_caption = original_caption + "\n\n<b>✅ Approved by Admin!</b>"
+        await callback_query.message.edit_caption(
+            caption=new_caption,
+            reply_markup=None # Remove buttons after action
+        )
+        await callback_query.answer("Video approved and added to main database! 🎉")
+        logger.info(f"Admin {user_id} successfully approved video {video_uuid}.")
+
+        # Optionally notify the uploader
+        try:
+            uploader_id = pending_video['uploader_id']
+            await client.send_message(uploader_id, f"🎉 Good news! Your video (UUID: <code>{video_uuid}</code>) has been <b>approved</b> by an admin and is now available! Keep sharing and uploading! 🚀")
+        except Exception as e:
+            logger.warning(f"Failed to notify uploader {uploader_id} about video approval: {e}")
+
+    except Exception as e:
+        logger.error(f"Error approving video {video_uuid} by admin {user_id}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to approve video. Please try again. 🐛", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^reject_(.+)$"))
+async def reject_uploaded_video(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 1)[1]
+    logger.info(f"Admin {user_id} clicked REJECT for video {video_uuid}.")
+
+    if not is_admin(user_id):
+        await callback_query.answer("❌ You are not authorized to perform this action. 🚫", show_alert=True)
+        return
+
+    pending_video = pending_media_collection.find_one({'uuid': video_uuid})
+
+    if not pending_video:
+        await callback_query.answer("Video not found in pending list. It might have been processed already. 🧐", show_alert=True)
+        return
+
+    if pending_video.get('status') != 'pending':
+        await callback_query.answer(f"This video has already been {pending_video.get('status')}. ℹ️", show_alert=True)
+        return
+
+    try:
+        # Update status in pending_media_collection
+        pending_media_collection.update_one(
+            {'uuid': video_uuid},
+            {'$set': {'status': 'rejected', 'rejected_by': user_id, 'rejected_at': datetime.utcnow()}}
+        )
+        logger.info(f"Pending video {video_uuid} status updated to 'rejected'.")
+
+        # Edit the admin message
+        original_caption = callback_query.message.caption
+        new_caption = original_caption + "\n\n<b>❌ Rejected by Admin.</b>"
+        await callback_query.message.edit_caption(
+            caption=new_caption,
+            reply_markup=None # Remove buttons after action
+        )
+        await callback_query.answer("Video rejected. 🗑️")
+        logger.info(f"Admin {user_id} successfully rejected video {video_uuid}.")
+
+        # Optionally notify the uploader
+        try:
+            uploader_id = pending_video['uploader_id']
+            await client.send_message(uploader_id, f"😔 Your video (UUID: <code>{video_uuid}</code>) has been <b>rejected</b> by an admin. Please ensure your uploads follow the guidelines. Try uploading a different video! 🔄")
+        except Exception as e:
+            logger.warning(f"Failed to notify uploader {uploader_id} about video rejection: {e}")
+
+    except Exception as e:
+        logger.error(f"Error rejecting video {video_uuid} by admin {user_id}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to reject video. Please try again. 🐛", show_alert=True)
