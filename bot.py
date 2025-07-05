@@ -524,6 +524,7 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
 
     try:
         # --- Attempt to EDIT existing message OR force new message ---
+        # Only attempt to edit if not forcing a new message AND a message_id_to_edit_or_delete is provided
         if message_id_to_edit_or_delete and not force_new_message:
             if new_message_type == "video" and video_data:
                 caption_text = None
@@ -1188,13 +1189,18 @@ async def get_video(client: Client, message: Message):
 
     logger.info(f"User {user_id} prompted to choose category.")
     
+    # Here, we are transitioning from a reply keyboard message to an inline keyboard message.
+    # It's generally better to send a new message for this transition, as editing a reply
+    # keyboard message to an inline one might not always work cleanly or might leave the
+    # reply keyboard visible.
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        message_id_to_edit_or_delete=message_id_to_edit_or_delete, # Pass the message ID to be edited/deleted
+        message_id_to_edit_or_delete=message_id_to_edit_or_delete, # Delete the message that contained the "Get Video" button
         new_message_type="text",
         text_content="🎬 <b>Choose a Category:</b>",
-        reply_markup=category_keyboard()
+        reply_markup=category_keyboard(),
+        force_new_message=True # Force a new message for a clean transition
     )
 
     if not sent_success:
@@ -1246,6 +1252,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         user = users_collection.find_one({'user_id': user_id})
         if not user or not user.get('bookmarked_videos'):
             await callback_query.answer("You haven't saved any videos yet. ❤️", show_alert=True)
+            # If no saved videos, just edit the message back to category selection
             await callback_query.message.edit_text(
                 "You haven't saved any videos yet. ❤️",
                 reply_markup=category_keyboard() 
@@ -1290,15 +1297,15 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             )
             return
 
-        # Send the video directly, DELETING the category selection message and sending a NEW video message
+        # EDIT the existing message with the new video
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
-            message_id_to_edit_or_delete=callback_query.message.id, # Delete the current message
+            message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
             new_message_type="video",
             video_data=video,
             reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True),
-            force_new_message=True # Force a new message for a clean transition
+            force_new_message=False # DO NOT force new message, EDIT existing one
         )
         
         if sent_success:
@@ -1340,16 +1347,15 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         )
         return
     
-    # Edit the existing message with the new video
-    # Changed force_new_message to True here to resolve the bug
+    # EDIT the existing message with the new video
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        message_id_to_edit_or_delete=callback_query.message.id, # Delete the current message
+        message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], category, user_id),
-        force_new_message=True # Force a new message for a clean transition from text to video
+        force_new_message=False # DO NOT force new message, EDIT existing one
     )
     
     if sent_success:
@@ -1452,14 +1458,15 @@ async def next_video(client: Client, callback_query: CallbackQuery):
                 await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
                 return
         
-        # Edit the existing message with the new video
+        # EDIT the existing message with the new video
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
             message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
             new_message_type="video",
             video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=(category == "saved_videos"))
+            reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=(category == "saved_videos")),
+            force_new_message=False # DO NOT force new message, EDIT existing one
         )
         
         if sent_success:
@@ -1535,14 +1542,15 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         # Determine if the previous video was from the 'saved_videos' category to pass is_saved=True
         is_saved_for_prev = (category == "saved_videos")
             
-        # Edit the existing message with the new video
+        # EDIT the existing message with the new video
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
             message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
             new_message_type="video",
             video_data=found_video,
-            reply_markup=video_nav_keyboard(found_video['uuid'], category, user_id, is_saved=is_saved_for_prev)
+            reply_markup=video_nav_keyboard(found_video['uuid'], category, user_id, is_saved=is_saved_for_prev),
+            force_new_message=False # DO NOT force new message, EDIT existing one
         )
         
         if sent_success:
@@ -1592,31 +1600,30 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
         
-        # When changing category from a video, we typically want to replace the video message
-        # with the text-based category selection menu. So, deleting the old and sending new is appropriate.
-        try:
-            await client.delete_messages(chat_id, callback_query.message.id)
-            logger.info(f"Deleted current video message {callback_query.message.id} for user {user_id} to show category menu.")
-            clear_active_video_message(user_id)
-        except MessageIdInvalid:
-            logger.warning(f"Message {callback_query.message.id} for user {user_id} was already invalid/deleted when changing category.")
-            clear_active_video_message(user_id)
-        except Exception as e:
-            logger.error(f"Failed to delete current video message {callback_query.message.id} for user {user_id} during change category: {e}")
-            
+        # When changing category from a video, we want to replace the video message
+        # with the text-based category selection menu. This is a transition from media to text.
+        # It's usually better to edit the message to text content and new inline keyboard.
         cats = get_categories()
         if not cats:
             await callback_query.answer("😔 No categories available. Please ask an admin to add some! 🛠️", show_alert=True)
             return
 
-        sent_message = await client.send_message(
+        sent_success, sent_message_or_error = await send_and_replace_message(
+            client,
             chat_id,
-            "🎬 <b>Choose a Category:</b>",
-            reply_markup=category_keyboard()
+            message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
+            new_message_type="text",
+            text_content="🎬 <b>Choose a Category:</b>",
+            reply_markup=category_keyboard(),
+            force_new_message=False # Attempt to edit existing message
         )
-        set_active_video_message(user_id, sent_message.id, chat_id)
-        await callback_query.answer()
-        logger.info(f"User {user_id} sent new message to show change category menu.")
+        
+        if sent_success:
+            await callback_query.answer()
+            logger.info(f"User {user_id} edited message to show change category menu.")
+        else:
+            await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
+            logger.error(f"User {user_id} failed to edit message to show change category menu: {sent_message_or_error}")
 
     except Exception as e:
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
@@ -1971,7 +1978,7 @@ async def saved_videos_btn(client: Client, message: Message):
         bookmarked_videos_data = bookmarked_videos_data[:config.FREE_USER_SAVE_LIMIT]
         users_collection.update_one(
             {'user_id': user_id},
-            {'$set': {'bookmarked_videos': bookmarked_videos_data}}
+            {'$set': {'bookmarked_videos': truncated_bookmarks}}
         )
         logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT} as premium expired or was never premium.")
 
@@ -2037,7 +2044,6 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
 
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2083,7 +2089,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                         new_message_type="video",
                         video_data=next_video,
                         reply_markup=video_nav_keyboard(next_video['uuid'], "saved_videos", user_id, is_saved=True),
-                        force_new_message=True # Force new message for saved videos
+                        force_new_message=False # DO NOT force new message, EDIT existing one
                     )
                     if sent_success:
                         save_history(user_id, next_video['uuid'], "saved_videos")
@@ -2099,7 +2105,8 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                     message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
                     new_message_type="text",
                     text_content="You have no more saved videos. ❤️ Click 'Get Video' to find new ones!",
-                    reply_markup=await get_main_keyboard(user_id)
+                    reply_markup=await get_main_keyboard(user_id),
+                    force_new_message=False # Attempt to edit
                 )
         else:
             await callback_query.answer("Video not found in your saved videos. 🧐", show_alert=True)
@@ -2121,7 +2128,6 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
 
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2148,7 +2154,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         )
         return
 
-    # Edit the existing message with the new video
+    # EDIT the existing message with the new video
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
@@ -2156,7 +2162,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True), # Ensure is_saved is true for this path
-        force_new_message=True # Force new message for saved videos
+        force_new_message=False # DO NOT force new message, EDIT existing one
     )
 
     if sent_success:
@@ -2176,7 +2182,6 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2245,7 +2250,6 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
