@@ -49,10 +49,10 @@ class BotConfig:
     SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
-    FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
+    FORCE_SUB_CHANNEL_LINK = "https.me/SpicyNyraa" # New: Link to the force subscribe channel
     UPLOAD_VIDEO_COUNT = 2 # Number of videos a user needs to upload to get a token (for testing, set to 2)
     UPLOAD_TOKEN_REWARD = 1 # Tokens granted for completing an upload session
-    ADMIN_UPLOAD_CHANNEL_ID = -1002876955472 # IMPORTANT: REPLACE WITH YOUR ACTUAL ADMIN UPLOAD CHANNEL ID
+    ADMIN_UPLOAD_CHANNEL_ID = -1002237890457 # IMPORTANT: REPLACE WITH YOUR ACTUAL ADMIN UPLOAD CHANNEL ID
 
 try:
     config = BotConfig()
@@ -82,29 +82,15 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
-# Get session string from environment variable
-PYROGRAM_SESSION = os.environ.get('PYROGRAM_SESSION')
-
-if PYROGRAM_SESSION:
-    # Use the session string for persistent login
-    app = Client(
-        name=PYROGRAM_SESSION, # Use the session string directly as the name
-        api_id=config.API_ID,
-        api_hash=config.API_HASH,
-        bot_token=config.BOT_TOKEN
-    )
-    logger.info("Pyrogram Client initialized with session string.")
-else:
-    # Fallback for first run or if session string is not set (will create a new session file)
-    # For Render, this might still lead to issues if /data is not writable/persistent.
-    # It's highly recommended to use PYROGRAM_SESSION env var.
-    logger.warning("PYROGRAM_SESSION environment variable not found. Attempting to create new session file. This may not persist on ephemeral filesystems.")
-    app = Client(
-        name="/data/spicynyraa", # Path for session file if no session string
-        api_id=config.API_ID,
-        api_hash=config.API_HASH,
-        bot_token=config.BOT_TOKEN
-    )
+# WARNING: This setup will likely cause "unable to open database file" errors on ephemeral filesystems like Render.
+# The bot will attempt to create a session file at /data/spicynyraa.session, which will be lost on restarts.
+app = Client(
+    name="/data/spicynyraa", # Path for session file. This will NOT persist on Render.
+    api_id=config.API_ID,
+    api_hash=config.API_HASH,
+    bot_token=config.BOT_TOKEN
+)
+logger.warning("Pyrogram Client initialized to use a session file. This may cause 'unable to open database file' errors on ephemeral filesystems like Render.")
 
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
@@ -1518,7 +1504,6 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -1935,7 +1920,6 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2165,7 +2149,6 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
 
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
