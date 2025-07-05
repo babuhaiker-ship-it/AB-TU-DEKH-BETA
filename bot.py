@@ -52,7 +52,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
     UPLOAD_VIDEO_COUNT = 2 # Number of videos a user needs to upload to get a token (for testing, set to 2)
     UPLOAD_TOKEN_REWARD = 1 # Tokens granted for completing an upload session
-    ADMIN_UPLOAD_CHANNEL_ID = -1002876955472 # IMPORTANT: REPLACE WITH YOUR ADMIN UPLOAD CHANNEL ID
+    ADMIN_UPLOAD_CHANNEL_ID = -1002876955472 # IMPORTANT: REPLACE WITH YOUR ACTUAL ADMIN UPLOAD CHANNEL ID
 
 try:
     config = BotConfig()
@@ -82,7 +82,30 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
 # --- Pyrogram Client ---
-app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+# Get session string from environment variable
+PYROGRAM_SESSION = os.environ.get('PYROGRAM_SESSION')
+
+if PYROGRAM_SESSION:
+    # Use the session string for persistent login
+    app = Client(
+        name=PYROGRAM_SESSION, # Use the session string directly as the name
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN
+    )
+    logger.info("Pyrogram Client initialized with session string.")
+else:
+    # Fallback for first run or if session string is not set (will create a new session file)
+    # For Render, this might still lead to issues if /data is not writable/persistent.
+    # It's highly recommended to use PYROGRAM_SESSION env var.
+    logger.warning("PYROGRAM_SESSION environment variable not found. Attempting to create new session file. This may not persist on ephemeral filesystems.")
+    app = Client(
+        name="/data/spicynyraa", # Path for session file if no session string
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN
+    )
+
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -563,7 +586,6 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     logger.info(f"Edited message {message_id_to_edit_or_delete} in chat {chat_id} with new video {video_data['uuid']}.")
                 except MessageIdInvalid:
                     logger.warning(f"Message {message_id_to_edit_or_delete} for editing in chat {chat_id} was invalid or deleted. Falling back to send new.")
-                    # Fallback to sending a new message if edit fails due to invalid message ID
                     pass # Will proceed to the 'send new message' block below
                 except FloodWait as fw:
                     logger.warning(f"FloodWait encountered when editing video: {fw.value}s. Retrying after delay.")
@@ -1371,7 +1393,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     
     if sent_success:
         save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
-        logger.info(f"User {user_id} selected category {category} and new video {video['uuid']} sent.")
         await callback_query.answer()
     else:
         logger.error(f"User {user_id} failed to send video after category selection: {sent_message_or_error}. Clearing active video message.")
@@ -1991,7 +2012,7 @@ async def saved_videos_btn(client: Client, message: Message):
     # Filter/truncate based on premium status
     if not is_premium_user(user_id) and len(bookmarked_videos_data) > config.FREE_USER_SAVE_LIMIT:
         bookmarked_videos_data.sort(key=lambda x: x.get('bookmarked_at', datetime.min), reverse=True)
-        bookmarked_videos_data = bookmarked_videos_data[:config.FREE_USER_SAVE_LIMIT]
+        truncated_bookmarks = bookmarked_videos_data[:config.FREE_USER_SAVE_LIMIT]
         users_collection.update_one(
             {'user_id': user_id},
             {'$set': {'bookmarked_videos': truncated_bookmarks}}
@@ -2060,7 +2081,6 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
 
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2200,7 +2220,6 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2220,7 +2239,6 @@ async def confirm_clear_all_saved_callback(client: Client, callback_query: Callb
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2243,7 +2261,6 @@ async def clear_all_saved_videos_callback(client: Client, callback_query: Callba
 
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2269,7 +2286,6 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -3247,7 +3263,7 @@ async def handle_incoming_video(client: Client, message: Message):
         # Check for duplicates
         existing_video = media_collection.find_one({"file_unique_id": file_unique_id})
         if existing_video:
-            await message.reply("⚠️ This video already exists in our database. Please send a new, non-duplicate video. ⏩")
+            await message.reply("⚠️ This video already exists in our database. Please send a new, non-duplicate video.⏩")
             logger.info(f"User {user_id} attempted to upload duplicate video: {file_unique_id}.")
             return
 
@@ -3338,104 +3354,6 @@ async def handle_incoming_video(client: Client, message: Message):
     # Optionally, reply to non-admin users if they send a video outside of /upload
     if user_id not in config.ADMIN_IDS:
         await message.reply("I only accept videos through the /upload command. Please use /upload to share your videos! 🎥")
-
-
-# --- Admin Accept/Reject Callbacks ---
-@app.on_callback_query(filters.regex(r"^admin_accept_(.+)$"))
-async def admin_accept_video_callback(client: Client, callback_query: CallbackQuery):
-    admin_id = callback_query.from_user.id
-    video_uuid = callback_query.data.split('_', 2)[2]
-    chat_id = callback_query.message.chat.id
-    
-    if not is_admin(admin_id):
-        await callback_query.answer("❌ Not authorized.", show_alert=True)
-        return
-
-    video_doc = media_collection.find_one({'uuid': video_uuid, 'status': 'pending'})
-    if not video_doc:
-        await callback_query.answer("Video not found or already processed.", show_alert=True)
-        await callback_query.message.edit_text(f"Video (UUID: <code>{video_uuid}</code>) not found or already processed. 🧐")
-        return
-
-    try:
-        # Forward the video to the main video channel
-        forwarded_to_main_channel = await client.send_video(
-            chat_id=config.VIDEO_CHANNEL_ID,
-            video=video_doc['file_id'],
-            caption=video_doc.get('custom_caption') or f"Category: {html.escape(video_doc['category'])}\nSize: {format_size(video_doc['size_bytes'])}\nUUID: {video_uuid}",
-            protect_content=True # Protect content in main channel
-        )
-        message_id_in_main_channel = forwarded_to_main_channel.id
-
-        # Update video status in DB
-        media_collection.update_one(
-            {'uuid': video_uuid},
-            {'$set': {'status': 'accepted', 'message_id': message_id_in_main_channel}}
-        )
-
-        # Edit admin message
-        original_caption = callback_query.message.caption or ""
-        await callback_query.message.edit_text(
-            f"{original_caption}\n\n✅ <b>Accepted by Admin {admin_id}!</b>\nVideo now available in main channel. 🎉",
-            reply_markup=None # Remove buttons
-        )
-        await callback_query.answer("Video accepted and moved to main channel.")
-        logger.info(f"Admin {admin_id} accepted video {video_uuid}. Moved to main channel {config.VIDEO_CHANNEL_ID}.")
-
-        # Notify uploader (optional, but good UX)
-        uploader_id = video_doc.get('uploaded_by_user_id')
-        if uploader_id:
-            try:
-                await client.send_message(uploader_id, f"🎉 Your uploaded video (UUID: <code>{video_uuid}</code>) has been <b>accepted</b> by an admin! It's now available for others to watch. Keep sharing! 🚀")
-            except (UserIsBlocked, ChatInvalid):
-                logger.warning(f"Could not notify uploader {uploader_id} about video acceptance; user blocked or chat invalid.")
-
-    except Exception as e:
-        logger.error(f"Admin {admin_id} failed to accept video {video_uuid}: {e}", exc_info=True)
-        await callback_query.answer("❌ Failed to accept video. Check bot's channel permissions. 🐛", show_alert=True)
-        await callback_query.message.edit_text(f"{original_caption}\n\n❌ <b>Failed to accept by Admin {admin_id}.</b>\nReason: {e}", reply_markup=None)
-
-@app.on_callback_query(filters.regex(r"^admin_reject_(.+)$"))
-async def admin_reject_video_callback(client: Client, callback_query: CallbackQuery):
-    admin_id = callback_query.from_user.id
-    video_uuid = callback_query.data.split('_', 2)[2]
-    chat_id = callback_query.message.chat.id
-    
-    if not is_admin(admin_id):
-        await callback_query.answer("❌ Not authorized.", show_alert=True)
-        return
-
-    video_doc = media_collection.find_one({'uuid': video_uuid, 'status': 'pending'})
-    if not video_doc:
-        await callback_query.answer("Video not found or already processed.", show_alert=True)
-        await callback_query.message.edit_text(f"Video (UUID: <code>{video_uuid}</code>) not found or already processed. 🧐")
-        return
-
-    try:
-        # Delete from media_collection
-        media_collection.delete_one({'uuid': video_uuid})
-
-        # Edit admin message
-        original_caption = callback_query.message.caption or ""
-        await callback_query.message.edit_text(
-            f"{original_caption}\n\n❌ <b>Rejected by Admin {admin_id}.</b>\nVideo deleted from pending. 🗑️",
-            reply_markup=None # Remove buttons
-        )
-        await callback_query.answer("Video rejected and deleted.")
-        logger.info(f"Admin {admin_id} rejected video {video_uuid}. Deleted from DB.")
-
-        # Notify uploader (optional)
-        uploader_id = video_doc.get('uploaded_by_user_id')
-        if uploader_id:
-            try:
-                await client.send_message(uploader_id, f"🚫 Your uploaded video (UUID: <code>{video_uuid}</code>) has been <b>rejected</b> by an admin. Please ensure your uploads follow our guidelines. 😔")
-            except (UserIsBlocked, ChatInvalid):
-                logger.warning(f"Could not notify uploader {uploader_id} about video rejection; user blocked or chat invalid.")
-
-    except Exception as e:
-        logger.error(f"Admin {admin_id} failed to reject video {video_uuid}: {e}", exc_info=True)
-        await callback_query.answer("❌ Failed to reject video. Please try again. 🐛", show_alert=True)
-        await callback_query.message.edit_text(f"{original_caption}\n\n❌ <b>Failed to reject by Admin {admin_id}.</b>\nReason: {e}", reply_markup=None)
 
 
 # --- Database Cleanup (No longer deletes messages from chats) ---
