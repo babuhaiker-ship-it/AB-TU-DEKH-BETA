@@ -39,13 +39,13 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
+    TOKEN_EXPIRY = 46400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
-    SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
+    SUPPORT_BOT_USERNAME = '@hanielxsupportbot' # Support bot username for inline button
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
@@ -445,32 +445,50 @@ def get_video_by_uuid(uuid_: str) -> dict | None:
     """Retrieves a video by its UUID."""
     return media_collection.find_one({'uuid': uuid_})
 
-def save_history(user_id: int, video_uuid: str, category: str):
+def update_general_history(user_id: int, video_uuid: str, category: str):
     """
-    Saves a video viewing entry to a user's general history (limited to 100 entries)
-    AND updates the last viewed video for the specific category.
+    Saves a video viewing entry to a user's general history (limited to 100 entries).
+    This is for overall view count/profile, not for prev/next navigation.
     """
     now = datetime.utcnow()
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
-        # Update general history (for profile view count, etc.)
         history_collection.update_one(
             {'user_id': user_id},
             {'$push': {'history': {'$each': [entry], '$slice': -100}}},
             upsert=True
         )
         logger.info(f"General history saved for user {user_id}, video {video_uuid}. History size limited to 100.")
+    except Exception as e:
+        logger.error(f"Error saving general history for user {user_id}, video {video_uuid}: {e}", exc_info=True)
 
-        # Update last viewed video for this specific category
+def update_category_history_stack(user_id: int, video_uuid: str, category: str):
+    """
+    Updates the category-specific viewing history for a user.
+    This is used for 'Previous' button navigation.
+    """
+    MAX_CATEGORY_HISTORY = 10 # Keep last 10 videos per category for 'previous' navigation
+
+    try:
+        # Atomically update the history for the specific category
+        # Use $push to add to the end of the array, and $slice to truncate from the beginning
         users_collection.update_one(
             {'user_id': user_id},
-            {'$set': {f'last_viewed_per_category.{category}': video_uuid}},
-            upsert=True # Ensure the user document exists
+            {
+                '$push': {
+                    f'category_history.{category}': {
+                        '$each': [video_uuid],
+                        '$slice': -MAX_CATEGORY_HISTORY # Keep only the last N elements
+                    }
+                }
+            },
+            upsert=True
         )
-        logger.info(f"Last viewed video for category '{category}' updated to '{video_uuid}' for user {user_id}.")
+        logger.info(f"Category history stack updated for user {user_id}, category {category} with video {video_uuid}.")
 
     except Exception as e:
-        logger.error(f"Error saving history/last viewed for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+        logger.error(f"Error updating category history stack for user {user_id}, video {video_uuid}: {e}", exc_info=True)
+
 
 def get_last_video_from_history(user_id: int) -> dict | None:
     """
@@ -916,7 +934,8 @@ async def start_cmd(client: Client, message: Message):
                     'referral_count': 0,
                     'bookmarked_videos': [],
                     'last_premium_check_status': False, # Track last premium status for notifications
-                    'last_viewed_per_category': {} # New field to store last viewed video per category
+                    'last_viewed_per_category': {}, # New field to store last viewed video per category
+                    'category_history': {} # Initialize new category history stack
                 })
                 # New user token is NOT an admin-granted premium token
                 add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
@@ -1045,7 +1064,8 @@ async def start_cmd(client: Client, message: Message):
                     )
                     
                     if sent_success:
-                        save_history(user_id, video['uuid'], video['category'])
+                        update_general_history(user_id, video['uuid'], video['category']) # Use new general history function
+                        update_category_history_stack(user_id, video['uuid'], video['category']) # Add to category history stack
                         logger.info(f"User {user_id} sent shared/saved video {video_uuid_from_link} as new menu.")
                     else:
                         await message.reply(sent_message_or_error)
@@ -1110,45 +1130,53 @@ async def profile_cmd(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in profile_cmd.")
         return
 
-    user = users_collection.find_one({'user_id': user_id})
-    tokens_doc = tokens_collection.find_one({'user_id': user_id})
-    
-    # Only count non-admin granted tokens for 'Tokens' display, or perhaps total active tokens
-    # For simplicity, count all active tokens for "Tokens"
-    tokens_count = 0
-    if tokens_doc and 'tokens' in tokens_doc:
-        now = datetime.utcnow()
-        tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
+    try: # Added try-except for entire profile_cmd for better error capture
+        user = users_collection.find_one({'user_id': user_id})
+        if not user:
+            logger.warning(f"Profile requested for non-existent user {user_id}.")
+            await message.reply("User data not found. Please try /start again. 🧐")
+            return
 
-    referral_count = user.get('referral_count', 0) if user else 0
-    referred_by = user.get('referred_by', None) if user else None
-    bookmarked_videos = user.get('bookmarked_videos', [])
-    
-    # Determine user status and save limit
-    is_premium = is_premium_user(user_id) # Uses the new logic
-    user_status = "Premium User 💎" if is_premium else "Free User ✨"
-    
-    if is_premium:
-        save_limit_display = f"{len(bookmarked_videos)}/Unlimited"
-    else:
-        save_limit_display = f"{len(bookmarked_videos)}/{config.FREE_USER_SAVE_LIMIT}"
+        tokens_doc = tokens_collection.find_one({'user_id': user_id})
+        
+        tokens_count = 0
+        if tokens_doc and 'tokens' in tokens_doc:
+            now = datetime.utcnow()
+            tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
+
+        referral_count = user.get('referral_count', 0)
+        referred_by = user.get('referred_by', None)
+        bookmarked_videos = user.get('bookmarked_videos', [])
+        
+        is_premium = is_premium_user(user_id)
+        user_status = "Premium User 💎" if is_premium else "Free User ✨"
+        
+        if is_premium:
+            save_limit_display = f"{len(bookmarked_videos)}/Unlimited"
+        else:
+            save_limit_display = f"{len(bookmarked_videos)}/{config.FREE_USER_SAVE_LIMIT}"
 
 
-    views_doc = history_collection.find_one({'user_id': user_id})
-    view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
-    ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-    
-    await message.reply(
-        f"👤 <b>Your Profile</b> ✨\n\n"
-        f"<b>Status:</b> {user_status}\n" # Display user status here
-        f"<b>Tokens:</b> {tokens_count} 🪙\n" # Displays count of all active tokens
-        f"<b>Video Views:</b> {view_count} 🎞️\n"
-        f"<b>Saved Videos:</b> {save_limit_display} ❤️\n" # Display saved video count/limit
-        f"<b>Referrals:</b> {referral_count} 👥\n"
-        f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗\n"
-        f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}",
-        reply_markup=referral_keyboard(ref_link)
-    )
+        views_doc = history_collection.find_one({'user_id': user_id})
+        view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
+        ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
+        
+        await message.reply(
+            f"👤 <b>Your Profile</b> ✨\n\n"
+            f"<b>Status:</b> {user_status}\n"
+            f"<b>Tokens:</b> {tokens_count} 🪙\n"
+            f"<b>Video Views:</b> {view_count} 🎞️\n"
+            f"<b>Saved Videos:</b> {save_limit_display} ❤️\n"
+            f"<b>Referrals:</b> {referral_count} 👥\n"
+            f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗\n"
+            f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}",
+            reply_markup=referral_keyboard(ref_link)
+        )
+        logger.info(f"User {user_id}: Profile sent successfully.")
+    except Exception as e:
+        logger.error(f"User {user_id} failed to send profile: {e}", exc_info=True)
+        await handle_error(client, message, e)
+
 
 @app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
 async def get_video(client: Client, message: Message):
@@ -1310,7 +1338,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         )
         
         if sent_success:
-            save_history(user_id, video['uuid'], "saved_videos")
+            update_general_history(user_id, video['uuid'], "saved_videos") # Update general history
+            update_category_history_stack(user_id, video['uuid'], "saved_videos") # Add to category history stack
             await callback_query.answer()
         else:
             await callback_query.answer("❌ Failed to load saved video. Please try again. 😥", show_alert=True)
@@ -1329,15 +1358,9 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     
     # Try to get the last viewed video for this category
     user_doc = users_collection.find_one({'user_id': user_id})
-    last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category)
-    video = None
-    if last_viewed_uuid:
-        video = get_video_by_uuid(last_viewed_uuid)
-        if not video:
-            logger.warning(f"Last viewed video {last_viewed_uuid} for category '{category}' not found. Getting random.")
-            video = get_random_video(category)
-    else:
-        video = get_random_video(category)
+    # For initial category selection, we should get a random video, NOT necessarily the last viewed.
+    # The 'previous' button will then use the history.
+    video = get_random_video(category)
 
     if not video:
         logger.warning(f"No videos found in category '{category}' for user {user_id}.")
@@ -1349,7 +1372,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         return
     
     # Edit the existing message with the new video
-    # Changed force_new_message to True here to resolve the bug
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
@@ -1361,7 +1383,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     )
     
     if sent_success:
-        save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
+        update_general_history(user_id, video['uuid'], category) # Update general history
+        update_category_history_stack(user_id, video['uuid'], category) # Add to category history stack
         logger.info(f"User {user_id} selected category {category} and new video {video['uuid']} sent.")
         await callback_query.answer()
     else:
@@ -1471,7 +1494,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
         )
         
         if sent_success:
-            save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
+            update_general_history(user_id, video['uuid'], category) # Update general history
+            update_category_history_stack(user_id, video['uuid'], category) # Add to category history stack
             await callback_query.answer()
         else:
             await callback_query.answer("❌ Failed to load next video. Please try again. 😥", show_alert=True)
@@ -1483,9 +1507,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
 @app.on_callback_query(filters.regex(r"^prev\|")) # Updated regex to match new format
 async def prev_video(client: Client, callback_query: CallbackQuery):
     """
-    Handles 'Previous' video navigation.
-    This function now retrieves the last viewed video for the *current category*
-    from the user's document, ensuring it's not just the same video if 'Next' was clicked.
+    Handles 'Previous' video navigation using the category-specific history stack.
     """
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
@@ -1501,12 +1523,12 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
-        parts = callback_query.data.split('|') # Updated split delimiter
-        if len(parts) != 3: # Added check for valid parts length
+        parts = callback_query.data.split('|')
+        if len(parts) != 3:
             logger.error(f"Invalid callback data for prev_video: {callback_query.data}")
             await callback_query.answer("Invalid request. Please try again.", show_alert=True)
             return
-        action, current_uuid, category = parts # Unpack parts
+        action, current_uuid, category = parts
 
         if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
@@ -1528,38 +1550,62 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
-        # Retrieve the last viewed video for the CURRENT category from user's document
         user_doc = users_collection.find_one({'user_id': user_id})
-        last_viewed_uuid_in_category = user_doc.get('last_viewed_per_category', {}).get(category)
+        category_history = user_doc.get('category_history', {}).get(category, [])
         
-        found_video = None
-        if last_viewed_uuid_in_category:
-            found_video = get_video_by_uuid(last_viewed_uuid_in_category)
-        
-        if not found_video:
-            logger.warning(f"User {user_id} has no previous video for category '{category}'.")
+        # If the current video is still in the history, pop it to get the *actual* previous one
+        if category_history and category_history[-1] == current_uuid:
+            category_history.pop() # Remove the currently displayed video
+            # Update the database immediately after popping
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$set': {f'category_history.{category}': category_history}}
+            )
+
+        if len(category_history) < 1: # Check if there's a previous video after potential pop
+            logger.warning(f"User {user_id} has no more previous videos in category '{category}'. History: {category_history}")
             await callback_query.answer(
-                f"No previous video found for category '{html.escape(category)}'. 🧐",
+                f"No more previous videos in category '{html.escape(category)}'. 🧐",
                 show_alert=True
             )
             return
+
+        prev_video_uuid = category_history[-1] # Get the new last element (the previous video)
+        found_video = get_video_by_uuid(prev_video_uuid)
+        
+        if not found_video:
+            logger.warning(f"Previous video {prev_video_uuid} not found in media_collection for user {user_id}, category {category}. Removing from history.")
+            # If video is not found, remove it from history and try again (or inform user)
+            category_history.pop() # Remove the missing video from history
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$set': {f'category_history.{category}': category_history}}
+            )
+            await callback_query.answer("Previous video not found. Trying another... 🔄", show_alert=True)
+            # Recursively call prev_video to try to get the one before that
+            if category_history: # If there's still history, try again
+                await prev_video(client, callback_query) # Pass the same callback_query to re-evaluate
+            else: # No more history left
+                await callback_query.message.edit_text(
+                    "No more previous videos in this category. 😔",
+                    reply_markup=video_nav_keyboard(current_uuid, category, user_id, is_saved=(category == "saved_videos")) # Keep the current video's keyboard
+                )
+            return
             
-        # Determine if the previous video was from the 'saved_videos' category to pass is_saved=True
         is_saved_for_prev = (category == "saved_videos")
             
-        # Edit the existing message with the new video
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
-            message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
+            message_id_to_edit_or_delete=callback_query.message.id,
             new_message_type="video",
             video_data=found_video,
             reply_markup=video_nav_keyboard(found_video['uuid'], category, user_id, is_saved=is_saved_for_prev)
         )
         
         if sent_success:
-            # We don't call save_history here because 'prev' is just showing the last one, not a new view.
-            logger.info(f"User {user_id} navigated to previous video {found_video['uuid']} in category {found_video['category']}.")
+            # We don't add to history here, as we are navigating *back* through history
+            logger.info(f"User {user_id} navigated to previous video {found_video['uuid']} in category {category}.")
             await callback_query.answer()
         else:
             logger.error(f"User {user_id} failed to send previous video: {sent_message_or_error}.")
@@ -1664,7 +1710,7 @@ async def refer_btn(client: Client, message: Message):
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    try:
+    try: # Added try-except for entire refer_btn for better error capture
         if await is_rate_limited(user_id):
             await handle_error(client, message, FloodWait(10))
             logger.warning(f"User {user_id} hit rate limit in refer_btn.")
@@ -2033,7 +2079,8 @@ async def saved_videos_btn(client: Client, message: Message):
     )
 
     if sent_success:
-        save_history(user_id, video['uuid'], "saved_videos")
+        update_general_history(user_id, video['uuid'], "saved_videos") # Update general history
+        update_category_history_stack(user_id, video['uuid'], "saved_videos") # Add to category history stack
         logger.info(f"User {user_id} displayed latest saved video {video_uuid}.")
     else:
         await message.reply(sent_message_or_error)
@@ -2098,7 +2145,8 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                         force_new_message=True # Force new message for saved videos
                     )
                     if sent_success:
-                        save_history(user_id, next_video['uuid'], "saved_videos")
+                        update_general_history(user_id, next_video['uuid'], "saved_videos") # Update general history
+                        update_category_history_stack(user_id, next_video['uuid'], "saved_videos") # Add to category history stack
                     else:
                         await client.send_message(chat_id, "❌ Failed to load next saved video. Please try again. 😥")
                 else:
@@ -2172,11 +2220,12 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     )
 
     if sent_success:
-        save_history(user_id, video['uuid'], "saved_videos")
+        update_general_history(user_id, video['uuid'], "saved_videos") # Update general history
+        update_category_history_stack(user_id, video['uuid'], "saved_videos") # Add to category history stack
         await callback_query.answer()
         logger.info(f"User {user_id} viewed saved video {video_uuid}.")
     else:
-        await callback_query.answer("❌ Failed to load saved video. Please try again. 😥", show_alert=True)
+        await callback_query.answer("❌ Failed to load saved video. Please try again.😥", show_alert=True)
         logger.error(f"User {user_id} failed to load saved video {video_uuid}: {sent_message_or_error}")
 
 
@@ -2643,6 +2692,25 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
                     )
                     logger.info(f"Video {video_uuid} removed from last_viewed_per_category for user {user_id_to_update}.")
 
+            # Remove from all users' category_history stack
+            all_users_with_cat_history = users_collection.find({'category_history': {'$exists': True}})
+            for user_doc in all_users_with_cat_history:
+                user_id_to_update = user_doc['user_id']
+                updated_cat_history = {}
+                changed = False
+                for cat, history_list in user_doc['category_history'].items():
+                    # Filter out the deleted video UUID from each category's history list
+                    filtered_history = [vid_uuid for vid_uuid in history_list if vid_uuid != video_uuid]
+                    if len(filtered_history) != len(history_list): # Check if anything was removed
+                        changed = True
+                    updated_cat_history[cat] = filtered_history
+                if changed:
+                    users_collection.update_one(
+                        {'user_id': user_id_to_update},
+                        {'$set': {'category_history': updated_cat_history}}
+                    )
+                    logger.info(f"Video {video_uuid} removed from category_history for user {user_id_to_update}.")
+
 
             # Delete from channel
             if message_id_in_channel:
@@ -3008,6 +3076,20 @@ async def handle_admin_text_input(client: Client, message: Message):
                             {'$set': {'last_viewed_per_category': last_viewed_map}}
                         )
                         logger.info(f"Updated last_viewed_per_category for user {user_id_to_update} from '{old_name}' to '{new_name}'.")
+
+                # 6. Update category key in users' category_history (map/object of arrays)
+                all_users_with_cat_history = users_collection.find({'category_history': {'$exists': True}})
+                for user_doc in all_users_with_cat_history:
+                    user_id_to_update = user_doc['user_id']
+                    cat_history_map = user_doc['category_history']
+                    if old_name in cat_history_map:
+                        history_list_to_move = cat_history_map.pop(old_name)
+                        cat_history_map[new_name] = history_list_to_move
+                        users_collection.update_one(
+                            {'user_id': user_id_to_update},
+                            {'$set': {'category_history': cat_history_map}}
+                        )
+                        logger.info(f"Updated category_history for user {user_id_to_update} from '{old_name}' to '{new_name}'.")
 
 
                 await message.reply(f"✅ Category '<b>{html.escape(old_name)}</b>' successfully renamed to '<b>{html.escape(new_name)}</b>'! 🎉")
