@@ -43,7 +43,6 @@ class BotConfig:
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
-    MENU_TIMEOUT = 3600 # 1 hour in seconds, for soft expiry check, now less critical
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
     SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
@@ -93,6 +92,11 @@ admin_delete_video_state = defaultdict(bool)
 
 # --- Admin State for Category Rename ---
 admin_rename_category_state = defaultdict(dict)
+
+# --- Message Tracking and Immediate Deletion ---
+# This dictionary will store the message_id and chat_id of the last interactive message
+# sent by the bot to a user, which should be replaced or deleted on the next interaction.
+active_video_message = {} 
 
 
 def create_tracked_task(coro):
@@ -489,14 +493,12 @@ def get_last_video_from_history(user_id: int) -> dict | None:
             return video
     return None
 
-# --- Message Tracking and Immediate Deletion ---
-active_video_message = {} 
-
 def set_active_video_message(user_id: int, message_id: int, chat_id: int):
     """Set the active message for a user, to be deleted on next action."""
     active_video_message[user_id] = {
         'message_id': message_id,
-        'chat_id': chat_id
+        'chat_id': chat_id,
+        'timestamp': datetime.utcnow() # Add timestamp for potential future timeout logic
     }
     logger.info(f"Active video message set for user {user_id}: message_id={message_id}, chat_id={chat_id}")
 
@@ -711,14 +713,22 @@ def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
     ])
 
 def category_keyboard() -> InlineKeyboardMarkup:
-    """Keyboard for selecting video categories, including Saved Videos."""
+    """Keyboard for selecting video categories, with 3 buttons per row."""
     cats = get_categories()
     if not cats:
         return InlineKeyboardMarkup([[InlineKeyboardButton("😔 No Categories Available", callback_data="no_cat")]])
     
-    # Existing category buttons
-    buttons = [[InlineKeyboardButton(f"🎬 {html.escape(cat)}", callback_data=f"cat_{cat}")] for cat in cats]
-    # Add "Saved Videos" button
+    buttons = []
+    row = []
+    for i, cat in enumerate(cats):
+        row.append(InlineKeyboardButton(f"🎬 {html.escape(cat)}", callback_data=f"cat_{cat}"))
+        if (i + 1) % 3 == 0: # 3 buttons per row
+            buttons.append(row)
+            row = []
+    if row: # Add any remaining buttons
+        buttons.append(row)
+
+    # Add "Saved Videos" button on its own row at the end
     buttons.append([InlineKeyboardButton("🔖 Saved Videos", callback_data="cat_saved_videos")])
     return InlineKeyboardMarkup(buttons)
 
@@ -758,10 +768,8 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
     return InlineKeyboardMarkup(buttons)
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
-    """Keyboard for displaying a referral link."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Copy Referral Link", url=ref_link)]
-    ])
+    """Keyboard for displaying a referral link. No inline button for the link itself."""
+    return InlineKeyboardMarkup([]) # Removed the inline button as requested
 
 def buy_token_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for buying tokens."""
@@ -792,7 +800,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
     """Handles token refresh requests from users."""
     try:
         if await is_rate_limited(user_id):
-            return False, "⚠️ You're refreshing too quickly. Please wait a minute and try again."
+            return False, "⚠️ You're refreshing too quickly. Please wait a minute and try again. ⏳"
 
         # If user is currently premium (via admin-granted token), they don't need a free token refresh
         if is_premium_user(user_id):
@@ -954,7 +962,7 @@ async def start_cmd(client: Client, message: Message):
                             f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", 
                             reply_markup=await get_main_keyboard(user_id)
                         )
-                        await client.send_message(referrer_id, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
+                        await client.send_message(referrer_id, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined through your link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
                 elif deep_link_type == 'video_share' and referrer_id_from_video_link and referrer_id_from_video_link != user_id:
                     referrer_user_obj = users_collection.find_one({'user_id': referrer_id_from_video_link})
                     if referrer_user_obj:
@@ -962,7 +970,7 @@ async def start_cmd(client: Client, message: Message):
                             f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨", 
                             reply_markup=await get_main_keyboard(user_id)
                         )
-                        await client.send_message(referrer_id_from_video_link, f"🎉 **Referral Bonus!** Your friend, {first_name_safe}, joined through your shared video link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
+                        await client.send_message(referrer_id_from_video_link, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined through your shared video link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
                     else:
                         logger.warning(f"Referrer {referrer_id_from_video_link} not found for new user {user_id} via video share. Still sending new user welcome.")
                         await message.reply(
@@ -1073,7 +1081,7 @@ async def help_cmd(client: Client, message: Message):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     await message.reply(
-        f"👋 dear {user_mention_safe}! This is how to use Spicy Nyraa Bot! 📚\n\n"
+        f"👋 Dear {user_mention_safe}! This is how to use Spicy Nyraa Bot! 📚\n\n"
         "- Use '🎞️ Get Video' to watch spicy content. 🔥\n"
         "- Each token gives you 24 hours access. ⏳\n"
         "- Earn tokens by referral, refreshing ads, or buying them. 💰\n"
@@ -1476,10 +1484,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
 async def prev_video(client: Client, callback_query: CallbackQuery):
     """
     Handles 'Previous' video navigation.
-    NOTE: Based on the current logic, 'Previous' refers to the *last viewed video* in the current category,
-    not necessarily the video immediately preceding the current one in a sequence.
-    This means if you click 'Next' and then 'Prev', you might see the same video again,
-    as 'Next' updates the 'last_viewed_per_category' for the current category.
+    This function now retrieves the last viewed video for the *current category*
+    from the user's document, ensuring it's not just the same video if 'Next' was clicked.
     """
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
@@ -3198,3 +3204,4 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
+
