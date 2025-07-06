@@ -39,7 +39,7 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 46400  # 24 hours in seconds (for regular tokens, not premium)
+    TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
@@ -470,46 +470,31 @@ def update_category_history_stack(user_id: int, video_uuid: str, category: str):
     MAX_CATEGORY_HISTORY = 10 # Keep last 10 videos per category for 'previous' navigation
 
     try:
-        # Atomically update the history for the specific category
-        # Use $push to add to the end of the array, and $slice to truncate from the beginning
-        users_collection.update_one(
-            {'user_id': user_id},
-            {
-                '$push': {
-                    f'category_history.{category}': {
-                        '$each': [video_uuid],
-                        '$slice': -MAX_CATEGORY_HISTORY # Keep only the last N elements
+        # Get current history to avoid adding duplicates right at the end
+        user_doc = users_collection.find_one({'user_id': user_id})
+        current_history = user_doc.get('category_history', {}).get(category, [])
+
+        # Only add if it's not the very last video already in history
+        if not current_history or current_history[-1] != video_uuid:
+            users_collection.update_one(
+                {'user_id': user_id},
+                {
+                    '$push': {
+                        f'category_history.{category}': {
+                            '$each': [video_uuid],
+                            '$slice': -MAX_CATEGORY_HISTORY # Keep only the last N elements
+                        }
                     }
-                }
-            },
-            upsert=True
-        )
-        logger.info(f"Category history stack updated for user {user_id}, category {category} with video {video_uuid}.")
+                },
+                upsert=True
+            )
+            logger.info(f"Category history stack updated for user {user_id}, category {category} with video {video_uuid}.")
+        else:
+            logger.debug(f"Video {video_uuid} already last in history for user {user_id}, category {category}. Not adding duplicate.")
 
     except Exception as e:
         logger.error(f"Error updating category history stack for user {user_id}, video {video_uuid}: {e}", exc_info=True)
 
-
-def get_last_video_from_history(user_id: int) -> dict | None:
-    """
-    Retrieves the last viewed video from a user's general history (the one before the current latest).
-    This function is primarily for general history purposes, not for prev/next navigation in categories.
-    """
-    doc = history_collection.find_one({'user_id': user_id})
-    if doc and doc.get('history'):
-        history_list = doc['history']
-        if len(history_list) >= 2:
-            last_viewed_entry = history_list[-2]
-        elif len(history_list) == 1:
-            last_viewed_entry = history_list[-1]
-        else:
-            return None
-
-        video_uuid = last_viewed_entry['video_uuid']
-        video = media_collection.find_one({'uuid': video_uuid})
-        if video:
-            return video
-    return None
 
 def set_active_video_message(user_id: int, message_id: int, chat_id: int):
     """Set the active message for a user, to be deleted on next action."""
@@ -934,7 +919,6 @@ async def start_cmd(client: Client, message: Message):
                     'referral_count': 0,
                     'bookmarked_videos': [],
                     'last_premium_check_status': False, # Track last premium status for notifications
-                    'last_viewed_per_category': {}, # New field to store last viewed video per category
                     'category_history': {} # Initialize new category history stack
                 })
                 # New user token is NOT an admin-granted premium token
@@ -1133,9 +1117,23 @@ async def profile_cmd(client: Client, message: Message):
     try: # Added try-except for entire profile_cmd for better error capture
         user = users_collection.find_one({'user_id': user_id})
         if not user:
-            logger.warning(f"Profile requested for non-existent user {user_id}.")
-            await message.reply("User data not found. Please try /start again. 🧐")
-            return
+            logger.warning(f"Profile requested for non-existent user {user_id}. Attempting to re-initialize.")
+            # If user not found, try to create a basic entry (should ideally be done by /start)
+            users_collection.insert_one({
+                'user_id': user_id,
+                'username': html.escape(message.from_user.username) if message.from_user.username else "",
+                'first_name': html.escape(message.from_user.first_name) if message.from_user.first_name else "User",
+                'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
+                'joined_date': datetime.utcnow(),
+                'referral_count': 0,
+                'bookmarked_videos': [],
+                'last_premium_check_status': False,
+                'category_history': {}
+            })
+            user = users_collection.find_one({'user_id': user_id}) # Re-fetch user after insert
+            if not user: # If still not found, something is seriously wrong
+                raise Exception("Failed to create or retrieve user document for profile.")
+
 
         tokens_doc = tokens_collection.find_one({'user_id': user_id})
         
@@ -1356,8 +1354,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         )
         return
     
-    # Try to get the last viewed video for this category
-    user_doc = users_collection.find_one({'user_id': user_id})
     # For initial category selection, we should get a random video, NOT necessarily the last viewed.
     # The 'previous' button will then use the history.
     video = get_random_video(category)
@@ -1553,7 +1549,7 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
         user_doc = users_collection.find_one({'user_id': user_id})
         category_history = user_doc.get('category_history', {}).get(category, [])
         
-        # If the current video is still in the history, pop it to get the *actual* previous one
+        # Ensure the current video is removed from the stack before finding the previous one
         if category_history and category_history[-1] == current_uuid:
             category_history.pop() # Remove the currently displayed video
             # Update the database immediately after popping
@@ -1561,20 +1557,32 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
                 {'user_id': user_id},
                 {'$set': {f'category_history.{category}': category_history}}
             )
+            logger.info(f"Popped current video {current_uuid} from history for user {user_id}, category {category}.")
 
-        if len(category_history) < 1: # Check if there's a previous video after potential pop
-            logger.warning(f"User {user_id} has no more previous videos in category '{category}'. History: {category_history}")
+        if not category_history: # Check if history is empty after potential pop
+            logger.warning(f"User {user_id} has no more previous videos in category '{category}'. History is empty.")
             await callback_query.answer(
                 f"No more previous videos in category '{html.escape(category)}'. 🧐",
                 show_alert=True
             )
+            # Re-send the current video with the correct keyboard if history is exhausted
+            current_video_data = get_video_by_uuid(current_uuid)
+            if current_video_data:
+                await send_and_replace_message(
+                    client,
+                    chat_id,
+                    message_id_to_edit_or_delete=callback_query.message.id,
+                    new_message_type="video",
+                    video_data=current_video_data,
+                    reply_markup=video_nav_keyboard(current_uuid, category, user_id, is_saved=(category == "saved_videos"))
+                )
             return
 
         prev_video_uuid = category_history[-1] # Get the new last element (the previous video)
         found_video = get_video_by_uuid(prev_video_uuid)
         
         if not found_video:
-            logger.warning(f"Previous video {prev_video_uuid} not found in media_collection for user {user_id}, category {category}. Removing from history.")
+            logger.warning(f"Previous video {prev_video_uuid} not found in media_collection for user {user_id}, category {category}. Removing from history and retrying.")
             # If video is not found, remove it from history and try again (or inform user)
             category_history.pop() # Remove the missing video from history
             users_collection.update_one(
@@ -1584,8 +1592,19 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("Previous video not found. Trying another... 🔄", show_alert=True)
             # Recursively call prev_video to try to get the one before that
             if category_history: # If there's still history, try again
-                await prev_video(client, callback_query) # Pass the same callback_query to re-evaluate
-            else: # No more history left
+                # Re-construct a dummy callback_query with the new current_uuid
+                # This is a bit hacky but allows re-using the logic.
+                # A better approach might be to refactor prev_video to take uuid and category directly.
+                dummy_callback_data = f"prev|{prev_video_uuid}|{category}" # Use the newly found prev_video_uuid as current for the next recursive call
+                dummy_callback_query = CallbackQuery(
+                    id=callback_query.id,
+                    from_user=callback_query.from_user,
+                    chat_instance=callback_query.chat_instance,
+                    data=dummy_callback_data,
+                    message=callback_query.message # Keep the original message object for editing/deleting
+                )
+                await prev_video(client, dummy_callback_query)
+            else: # No more history left after removing missing video
                 await callback_query.message.edit_text(
                     "No more previous videos in this category. 😔",
                     reply_markup=video_nav_keyboard(current_uuid, category, user_id, is_saved=(category == "saved_videos")) # Keep the current video's keyboard
@@ -1913,7 +1932,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
             support_bot_link = f"https://t.me/{config.SUPPORT_BOT_USERNAME}"
             reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Support Bot", url=support_bot_link, callback_data="support_link_clicked")]
+                [InlineKeyboardButton("💬 Support Bot", url=support_bot_link)] # Removed callback_data as it's a direct URL
             ])
             await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
             await client.send_message(
@@ -2237,7 +2256,6 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2257,7 +2275,6 @@ async def confirm_clear_all_saved_callback(client: Client, callback_query: Callb
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2280,7 +2297,6 @@ async def clear_all_saved_videos_callback(client: Client, callback_query: Callba
 
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2306,7 +2322,6 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2672,25 +2687,6 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
                 {'$pull': {'history': {'video_uuid': video_uuid}}}
             )
             logger.info(f"Video {video_uuid} removed from all users' history_collection.")
-
-            # Remove from all users' last_viewed_per_category
-            # This requires iterating through users and their last_viewed_per_category map
-            all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
-            for user_doc in all_users_with_last_viewed:
-                user_id_to_update = user_doc['user_id']
-                updated_last_viewed = {}
-                changed = False
-                for cat, vid_uuid in user_doc['last_viewed_per_category'].items():
-                    if vid_uuid == video_uuid:
-                        changed = True
-                    else:
-                        updated_last_viewed[cat] = vid_uuid
-                if changed:
-                    users_collection.update_one(
-                        {'user_id': user_id_to_update},
-                        {'$set': {'last_viewed_per_category': updated_last_viewed}}
-                    )
-                    logger.info(f"Video {video_uuid} removed from last_viewed_per_category for user {user_id_to_update}.")
 
             # Remove from all users' category_history stack
             all_users_with_cat_history = users_collection.find({'category_history': {'$exists': True}})
@@ -3062,22 +3058,7 @@ async def handle_admin_text_input(client: Client, message: Message):
                 )
                 logger.info(f"Updated history in history_collection from '{old_name}' to '{new_name}'.")
 
-                # 5. Update category key in users' last_viewed_per_category (map/object)
-                # This requires iterating through users to handle the dynamic key rename
-                all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
-                for user_doc in all_users_with_last_viewed:
-                    user_id_to_update = user_doc['user_id']
-                    last_viewed_map = user_doc['last_viewed_per_category']
-                    if old_name in last_viewed_map:
-                        video_uuid_to_move = last_viewed_map.pop(old_name)
-                        last_viewed_map[new_name] = video_uuid_to_move
-                        users_collection.update_one(
-                            {'user_id': user_id_to_update},
-                            {'$set': {'last_viewed_per_category': last_viewed_map}}
-                        )
-                        logger.info(f"Updated last_viewed_per_category for user {user_id_to_update} from '{old_name}' to '{new_name}'.")
-
-                # 6. Update category key in users' category_history (map/object of arrays)
+                # 5. Update category key in users' category_history (map/object of arrays)
                 all_users_with_cat_history = users_collection.find({'category_history': {'$exists': True}})
                 for user_doc in all_users_with_cat_history:
                     user_id_to_update = user_doc['user_id']
