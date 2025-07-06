@@ -1474,7 +1474,13 @@ async def next_video(client: Client, callback_query: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^prev\|")) # Updated regex to match new format
 async def prev_video(client: Client, callback_query: CallbackQuery):
-    """Handles 'Previous' video navigation, showing the last viewed video in the current category."""
+    """
+    Handles 'Previous' video navigation.
+    NOTE: Based on the current logic, 'Previous' refers to the *last viewed video* in the current category,
+    not necessarily the video immediately preceding the current one in a sequence.
+    This means if you click 'Next' and then 'Prev', you might see the same video again,
+    as 'Next' updates the 'last_viewed_per_category' for the current category.
+    """
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested previous video.")
@@ -2842,6 +2848,19 @@ async def stats_cmd(client: Client, message: Message):
         await message.reply("❌ An error occurred while fetching stats. Please try again. 🐛")
 
 # --- New Admin Commands ---
+
+@app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
+async def set_shortener_cmd(client: Client, message: Message):
+    """Admin command to set the URL shortener API template URL."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /setshortener command.")
+    admin_shortener_setup_state[user_id]['step'] = 'await_template_url'
+    await message.reply(
+        "Please send the <b>full template URL</b> for your URL shortener API.\n\n"
+        "It must include `http://` or `https://` and contain `{long_url}` as a placeholder for the URL to be shortened, and an `api=` parameter with your API key.\n\n"
+        "<b>Example:</b> `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n\n"
+        "If your shortener doesn't use `api=` in the URL, provide the full API endpoint URL that accepts the long URL as a parameter (e.g., `https://api.shortener.com/shorten?url={long_url}&key=YOUR_API_KEY`)."
+    )
 
 @app.on_message(filters.command("deletevideo") & filters.private & filters.user(config.ADMIN_IDS))
 async def deletevideo_cmd(client: Client, message: Message):
