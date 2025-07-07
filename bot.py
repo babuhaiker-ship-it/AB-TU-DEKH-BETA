@@ -48,7 +48,7 @@ class BotConfig:
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
-    MENU_EXPIRY_MINUTES = 30 # New: Menu will expire if inactive for this many minutes
+    MENU_EXPIRY_MINUTES = 5 # New: Menu will expire if inactive for this many minutes
 
 try:
     config = BotConfig()
