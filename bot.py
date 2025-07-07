@@ -45,7 +45,7 @@ class BotConfig:
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
-    SUPPORT_BOT_USERNAME = 'hanielxsupportbot' # Support bot username for inline button
+    SUPPORT_BOT_USERNAME = '@hanielxsupportbot' # Support bot username for inline button
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
@@ -1489,7 +1489,10 @@ async def next_video(client: Client, callback_query: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^prev\|")) # Updated regex to match new format
 async def prev_video(client: Client, callback_query: CallbackQuery):
-    """Handles 'Previous' video navigation, showing the last viewed video in the current category."""
+    """
+    Handles 'Previous' video navigation.
+    Retrieves the video viewed immediately before the current one in the same category from history.
+    """
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested previous video.")
@@ -1504,12 +1507,12 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
-        parts = callback_query.data.split('|') # Updated split delimiter
-        if len(parts) != 3: # Added check for valid parts length
+        parts = callback_query.data.split('|')
+        if len(parts) != 3:
             logger.error(f"Invalid callback data for prev_video: {callback_query.data}")
             await callback_query.answer("Invalid request. Please try again.", show_alert=True)
             return
-        action, current_uuid, category = parts # Unpack parts
+        action, current_uuid, category = parts
 
         if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
@@ -1531,18 +1534,51 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
-        # Retrieve the last viewed video for the CURRENT category from user's document
-        user_doc = users_collection.find_one({'user_id': user_id})
-        last_viewed_uuid_in_category = user_doc.get('last_viewed_per_category', {}).get(category)
+        # --- New logic for 'Prev' button ---
+        user_history_doc = history_collection.find_one({'user_id': user_id})
         
+        if not user_history_doc or not user_history_doc.get('history'):
+            logger.info(f"User {user_id} has no history to navigate 'prev'.")
+            await callback_query.answer("No previous videos in your history for this category. 🧐", show_alert=True)
+            return
+
+        # Filter history for the current category and sort by timestamp (oldest first)
+        category_history = sorted(
+            [entry for entry in user_history_doc['history'] if entry.get('category') == category],
+            key=lambda x: x.get('viewed_at', datetime.min)
+        )
+        
+        if not category_history:
+            logger.info(f"User {user_id} has no history for category '{category}' to navigate 'prev'.")
+            await callback_query.answer(f"No previous videos in '{html.escape(category)}' category. 🧐", show_alert=True)
+            return
+
+        # Find the index of the current video in the filtered history
+        current_video_index = -1
+        for i, entry in enumerate(category_history):
+            if entry['video_uuid'] == current_uuid:
+                current_video_index = i
+                break
+
         found_video = None
-        if last_viewed_uuid_in_category:
-            found_video = get_video_by_uuid(last_viewed_uuid_in_category)
+        if current_video_index > 0:
+            # If not the first video, get the one before it
+            prev_video_entry = category_history[current_video_index - 1]
+            found_video = get_video_by_uuid(prev_video_entry['video_uuid'])
+            # If the video from history is no longer in media_collection, try to find another previous one
+            if not found_video:
+                logger.warning(f"Previous video {prev_video_entry['video_uuid']} from history not found in media_collection. Searching further back.")
+                # Iterate backwards from current_video_index - 2 to find an existing video
+                for i in range(current_video_index - 2, -1, -1):
+                    temp_video = get_video_by_uuid(category_history[i]['video_uuid'])
+                    if temp_video:
+                        found_video = temp_video
+                        break
         
         if not found_video:
-            logger.warning(f"User {user_id} has no previous video for category '{category}'.")
+            logger.info(f"User {user_id} reached the beginning of history for category '{category}' or no valid previous video found.")
             await callback_query.answer(
-                f"No previous video found for category '{html.escape(category)}'. 🧐",
+                f"You've reached the start of your history for '{html.escape(category)}' category. 🎬",
                 show_alert=True
             )
             return
@@ -1584,7 +1620,6 @@ async def change_category(client: Client, callback_query: CallbackQuery):
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -1911,7 +1946,6 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -3202,4 +3236,3 @@ if __name__ == "__main__":
     finally:
         logger.info("Application exiting.")
         # Any final cleanup can go here
-
