@@ -45,10 +45,10 @@ class BotConfig:
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
-    # Removed SUPPORT_BOT_USERNAME and SUPPORT_BOT_LINK as per request
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
+    MENU_EXPIRY_MINUTES = 30 # New: Menu will expire if inactive for this many minutes
 
 try:
     config = BotConfig()
@@ -96,7 +96,7 @@ admin_rename_category_state = defaultdict(dict)
 
 # --- Message Tracking and Immediate Deletion ---
 # This dictionary will store the message_id and chat_id of the last interactive message
-# sent by the bot to a user, which should be replaced or deleted on the next interaction.
+# sent by the bot to a user, along with a timestamp for menu expiry.
 active_video_message = {} 
 
 
@@ -474,6 +474,9 @@ def save_history(user_id: int, video_uuid: str, category: str):
         logger.error(f"Error saving history/last viewed for user {user_id}, video {video_uuid}: {e}", exc_info=True)
 
 # --- Message Tracking and Immediate Deletion ---
+# active_video_message is now a global dictionary to store the last interactive message
+# sent by the bot to a user, along with a timestamp for menu expiry.
+# Format: {user_id: {'message_id': int, 'chat_id': int, 'timestamp': datetime.utcnow()}}
 active_video_message = {} 
 
 def set_active_video_message(user_id: int, message_id: int, chat_id: int):
@@ -481,7 +484,7 @@ def set_active_video_message(user_id: int, message_id: int, chat_id: int):
     active_video_message[user_id] = {
         'message_id': message_id,
         'chat_id': chat_id,
-        'timestamp': datetime.utcnow()
+        'timestamp': datetime.utcnow() # Store current timestamp
     }
     logger.info(f"Active video message set for user {user_id}: message_id={message_id}, chat_id={chat_id}")
 
@@ -1246,22 +1249,36 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         return
         
     current_active_tracked_message = active_video_message.get(user_id)
-    # Check if the callback is from the currently tracked message.
-    # If not, it means the menu might have expired or a new interaction started.
-    if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
-        logger.warning(f"User {user_id} tried to select category but current menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
+    # Check if the callback is from the currently tracked message AND if it's expired.
+    if current_active_tracked_message and \
+       current_active_tracked_message.get('message_id') == callback_query.message.id and \
+       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+        
+        logger.warning(f"User {user_id} tried to select category but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
-        # If the callback message is different from the tracked one, delete it to clean up.
-        if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
-            try:
-                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-            except MessageIdInvalid:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
+        try:
+            await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+        except MessageIdInvalid:
+            pass # Already deleted
+        except Exception as e:
+            logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
         clear_active_video_message(user_id) # Clear the state, forcing a fresh start
         await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
-        return
+        return # Exit early
+
+    # If the callback is from an old message that is NOT the current active one (and not expired by timestamp)
+    # This can happen if the user clicks a button on an old menu after a new one was already sent.
+    if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+        logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+        await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+        # Attempt to delete the outdated message to clean up the chat
+        try:
+            await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+        except MessageIdInvalid:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+        return # Exit early
 
     # Handle "saved_videos" category selection directly
     if category == "saved_videos":
@@ -1405,7 +1422,7 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             logger.error(f"Invalid callback data for next_video: {callback_query.data}")
             await callback_query.answer("Invalid request. Please try again.", show_alert=True)
             return
-        action, current_uuid, category = parts # Unpack parts
+        action, current_uuid, category = parts
         
         if await is_rate_limited(user_id):
             await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
@@ -1413,19 +1430,34 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             return
 
         current_active_tracked_message = active_video_message.get(user_id)
-        if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
-            logger.warning(f"User {user_id} tried to navigate next but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
+        # Check if the callback is from the currently tracked message AND if it's expired.
+        if current_active_tracked_message and \
+           current_active_tracked_message.get('message_id') == callback_query.message.id and \
+           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+            
+            logger.warning(f"User {user_id} tried to navigate next but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
-            if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
-                try:
-                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-                except MessageIdInvalid:
-                    pass
-                except Exception as e:
-                    logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
-            clear_active_video_message(user_id)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass # Already deleted
+            except Exception as e:
+                logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
+            clear_active_video_message(user_id) # Clear the state, forcing a fresh start
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
-            return
+            return # Exit early
+
+        # If the callback is from an old message that is NOT the current active one (and not expired by timestamp)
+        if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+            await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+            return # Exit early
 
         # Handle "saved_videos" category
         if category == "saved_videos":
@@ -1527,19 +1559,34 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             return
 
         current_active_tracked_message = active_video_message.get(user_id)
-        if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
-            logger.warning(f"User {user_id} tried to navigate previous but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
+        # Check if the callback is from the currently tracked message AND if it's expired.
+        if current_active_tracked_message and \
+           current_active_tracked_message.get('message_id') == callback_query.message.id and \
+           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+            
+            logger.warning(f"User {user_id} tried to navigate previous but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
-            if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
-                try:
-                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-                except MessageIdInvalid:
-                    pass
-                except Exception as e:
-                    logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
-            clear_active_video_message(user_id)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass # Already deleted
+            except Exception as e:
+                logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
+            clear_active_video_message(user_id) # Clear the state, forcing a fresh start
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
-            return
+            return # Exit early
+
+        # If the callback is from an old message that is NOT the current active one (and not expired by timestamp)
+        if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+            await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+            return # Exit early
 
         # --- New logic for 'Prev' button ---
         user_history_doc = history_collection.find_one({'user_id': user_id})
@@ -1635,20 +1682,35 @@ async def change_category(client: Client, callback_query: CallbackQuery):
 
     try:
         current_active_tracked_message = active_video_message.get(user_id)
-        if not current_active_tracked_message or current_active_tracked_message.get('message_id') != callback_query.message.id:
-            logger.warning(f"User {user_id} tried to change category but menu expired or callback not from active menu. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id') if current_active_tracked_message else 'None'}")
+        # Check if the callback is from the currently tracked message AND if it's expired.
+        if current_active_tracked_message and \
+           current_active_tracked_message.get('message_id') == callback_query.message.id and \
+           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+            
+            logger.warning(f"User {user_id} tried to change category but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
-            if current_active_tracked_message and callback_query.message.id != current_active_tracked_message.get('message_id'):
-                try:
-                    await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
-                except MessageIdInvalid:
-                    pass
-                except Exception as e:
-                    logger.warning(f"Failed to delete non-active menu message for user {user_id}: {e}")
-            clear_active_video_message(user_id)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass # Already deleted
+            except Exception as e:
+                logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
+            clear_active_video_message(user_id) # Clear the state, forcing a fresh start
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
-            return
-        
+            return # Exit early
+
+        # If the callback is from an old message that is NOT the current active one (and not expired by timestamp)
+        if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+            await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+            return # Exit early
+
         # When changing category from a video, we typically want to replace the video message
         # with the text-based category selection menu. So, deleting the old and sending new is appropriate.
         try:
@@ -1671,7 +1733,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             "🎬 <b>Choose a Category:</b>",
             reply_markup=category_keyboard()
         )
-        set_active_video_message(user_id, sent_message.id, chat_id)
+        set_active_video_message(user_id, sent_message.id, chat_id) # Update active message for the new category menu
         await callback_query.answer()
         logger.info(f"User {user_id} sent new message to show change category menu.")
 
@@ -1859,7 +1921,6 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2103,6 +2164,36 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
+        current_active_tracked_message = active_video_message.get(user_id)
+        # Check if the callback is from the currently tracked message AND if it's expired.
+        if current_active_tracked_message and \
+           current_active_tracked_message.get('message_id') == callback_query.message.id and \
+           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+            
+            logger.warning(f"User {user_id} tried to remove saved video but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+            await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass # Already deleted
+            except Exception as e:
+                logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
+            clear_active_video_message(user_id) # Clear the state, forcing a fresh start
+            await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
+            return # Exit early
+
+        # If the callback is from an old message that is NOT the current active one (and not expired by timestamp)
+        if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+            await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+            try:
+                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+            return # Exit early
+
         # Remove video from user's saved list
         result = users_collection.update_one(
             {'user_id': user_id},
@@ -2189,6 +2280,36 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ You're Browse too quickly. Please wait a minute and try again. ⏳", show_alert=True)
         return
+
+    current_active_tracked_message = active_video_message.get(user_id)
+    # Check if the callback is from the currently tracked message AND if it's expired.
+    if current_active_tracked_message and \
+       current_active_tracked_message.get('message_id') == callback_query.message.id and \
+       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+        
+        logger.warning(f"User {user_id} tried to view saved video but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+        await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
+        try:
+            await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+        except MessageIdInvalid:
+            pass # Already deleted
+        except Exception as e:
+            logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
+        clear_active_video_message(user_id) # Clear the state, forcing a fresh start
+        await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
+        return # Exit early
+
+    # If the callback is from an old message that is NOT the current active one (and not expired by timestamp)
+    if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+        logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+        await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+        try:
+            await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+        except MessageIdInvalid:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+        return # Exit early
 
     if not user_has_token(user_id):
         await callback_query.answer("You need a token to watch this video. Please get a token first! 🧐", show_alert=True)
@@ -3156,6 +3277,48 @@ async def cleanup_expired_data():
         
         await asyncio.sleep(86400) # Run once every 24 hours
 
+async def cleanup_expired_menus():
+    """
+    Periodically checks for and deletes expired interactive menus from chats.
+    A menu is considered expired if its timestamp in active_video_message is older than MENU_EXPIRY_MINUTES.
+    """
+    while True:
+        logger.info("Starting expired menu cleanup task.")
+        now = datetime.utcnow()
+        expired_threshold = now - timedelta(minutes=config.MENU_EXPIRY_MINUTES)
+        
+        users_to_clear = []
+        for user_id, menu_info in list(active_video_message.items()): # Iterate over a copy
+            if menu_info.get('timestamp') and menu_info['timestamp'] < expired_threshold:
+                chat_id = menu_info['chat_id']
+                message_id = menu_info['message_id']
+                
+                logger.info(f"Attempting to delete expired menu for user {user_id} (msg_id: {message_id}, chat_id: {chat_id}).")
+                try:
+                    await app.delete_messages(chat_id, message_id)
+                    logger.info(f"Successfully deleted expired menu message {message_id} for user {user_id}.")
+                except MessageIdInvalid:
+                    logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
+                except Exception as e:
+                    logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
+                finally:
+                    users_to_clear.append(user_id)
+        
+        for user_id in users_to_clear:
+            clear_active_video_message(user_id)
+            logger.info(f"Cleared active_video_message state for user {user_id} after menu expiry.")
+
+        try:
+            # Adjust sleep interval based on MENU_EXPIRY_MINUTES, but not too frequently
+            sleep_interval = max(60, config.MENU_EXPIRY_MINUTES * 60 / 2) # Check at least every minute, or half the expiry time
+            await asyncio.sleep(sleep_interval)
+        except asyncio.CancelledError:
+            logger.info("cleanup_expired_menus task cancelled gracefully.")
+            break
+        except Exception as e:
+            logger.error(f"Error during sleep in cleanup_expired_menus: {e}", exc_info=True)
+
+
 async def verify_and_cleanup_media():
     """Periodically verifies if media files still exist in the channel and logs missing/inaccessible entries, but does NOT delete anything."""
     while True:
@@ -3223,6 +3386,7 @@ async def main_bot_logic():
     # Schedule background tasks
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
+    create_tracked_task(cleanup_expired_menus()) # Schedule the new menu cleanup task
 
     logger.info("Background tasks initiated. Bot is now fully operational.")
 
