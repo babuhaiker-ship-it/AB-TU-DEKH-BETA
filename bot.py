@@ -36,7 +36,7 @@ class BotConfig:
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446
-    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
+    BUY_BOT_URL = 'https://t.me/hanielxsupportbot' # This is the link for buying tokens
     ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
@@ -45,16 +45,16 @@ class BotConfig:
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
-    SUPPORT_BOT_USERNAME = '@hanielxsupportbot' # Support bot username for inline button
-    SUPPORT_BOT_LINK = 'https://t.me/hanielxsupportbot' # New: Support bot link
+    # Removed SUPPORT_BOT_USERNAME and SUPPORT_BOT_LINK as per request
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK, config.SUPPORT_BOT_LINK]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK, SUPPORT_BOT_LINK.")
+    # Updated validation to reflect removed support bot link
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -693,7 +693,7 @@ def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👆 Click Here To Refresh Token", url=ad_url)],
         [InlineKeyboardButton("❓ How To Open Links?", url=config.TUTORIAL_LINK_2)],
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)],
-        [InlineKeyboardButton("💬 Support Bot", url=config.SUPPORT_BOT_LINK, callback_data="support_link_clicked")] # Added Support Bot button
+        # Removed Support Bot button as per request
     ])
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -1066,6 +1066,11 @@ async def help_cmd(client: Client, message: Message):
     # Check and notify about premium status change
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
+    # Updated help message and added a 'Support' button linking to BUY_BOT_URL
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Support", url=config.BUY_BOT_URL)]
+    ])
+
     await message.reply(
         f"👋 dear {user_mention_safe}! This is how to use Spicy Nyraa Bot! 📚\n\n"
         "- Use '🎞️ Get Video' to watch spicy content. 🔥\n"
@@ -1073,8 +1078,9 @@ async def help_cmd(client: Client, message: Message):
         "- Earn tokens by referral, refreshing ads, or buying them. 💰\n"
         "- Use '👤 Profile' to check your stats. 📈\n"
         "- Use '🔖 Saved Videos' to view your bookmarked videos. ❤️\n\n"
-        "Enjoy your spicy journey! 🌶️",
-        reply_markup=await get_main_keyboard(user_id)
+        "Enjoy your spicy journey! 🌶️\n\n"
+        "Any issue? DM here!", # Added "Any issue? DM here!"
+        reply_markup=reply_markup # Use the new reply_markup with the support button
     )
 
 @app.on_message(filters.command("profile") & filters.private)
@@ -1904,8 +1910,9 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     try:
         if not is_premium_user(user_id): # This check correctly determines visibility
             logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
+            # Replaced "Get Premium Access!" button with "Buy Token"
             reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Get Premium Access! 🚀", url=config.SUPPORT_BOT_LINK, callback_data="support_link_clicked")] 
+                [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)] 
             ])
             await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
             await client.send_message(
