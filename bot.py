@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAFK7siFferpBbfqokmPu4l_5fK6ytzhpiM'
+    BOT_TOKEN = '7213744072:AAEu3sZPjBMV5KjgOJDi-2vU6xw3E4ky-AE'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
