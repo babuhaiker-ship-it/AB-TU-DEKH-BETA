@@ -46,14 +46,15 @@ class BotConfig:
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 169
     SUPPORT_BOT_USERNAME = '@hanielxsupportbot' # Support bot username for inline button
+    SUPPORT_BOT_LINK = 'https://t.me/hanielxsupportbot' # New: Support bot link
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK, config.SUPPORT_BOT_LINK]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK, SUPPORT_BOT_LINK.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -692,7 +693,7 @@ def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👆 Click Here To Refresh Token", url=ad_url)],
         [InlineKeyboardButton("❓ How To Open Links?", url=config.TUTORIAL_LINK_2)],
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)],
-        [InlineKeyboardButton("💬 Support Bot", url=f"https://t.me/{config.SUPPORT_BOT_USERNAME}", callback_data="support_link_clicked")] # Added Support Bot button
+        [InlineKeyboardButton("💬 Support Bot", url=config.SUPPORT_BOT_LINK, callback_data="support_link_clicked")] # Added Support Bot button
     ])
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -1903,14 +1904,16 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     try:
         if not is_premium_user(user_id): # This check correctly determines visibility
             logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
-            support_bot_link = f"https://t.me/{config.SUPPORT_BOT_USERNAME}"
             reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💬 Support Bot", url=support_bot_link, callback_data="support_link_clicked")] # Added callback_data as requested
+                [InlineKeyboardButton("💬 Get Premium Access! 🚀", url=config.SUPPORT_BOT_LINK, callback_data="support_link_clicked")] 
             ])
             await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
             await client.send_message(
                 chat_id,
-                f"To access the Download button, DM our support bot to purchase a 7-day trial for ₹{config.PREMIUM_TRIAL_PRICE_INR} or 1-month premium access for ₹{config.PREMIUM_MONTH_PRICE_INR}. 💎",
+                f"✨ Unlock Exclusive Downloads! ✨\n\n"
+                f"Ready to download your favorite content? 🤩 Get blazing-fast, direct downloads with our Premium Access!\n\n"
+                f"💎 Try a 7-day trial for just ₹{config.PREMIUM_TRIAL_PRICE_INR} or go all-in with 1-month premium access for ₹{config.PREMIUM_MONTH_PRICE_INR}! 🚀\n\n"
+                f"Tap below to elevate your experience! 👇",
                 reply_markup=reply_markup
             )
             return
