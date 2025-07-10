@@ -11,7 +11,7 @@ from pyrogram.types import (
 )
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid
 from pyrogram.enums import ChatMemberStatus
-from pymongo import MongoClient, ASCENDING, ReturnDocument
+from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument # Added DESCENDING
 import aiohttp
 from aiohttp import ClientTimeout
 from collections import defaultdict
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 class BotConfig:
     BOT_TOKEN = '7213744072:AAEu3sZPjBMV5KjgOJDi-2vU6xw3E4ky-AE'
     API_ID = 29800015
-    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb66' # Corrected API_HASH (typo in original)
+    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
@@ -44,7 +44,7 @@ class BotConfig:
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
-    PREMIUM_MONTH_PRICE_INR = 169
+    PREMIUM_MONTH_PRICE_INR = 199
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638  # New: Channel ID for force subscription
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
@@ -76,6 +76,7 @@ media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
+media_collection.create_index([("timestamp", ASCENDING)]) # New index for chronological sorting
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 
@@ -435,56 +436,79 @@ def delete_category(name: str) -> tuple[bool, str, int]:
         logger.error(f"Error deleting category '{name}': {e}")
         return False, "Failed to delete category. Please try again.", 0
 
-# --- Video Navigation ---
-def get_random_video(category: str) -> dict | None:
-    """Retrieves a random video from the specified category."""
-    videos = list(media_collection.find({'category': category}))
-    if not videos:
-        return None
-    return random.choice(videos)
+# --- Video Navigation (MODIFIED FOR CHRONOLOGICAL ORDER) ---
+
+def get_first_video_by_upload_time(category: str) -> dict | None:
+    """
+    Retrieves the very first video ever uploaded to the specified category,
+    based on its timestamp.
+    """
+    # Find the video with the minimum timestamp for the given category
+    video = media_collection.find_one(
+        {'category': category},
+        sort=[('timestamp', ASCENDING)] # Sort by timestamp ascending
+    )
+    return video
+
+def get_next_video_chronological(current_uuid: str, category: str) -> dict | None:
+    """
+    Retrieves the video uploaded immediately after the current video in the same category,
+    based on timestamp. Loops to the first video if at the end.
+    """
+    current_video = media_collection.find_one({'uuid': current_uuid})
+    if not current_video:
+        logger.warning(f"Current video {current_uuid} not found for next chronological lookup. Attempting to get first video.")
+        return get_first_video_by_upload_time(category) # Fallback to first if current not found
+
+    current_timestamp = current_video.get('timestamp', 0) # Use 0 if timestamp is missing
+
+    # Find the next video chronologically
+    next_video = media_collection.find_one(
+        {'category': category, 'timestamp': {'$gt': current_timestamp}},
+        sort=[('timestamp', ASCENDING)]
+    )
+
+    if next_video:
+        return next_video
+    else:
+        # If no next video, loop back to the very first video in the category
+        logger.info(f"End of videos reached for category '{category}'. Looping to first video.")
+        return get_first_video_by_upload_time(category)
+
+def get_previous_video_chronological(current_uuid: str, category: str) -> dict | None:
+    """
+    Retrieves the video uploaded immediately before the current video in the same category,
+    based on timestamp. Loops to the last video if at the beginning.
+    """
+    current_video = media_collection.find_one({'uuid': current_uuid})
+    if not current_video:
+        logger.warning(f"Current video {current_uuid} not found for previous chronological lookup. Attempting to get last video.")
+        return media_collection.find_one( # Fallback to last if current not found
+            {'category': category},
+            sort=[('timestamp', DESCENDING)]
+        )
+
+    current_timestamp = current_video.get('timestamp', float('inf')) # Use inf if timestamp is missing
+
+    # Find the previous video chronologically
+    prev_video = media_collection.find_one(
+        {'category': category, 'timestamp': {'$lt': current_timestamp}},
+        sort=[('timestamp', DESCENDING)]
+    )
+
+    if prev_video:
+        return prev_video
+    else:
+        # If no previous video, loop back to the very last video in the category
+        logger.info(f"Beginning of videos reached for category '{category}'. Looping to last video.")
+        return media_collection.find_one(
+            {'category': category},
+            sort=[('timestamp', DESCENDING)] # Get the last video by timestamp
+        )
 
 def get_video_by_uuid(uuid_: str) -> dict | None:
     """Retrieves a video by its UUID."""
     return media_collection.find_one({'uuid': uuid_})
-
-def get_next_video(current_video_uuid: str, category: str) -> dict | None:
-    """
-    Retrieves the next video in the specified category based on upload timestamp.
-    If no next video, returns None.
-    """
-    current_video = media_collection.find_one({'uuid': current_video_uuid, 'category': category})
-    if not current_video:
-        return None
-
-    # Find videos in the same category uploaded *after* the current video
-    next_videos = list(media_collection.find({
-        'category': category,
-        'timestamp': {'$gt': current_video.get('timestamp', 0)} # Use 0 as fallback for older entries
-    }).sort('timestamp', ASCENDING).limit(1)) # Get the one with the smallest (next) timestamp
-
-    if next_videos:
-        return next_videos[0]
-    return None
-
-def get_previous_video(current_video_uuid: str, category: str) -> dict | None:
-    """
-    Retrieves the previous video in the specified category based on upload timestamp.
-    If no previous video, returns None.
-    """
-    current_video = media_collection.find_one({'uuid': current_video_uuid, 'category': category})
-    if not current_video:
-        return None
-
-    # Find videos in the same category uploaded *before* the current video
-    previous_videos = list(media_collection.find({
-        'category': category,
-        'timestamp': {'$lt': current_video.get('timestamp', float('inf'))} # Use inf as fallback
-    }).sort('timestamp', -1).limit(1)) # Get the one with the largest (most recent previous) timestamp
-
-    if previous_videos:
-        return previous_videos[0]
-    return None
-
 
 def save_history(user_id: int, video_uuid: str, category: str):
     """
@@ -767,7 +791,7 @@ def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👆 Click Here To Refresh Token", url=ad_url)],
         [InlineKeyboardButton("❓ How To Open Links?", url=config.TUTORIAL_LINK_2)],
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)],
-        [InlineKeyboardButton("🔗 Referrals", callback_data="show_referral_link")] # Added Referrals button
+        # Removed Support Bot button as per request
     ])
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -1431,17 +1455,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         )
         return
     
-    # Try to get the last viewed video for this category
-    user_doc = users_collection.find_one({'user_id': user_id})
-    last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category)
-    video = None
-    if last_viewed_uuid:
-        video = get_video_by_uuid(last_viewed_uuid)
-        if not video:
-            logger.warning(f"Last viewed video {last_viewed_uuid} for category '{category}' not found. Getting random.")
-            video = get_random_video(category)
-    else:
-        video = get_random_video(category)
+    # --- MODIFIED: Always get the first video by upload time for initial category selection ---
+    video = get_first_video_by_upload_time(category)
 
     if not video:
         logger.warning(f"No videos found in category '{category}' for user {user_id}.")
@@ -1532,7 +1547,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
                 logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
             return # Exit early
 
-        # Handle "saved_videos" category
+        video = None
+        # Handle "saved_videos" category (keep existing random logic for 'next')
         if category == "saved_videos":
             user = users_collection.find_one({'user_id': user_id})
             bookmarked_videos = user.get('bookmarked_videos', [])
@@ -1554,42 +1570,30 @@ async def next_video(client: Client, callback_query: CallbackQuery):
                 await callback_query.answer("You have no saved videos. ❤️", show_alert=True)
                 return
             
-            # Get the current video's index in the sorted saved videos list
-            existing_bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
-            current_video_index = -1
-            for i, entry in enumerate(existing_bookmarked_videos):
-                if entry['uuid'] == current_uuid:
-                    current_video_index = i
-                    break
-
-            next_video = None
-            if current_video_index != -1 and current_video_index < len(existing_bookmarked_videos) - 1:
-                next_video_entry = existing_bookmarked_videos[current_video_index + 1]
-                next_video = get_video_by_uuid(next_video_entry['uuid'])
+            # Randomly select a video from the *existing* bookmarked videos
+            selected_bookmark = random.choice(existing_bookmarked_videos)
+            video_uuid = selected_bookmark['uuid']
+            video = get_video_by_uuid(video_uuid)
             
-            if not next_video:
-                # If no next video in sequence, loop back to the first or get a random one
-                if existing_bookmarked_videos:
-                    next_video = get_video_by_uuid(existing_bookmarked_videos[0]['uuid']) # Loop to first
-                else:
-                    await callback_query.answer("No more saved videos. 😔", show_alert=True)
-                    return
+            if not video:
+                # This should ideally not happen after filtering and re-getting, but for safety:
+                await callback_query.answer("Saved video not found. It may have been removed. 😔", show_alert=True)
+                users_collection.update_one(
+                    {'user_id': user_id},
+                    {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+                )
+                return
         else:
-            # Regular category behavior: get the next video by upload timestamp
+            # --- MODIFIED: Regular category behavior: get next chronological video ---
             if category not in get_categories(): # Re-check if category is valid for non-saved videos
                 logger.warning(f"User {user_id} used invalid category '{category}' for next video (non-saved).")
                 await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
                 return
 
-            next_video = get_next_video(current_uuid, category)
-            if not next_video:
-                # If no next video in sequence, get the first one in the category (loop)
-                first_video = list(media_collection.find({'category': category}).sort('timestamp', ASCENDING).limit(1))
-                if first_video:
-                    next_video = first_video[0]
-                else:
-                    await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
-                    return
+            video = get_next_video_chronological(current_uuid, category)
+            if not video:
+                await callback_query.answer("No more videos in this category. Try another! 😔", show_alert=True)
+                return
         
         # Edit the existing message with the new video
         sent_success, sent_message_or_error = await send_and_replace_message(
@@ -1597,12 +1601,12 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             chat_id,
             message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
             new_message_type="video",
-            video_data=next_video,
-            reply_markup=video_nav_keyboard(next_video['uuid'], category, user_id, is_saved=(category == "saved_videos"))
+            video_data=video,
+            reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=(category == "saved_videos"))
         )
         
         if sent_success:
-            save_history(user_id, next_video['uuid'], category) # This now updates last_viewed_per_category
+            save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
             await callback_query.answer()
         else:
             logger.error(f"User {user_id} failed to send next video: {sent_message_or_error}. Clearing active video message.")
@@ -1616,7 +1620,8 @@ async def next_video(client: Client, callback_query: CallbackQuery):
 async def prev_video(client: Client, callback_query: CallbackQuery):
     """
     Handles 'Previous' video navigation.
-    Retrieves the video viewed immediately before the current one in the same category from history.
+    For regular categories, retrieves the video uploaded immediately before the current one chronologically.
+    For 'saved_videos', it navigates based on the user's viewing history of saved videos.
     """
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
@@ -1674,78 +1679,82 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
                 logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
             return # Exit early
 
-        # Handle "saved_videos" category
+        video = None
+        # Handle "saved_videos" category (keep history-based logic for 'prev')
         if category == "saved_videos":
-            user = users_collection.find_one({'user_id': user_id})
-            bookmarked_videos = user.get('bookmarked_videos', [])
-            
-            # Filter out videos whose data might be missing from media_collection
-            existing_bookmarked_videos = []
-            for bookmark in bookmarked_videos:
-                video_data = get_video_by_uuid(bookmark['uuid'])
-                if video_data:
-                    existing_bookmarked_videos.append(bookmark)
-                else:
-                    logger.warning(f"Saved video {bookmark['uuid']} for user {user_id} not found in media_collection during prev_video. Removing from bookmarks.")
-                    users_collection.update_one(
-                        {'user_id': user_id},
-                        {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
-                    )
-
-            if not existing_bookmarked_videos:
-                await callback_query.answer("You have no saved videos. ❤️", show_alert=True)
+            user_doc = users_collection.find_one({'user_id': user_id})
+            if not user_doc or not user_doc.get('category_history') or category not in user_doc['category_history']:
+                logger.info(f"User {user_id} has no category history for '{category}' to navigate 'prev'.")
+                await callback_query.answer("No previous videos in your history for saved videos. 🧐", show_alert=True)
                 return
+
+            # Get the history for the current category, sorted by viewed_at (oldest first)
+            # This is the viewing history for saved videos
+            category_history = sorted(
+                user_doc['category_history'][category],
+                key=lambda x: x.get('viewed_at', datetime.min)
+            )
             
-            # Get the current video's index in the sorted saved videos list
-            existing_bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+            if not category_history:
+                logger.info(f"User {user_id} has empty history for category '{category}' to navigate 'prev'.")
+                await callback_query.answer(f"No previous videos in saved history. 🧐", show_alert=True)
+                return
+
+            # Find the index of the current video in the filtered history
             current_video_index = -1
-            for i, entry in enumerate(existing_bookmarked_videos):
-                if entry['uuid'] == current_uuid:
+            for i, entry in enumerate(category_history):
+                if entry['video_uuid'] == current_uuid:
                     current_video_index = i
                     break
 
-            prev_video = None
+            found_video = None
             if current_video_index > 0:
-                prev_video_entry = existing_bookmarked_videos[current_video_index - 1]
-                prev_video = get_video_by_uuid(prev_video_entry['uuid'])
+                # Iterate backwards from (current_video_index - 1) to find an existing video
+                for i in range(current_video_index - 1, -1, -1):
+                    temp_video = get_video_by_uuid(category_history[i]['video_uuid'])
+                    if temp_video:
+                        found_video = temp_video
+                        break
             
-            if not prev_video:
-                # If no previous video in sequence, loop back to the last or get a random one
-                if existing_bookmarked_videos:
-                    prev_video = get_video_by_uuid(existing_bookmarked_videos[-1]['uuid']) # Loop to last
-                else:
-                    await callback_query.answer("No more saved videos. 😔", show_alert=True)
-                    return
+            if not found_video:
+                logger.info(f"User {user_id} reached the beginning of history for saved videos or no valid previous video found. Looping to last viewed.")
+                # If at the beginning of history, loop to the last viewed in this category history
+                if category_history:
+                    found_video = get_video_by_uuid(category_history[-1]['video_uuid'])
+                
+            if not found_video: # If still no video found (e.g., empty history or all invalid)
+                await callback_query.answer("No previous saved video found. 🧐", show_alert=True)
+                return
+            video = found_video # Assign found_video to video for the rest of the handler
+            
         else:
-            # Regular category behavior: get the previous video by upload timestamp
-            if category not in get_categories(): # Re-check if category is valid for non-saved videos
+            # --- MODIFIED: Regular category behavior: get previous chronological video ---
+            if category not in get_categories():
                 logger.warning(f"User {user_id} used invalid category '{category}' for prev video (non-saved).")
                 await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
                 return
 
-            prev_video = get_previous_video(current_uuid, category)
-            if not prev_video:
-                # If no previous video in sequence, get the last one in the category (loop)
-                last_video = list(media_collection.find({'category': category}).sort('timestamp', -1).limit(1))
-                if last_video:
-                    prev_video = last_video[0]
-                else:
-                    await callback_query.answer("No previous videos in this category. Try another! 😔", show_alert=True)
-                    return
-        
+            video = get_previous_video_chronological(current_uuid, category)
+            if not video:
+                await callback_query.answer("No previous videos in this category. Try another! 😔", show_alert=True)
+                return
+            
+        # Determine if the previous video was from the 'saved_videos' category to pass is_saved=True
+        is_saved_for_prev = (category == "saved_videos")
+            
         # Edit the existing message with the new video
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
             message_id_to_edit_or_delete=callback_query.message.id, # Edit the current message
             new_message_type="video",
-            video_data=prev_video,
-            reply_markup=video_nav_keyboard(prev_video['uuid'], category, user_id, is_saved=(category == "saved_videos"))
+            video_data=video,
+            reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved_for_prev)
         )
         
         if sent_success:
-            # We don't call save_history here because 'prev' is just showing the last one, not a new view.
-            logger.info(f"User {user_id} navigated to previous video {prev_video['uuid']} in category {prev_video['category']}.")
+            # We don't call save_history here for 'prev' because it's navigating history, not a new view.
+            logger.info(f"User {user_id} navigated to previous video {video['uuid']} in category {video['category']}.")
             await callback_query.answer()
         else:
             logger.error(f"User {user_id} failed to send previous video: {sent_message_or_error}.")
@@ -1876,31 +1885,6 @@ async def refer_btn(client: Client, message: Message):
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
         await handle_error(client, message, e)
-
-@app.on_callback_query(filters.regex(r"^show_referral_link$"))
-async def show_referral_link_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the 'Referrals' button click from the token earning keyboard."""
-    user_id = callback_query.from_user.id
-    logger.info(f"User {user_id} clicked 'Referrals' button from token earning keyboard.")
-
-    # Force Subscribe Check
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    try:
-        ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        await callback_query.message.edit_text(
-            f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
-            reply_markup=referral_keyboard(ref_link),
-            disable_web_page_preview=True
-        )
-        await callback_query.answer()
-        logger.info(f"User {user_id}: Referral link sent from token earning keyboard.")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to send referral link from token earning keyboard: {e}", exc_info=True)
-        await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
-
 
 @app.on_message(filters.regex("^💰 Buy Token$") & filters.private)
 async def buy_token_btn(client: Client, message: Message):
@@ -2410,7 +2394,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         except MessageIdInvalid:
             pass # Already deleted
         except Exception as e:
-            logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
+                logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
         clear_active_video_message(user_id) # Clear the state, forcing a fresh start
         await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
         return # Exit early
@@ -3041,7 +3025,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             "file_unique_id": file_unique_id,
             "category": category,
             "size_bytes": file_size,
-            "timestamp": get_current_time(), # Ensure timestamp is stored
+            "timestamp": get_current_time(), # Ensure timestamp is saved on upload
             "message_id": message_id_in_channel,
             "banned": False,
             "custom_caption": custom_caption # Store the custom caption
