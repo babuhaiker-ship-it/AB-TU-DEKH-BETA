@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAEu3sZPjBMV5KjgOJDi-2vU6xwE4ky-AE'
+    BOT_TOKEN = '7213744072:AAEu3sZPjBMV5KjgOJDi-2vU6xw3E4ky-AE'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot' # Ensure this is your bot's actual username without the 't.me/' or 'https://t.me/' prefix
@@ -38,7 +38,7 @@ class BotConfig:
     VIDEO_CHANNEL_ID = -1002621716446
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot' # This is the link for buying tokens
     ADMIN_IDS = [6612030110]
-    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial' # This link is no longer directly used in token_earning_keyboard, but kept for reference
+    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
@@ -787,12 +787,11 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
 
 def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
     """Keyboard for token earning options."""
-    # REFERRAL_LINK is constructed here for the button
-    referral_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{ad_url.split('=')[-1].split(':')[0]}" # Extract user ID from ad_url for referral
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh Token", url=ad_url)], # Changed button text
-        [InlineKeyboardButton("🔗 Refer & Earn", url=referral_link)], # Added Refer & Earn button
+        [InlineKeyboardButton("👆 Click Here To Refresh Token", url=ad_url)],
+        [InlineKeyboardButton("❓ How To Open Links?", url=config.TUTORIAL_LINK_2)],
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)],
+        # Removed Support Bot button as per request
     ])
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -1287,11 +1286,7 @@ async def get_video(client: Client, message: Message):
         
     if not user_has_token(user_id):
         logger.info(f"User {user_id} has no tokens, prompting earning options.")
-        # Changed the message and passed the message object to send_token_earning_options
-        await message.reply(
-            "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇",
-            reply_markup=token_earning_keyboard(f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{str_to_b64(f'{user_id}:{get_current_time() + config.TOKEN_EXPIRY}')}")
-        )
+        await send_token_earning_options(client, message)
         return
     
     # When 'Get Video' is clicked, we want to replace the current message (e.g., the main keyboard message)
