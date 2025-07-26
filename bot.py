@@ -789,6 +789,7 @@ def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
     """Keyboard for token earning options."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👆 Click Here To Refresh Token", url=ad_url)],
+        [InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")], # New inline button
         [InlineKeyboardButton("❓ How To Open Links?", url=config.TUTORIAL_LINK_2)],
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)],
         # Removed Support Bot button as per request
@@ -1497,7 +1498,6 @@ async def next_video(client: Client, callback_query: CallbackQuery):
     
     # Force Subscribe Check
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -1884,6 +1884,40 @@ async def refer_btn(client: Client, message: Message):
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
         await handle_error(client, message, e)
+
+# New callback query handler for the inline "Refer & Earn" button
+@app.on_callback_query(filters.regex(r"^refer_and_earn_inline$"))
+async def refer_and_earn_inline_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the inline 'Refer & Earn' button click from token earning options."""
+    user_id = callback_query.from_user.id
+    logger.info(f"User {user_id} clicked inline Refer & Earn button.")
+
+    # Force Subscribe Check
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    # Check and notify about premium status change
+    create_tracked_task(check_premium_status_and_notify(client, user_id))
+
+    try:
+        if await is_rate_limited(user_id):
+            await callback_query.answer("⚠️ You're requesting too quickly. Please wait a minute and try again. ⏳", show_alert=True)
+            logger.warning(f"User {user_id} hit rate limit in refer_and_earn_inline_callback.")
+            return
+
+        ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
+        await callback_query.message.reply(
+            f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
+            quote=True,
+            disable_web_page_preview=True
+        )
+        await callback_query.answer("Referral link sent! 🎁")
+        logger.info(f"User {user_id}: Inline referral link sent successfully.")
+    except Exception as e:
+        logger.error(f"User {user_id} failed to send inline referral link: {e}", exc_info=True)
+        await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
+
 
 @app.on_message(filters.regex("^💰 Buy Token$") & filters.private)
 async def buy_token_btn(client: Client, message: Message):
