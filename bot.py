@@ -50,6 +50,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # New: Link to the force subscribe channel
     MENU_EXPIRY_MINUTES = 60 # New: Menu will expire if inactive for this many minutes
     HISTORY_PER_CATEGORY_LIMIT = 5 # New: Limit for history entries per category
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 300 # 5 minutes for refresh token links to be valid
 
 try:
     config = BotConfig()
@@ -68,6 +69,7 @@ media_collection = db['media']
 history_collection = db['history'] # General history
 categories_collection = db['categories']
 settings_collection = db['settings'] # This collection will now store shortener config
+refresh_tokens_used_collection = db['refresh_tokens_used'] # New collection for one-time use links
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -79,6 +81,8 @@ media_collection.create_index([("size_bytes", ASCENDING)])
 media_collection.create_index([("timestamp", ASCENDING)]) # New index for chronological sorting
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
+refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True) # Index for ad_code
+refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2) # TTL index for cleanup
 
 # --- Pyrogram Client ---
 app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
@@ -909,12 +913,21 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             
         if timestamp < get_current_time():
             logger.warning(f"User {user_id} attempted to use expired token refresh link.")
+            # Mark the ad_code as used even if expired, to prevent future attempts with it
+            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
             return False, "This token refresh link has expired. ⏰"
+
+        # --- New: Check if ad_code has already been used ---
+        if refresh_tokens_used_collection.find_one({'ad_code': ad_code}):
+            logger.warning(f"User {user_id} attempted to reuse token refresh link: {ad_code}")
+            return False, "This token refresh link has already been used. Please generate a new one. 🔄"
             
         # Add a regular (non-premium) token
         added_token = add_token(user_id, config.REFRESH_BONUS * 86400, is_admin_granted=False)
         if added_token:
-            logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected.")
+            # Mark the ad_code as used
+            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
+            logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
             return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts 24 hours. Enjoy! 🍿"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
@@ -1310,11 +1323,14 @@ async def get_video(client: Client, message: Message):
         return
 
     logger.info(f"User {user_id} prompted to choose category.")
+
+    # Send "Please wait" message
+    temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
     
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        message_id_to_edit_or_delete=message_id_to_edit_or_delete, # Pass the message ID to be edited/deleted
+        message_id_to_edit_or_delete=temp_msg.id, # Edit the temp message
         new_message_type="text",
         text_content="🎬 <b>Choose a Category:</b>",
         reply_markup=category_keyboard()
@@ -1378,12 +1394,16 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
         return # Exit early
 
+    # Send "Please wait" message before fetching video
+    temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
+
     # Handle "saved_videos" category selection directly
     if category == "saved_videos":
         user = users_collection.find_one({'user_id': user_id})
         if not user or not user.get('bookmarked_videos'):
             await callback_query.answer("You haven't saved any videos yet. ❤️", show_alert=True)
-            await callback_query.message.edit_text(
+            await temp_msg.delete() # Delete "Please wait"
+            await callback_query.message.edit_text( # Edit original category menu
                 "You haven't saved any videos yet. ❤️",
                 reply_markup=category_keyboard() 
             )
@@ -1407,7 +1427,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
                 
         if not existing_bookmarked_videos:
             await callback_query.answer("You haven't saved any valid videos yet. ❤️", show_alert=True)
-            await callback_query.message.edit_text(
+            await temp_msg.delete() # Delete "Please wait"
+            await callback_query.message.edit_text( # Edit original category menu
                 "You haven't saved any valid videos yet. ❤️",
                 reply_markup=category_keyboard()
             )
@@ -1425,13 +1446,14 @@ async def select_category(client: Client, callback_query: CallbackQuery):
                 {'user_id': user_id},
                 {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
             )
+            await temp_msg.delete() # Delete "Please wait"
             return
 
         # Send the video directly, DELETING the category selection message and sending a NEW video message
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
-            message_id_to_edit_or_delete=callback_query.message.id, # Delete the current message
+            message_id_to_edit_or_delete=temp_msg.id, # Edit the temp message
             new_message_type="video",
             video_data=video,
             reply_markup=video_nav_keyboard(video['uuid'], "saved_videos", user_id, is_saved=True),
@@ -1441,39 +1463,64 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         if sent_success:
             save_history(user_id, video['uuid'], "saved_videos")
             await callback_query.answer()
+            # Delete the original category selection message if it's different from temp_msg
+            if callback_query.message.id != temp_msg.id:
+                try:
+                    await client.delete_messages(chat_id, callback_query.message.id)
+                except MessageIdInvalid:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete original category selection message {callback_query.message.id}: {e}")
         else:
             await callback_query.answer("❌ Failed to load saved video. Please try again. 😥", show_alert=True)
             clear_active_video_message(user_id)
+            await temp_msg.delete() # Delete "Please wait"
         return # Important: Exit after handling saved_videos category
 
     # Original logic for other categories
     if category not in get_categories():
         logger.warning(f"User {user_id} selected invalid category '{category}'.")
         await callback_query.answer("Category not found. Try again! 🧐", show_alert=True)
-        await callback_query.message.edit_text(
+        await temp_msg.delete() # Delete "Please wait"
+        await callback_query.message.edit_text( # Edit original category menu
             "Category not found. Try another! 🧐",
             reply_markup=category_keyboard()
         )
         return
     
-    # --- MODIFIED: Always get the first video by upload time for initial category selection ---
-    video = get_first_video_by_upload_time(category)
+    # --- MODIFIED: Get last viewed video for the category, or first if none ---
+    user_doc = users_collection.find_one({'user_id': user_id})
+    last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category)
+    
+    video = None
+    if last_viewed_uuid:
+        video = get_video_by_uuid(last_viewed_uuid)
+        if not video:
+            logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category} not found. Falling back to first video.")
+            # Clear invalid last viewed entry
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$unset': {f'last_viewed_per_category.{category}': ""}}
+            )
+    
+    if not video: # If no last viewed or last viewed was invalid
+        video = get_first_video_by_upload_time(category)
 
     if not video:
         logger.warning(f"No videos found in category '{category}' for user {user_id}.")
         await callback_query.answer("No videos in this category. Try another! 😔", show_alert=True)
-        await callback_query.message.edit_text(
+        await temp_msg.delete() # Delete "Please wait"
+        await callback_query.message.edit_text( # Edit original category menu
             "No videos in this category. Try another! 😔",
             reply_markup=category_keyboard()
         )
         return
     
     # Edit the existing message with the new video
-    # Changed force_new_message to True here to resolve the bug
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        message_id_to_edit_or_delete=callback_query.message.id, # Delete the current message
+        message_id_to_edit_or_delete=temp_msg.id, # Edit the temp message
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], category, user_id),
@@ -1484,10 +1531,19 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         save_history(user_id, video['uuid'], category) # This now updates last_viewed_per_category
         logger.info(f"User {user_id} selected category {category} and new video {video['uuid']} sent.")
         await callback_query.answer()
+        # Delete the original category selection message if it's different from temp_msg
+        if callback_query.message.id != temp_msg.id:
+            try:
+                await client.delete_messages(chat_id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete original category selection message {callback_query.message.id}: {e}")
     else:
         logger.error(f"User {user_id} failed to send video after category selection: {sent_message_or_error}. Clearing active video message.")
         await callback_query.answer("❌ Failed to load video. Please try again. 😥", show_alert=True)
         clear_active_video_message(user_id)
+        await temp_msg.delete() # Delete "Please wait"
 
 @app.on_callback_query(filters.regex(r"^next\|")) # Updated regex to match new format
 async def next_video(client: Client, callback_query: CallbackQuery):
@@ -1548,11 +1604,11 @@ async def next_video(client: Client, callback_query: CallbackQuery):
             return # Exit early
 
         video = None
-        # Handle "saved_videos" category (keep existing random logic for 'next')
+        # Handle "saved_videos" category (now follows chronological logic based on bookmarked_at)
         if category == "saved_videos":
-            user = users_collection.find_one({'user_id': user_id})
-            bookmarked_videos = user.get('bookmarked_videos', [])
-            
+            user_doc = users_collection.find_one({'user_id': user_id})
+            bookmarked_videos = user_doc.get('bookmarked_videos', [])
+
             # Filter out videos whose data might be missing from media_collection
             existing_bookmarked_videos = []
             for bookmark in bookmarked_videos:
@@ -1565,22 +1621,32 @@ async def next_video(client: Client, callback_query: CallbackQuery):
                         {'user_id': user_id},
                         {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
                     )
-
+            
             if not existing_bookmarked_videos:
                 await callback_query.answer("You have no saved videos. ❤️", show_alert=True)
                 return
             
-            # Randomly select a video from the *existing* bookmarked videos
-            selected_bookmark = random.choice(existing_bookmarked_videos)
-            video_uuid = selected_bookmark['uuid']
-            video = get_video_by_uuid(video_uuid)
+            # Sort by bookmarked_at to find the "next" chronologically saved video
+            existing_bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+            
+            current_video_index = -1
+            for i, entry in enumerate(existing_bookmarked_videos):
+                if entry['uuid'] == current_uuid:
+                    current_video_index = i
+                    break
+
+            if current_video_index != -1 and current_video_index < len(existing_bookmarked_videos) - 1:
+                # Get the next saved video in chronological order of bookmarking
+                video = get_video_by_uuid(existing_bookmarked_videos[current_video_index + 1]['uuid'])
+            else:
+                # Loop back to the first saved video if at the end or current not found
+                video = get_video_by_uuid(existing_bookmarked_videos[0]['uuid'])
             
             if not video:
-                # This should ideally not happen after filtering and re-getting, but for safety:
                 await callback_query.answer("Saved video not found. It may have been removed. 😔", show_alert=True)
                 users_collection.update_one(
                     {'user_id': user_id},
-                    {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+                    {'$pull': {'bookmarked_videos': {'uuid': current_uuid}}}
                 )
                 return
         else:
@@ -1679,52 +1745,51 @@ async def prev_video(client: Client, callback_query: CallbackQuery):
             return # Exit early
 
         video = None
-        # Handle "saved_videos" category (keep history-based logic for 'prev')
+        # Handle "saved_videos" category (now follows chronological logic based on bookmarked_at)
         if category == "saved_videos":
             user_doc = users_collection.find_one({'user_id': user_id})
-            if not user_doc or not user_doc.get('category_history') or category not in user_doc['category_history']:
-                logger.info(f"User {user_id} has no category history for '{category}' to navigate 'prev'.")
-                await callback_query.answer("No previous videos in your history for saved videos. 🧐", show_alert=True)
-                return
+            bookmarked_videos = user_doc.get('bookmarked_videos', [])
 
-            # Get the history for the current category, sorted by viewed_at (oldest first)
-            # This is the viewing history for saved videos
-            category_history = sorted(
-                user_doc['category_history'][category],
-                key=lambda x: x.get('viewed_at', datetime.min)
-            )
+            # Filter out videos whose data might be missing from media_collection
+            existing_bookmarked_videos = []
+            for bookmark in bookmarked_videos:
+                video_data = get_video_by_uuid(bookmark['uuid'])
+                if video_data:
+                    existing_bookmarked_videos.append(bookmark)
+                else:
+                    logger.warning(f"Saved video {bookmark['uuid']} for user {user_id} not found in media_collection during prev_video. Removing from bookmarks.")
+                    users_collection.update_one(
+                        {'user_id': user_id},
+                        {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
+                    )
             
-            if not category_history:
-                logger.info(f"User {user_id} has empty history for category '{category}' to navigate 'prev'.")
-                await callback_query.answer(f"No previous videos in saved history. 🧐", show_alert=True)
+            if not existing_bookmarked_videos:
+                await callback_query.answer("You have no saved videos. ❤️", show_alert=True)
                 return
-
-            # Find the index of the current video in the filtered history
+            
+            # Sort by bookmarked_at to find the "previous" chronologically saved video
+            existing_bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+            
             current_video_index = -1
-            for i, entry in enumerate(category_history):
-                if entry['video_uuid'] == current_uuid:
+            for i, entry in enumerate(existing_bookmarked_videos):
+                if entry['uuid'] == current_uuid:
                     current_video_index = i
                     break
 
-            found_video = None
-            if current_video_index > 0:
-                # Iterate backwards from (current_video_index - 1) to find an existing video
-                for i in range(current_video_index - 1, -1, -1):
-                    temp_video = get_video_by_uuid(category_history[i]['video_uuid'])
-                    if temp_video:
-                        found_video = temp_video
-                        break
+            if current_video_index != -1 and current_video_index > 0:
+                # Get the previous saved video in chronological order of bookmarking
+                video = get_video_by_uuid(existing_bookmarked_videos[current_video_index - 1]['uuid'])
+            else:
+                # Loop back to the last saved video if at the beginning or current not found
+                video = get_video_by_uuid(existing_bookmarked_videos[-1]['uuid'])
             
-            if not found_video:
-                logger.info(f"User {user_id} reached the beginning of history for saved videos or no valid previous video found. Looping to last viewed.")
-                # If at the beginning of history, loop to the last viewed in this category history
-                if category_history:
-                    found_video = get_video_by_uuid(category_history[-1]['video_uuid'])
-                
-            if not found_video: # If still no video found (e.g., empty history or all invalid)
-                await callback_query.answer("No previous saved video found. 🧐", show_alert=True)
+            if not video:
+                await callback_query.answer("Saved video not found. It may have been removed. 😔", show_alert=True)
+                users_collection.update_one(
+                    {'user_id': user_id},
+                    {'$pull': {'bookmarked_videos': {'uuid': current_uuid}}}
+                )
                 return
-            video = found_video # Assign found_video to video for the rest of the handler
             
         else:
             # --- MODIFIED: Regular category behavior: get previous chronological video ---
@@ -1973,7 +2038,8 @@ async def refresh_token_btn(client: Client, message: Message):
             return
 
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
-        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
+        # The ad_code now includes a timestamp to make it unique and allow for expiry
+        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         
         # Use the updated get_shortener_config_and_shorten_url
@@ -2026,7 +2092,7 @@ async def send_token_earning_options(client: Client, message: Message):
             logger.warning(f"User {user_id} hit rate limit in send_token_earning_options.")
             return
 
-        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.TOKEN_EXPIRY}")
+        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         
         # Use the updated get_shortener_config_and_shorten_url
@@ -2543,7 +2609,7 @@ async def clear_all_saved_videos_callback(client: Client, callback_query: Callba
         logger.info(f"User {user_id} successfully cleared all saved videos.")
     except Exception as e:
         logger.error(f"Error clearing all saved videos for user {user_id}: {e}", exc_info=True)
-        await callback_query.answer("❌ Failed to clear saved videos. Please try again. 😥", show_alert=True)
+        await callback_query.answer("❌ Failed to clear saved videos. Please try again. 🐛", show_alert=True)
         await callback_query.message.edit_text("❌ Failed to clear saved videos. Please try again. 😥")
 
 @app.on_callback_query(filters.regex(r"^cancel_clear_saved$"))
@@ -3517,6 +3583,24 @@ async def cleanup_expired_menus():
         except Exception as e:
             logger.error(f"Error during sleep in cleanup_expired_menus: {e}", exc_info=True)
 
+async def cleanup_used_refresh_tokens():
+    """Periodically cleans up old used refresh token entries."""
+    while True:
+        try:
+            now = datetime.utcnow()
+            # Delete documents older than 2 * REFRESH_TOKEN_LINK_EXPIRY_SECONDS
+            # This ensures that even if a link is used immediately, it's cleaned up after a reasonable time
+            # and prevents the collection from growing indefinitely.
+            delete_threshold = now - timedelta(seconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
+            result = refresh_tokens_used_collection.delete_many({'used_at': {'$lt': delete_threshold}})
+            logger.info(f"Cleaned up {result.deleted_count} old used refresh token entries.")
+        except asyncio.CancelledError:
+            logger.info("cleanup_used_refresh_tokens task cancelled gracefully.")
+            break
+        except Exception as e:
+            logger.error(f"Error in cleanup_used_refresh_tokens task: {e}", exc_info=True)
+        
+        await asyncio.sleep(config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS) # Run every REFRESH_TOKEN_LINK_EXPIRY_SECONDS
 
 async def verify_and_cleanup_media():
     """Periodically verifies if media files still exist in the channel and logs missing/inaccessible entries, but does NOT delete anything."""
@@ -3586,6 +3670,7 @@ async def main_bot_logic():
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus()) # Schedule the new menu cleanup task
+    create_tracked_task(cleanup_used_refresh_tokens()) # Schedule cleanup for used refresh tokens
 
     logger.info("Background tasks initiated. Bot is now fully operational.")
 
