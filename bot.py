@@ -75,7 +75,8 @@ media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
-media_collection.create_index([("timestamp", ASCENDING)])
+# IMPORTANT: New index for sequential navigation within categories
+media_collection.create_index([("category", ASCENDING), ("sequence_number", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True)
@@ -398,14 +399,13 @@ def delete_category(name: str) -> tuple[bool, str, int]:
 
 # --- Video Navigation ---
 
-def get_first_video_by_upload_time(category: str) -> dict | None:
+def get_first_video_by_sequence_number(category: str) -> dict | None:
     """
-    Retrieves the very first video ever uploaded to the specified category,
-    based on its timestamp.
+    Retrieves the first video in the specified category based on its sequence_number.
     """
     video = media_collection.find_one(
         {'category': category},
-        sort=[('timestamp', ASCENDING)]
+        sort=[('sequence_number', ASCENDING)]
     )
     return video
 
@@ -447,10 +447,10 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
             return video, current_video_index + 1, total_videos
         return None, 0, 0
 
-    else: # Regular category navigation
+    else: # Regular category navigation, use sequence_number for ordering
         all_videos_in_category = list(media_collection.find(
             {'category': category},
-            sort=[('timestamp', ASCENDING)]
+            sort=[('sequence_number', ASCENDING)]
         ))
         
         total_videos = len(all_videos_in_category)
@@ -470,55 +470,54 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
 
 def get_next_video_chronological(current_uuid: str, category: str) -> dict | None:
     """
-    Retrieves the video uploaded immediately after the current video in the same category,
-    based on timestamp. Loops to the first video if at the end.
+    Retrieves the video immediately after the current video in the same category,
+    based on sequence_number. Loops to the first video if at the end.
     """
-    current_video = media_collection.find_one({'uuid': current_uuid})
-    if not current_video:
-        logger.warning(f"Current video {current_uuid} not found for next chronological lookup. Attempting to get first video.")
-        return get_first_video_by_upload_time(category)
+    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
+    if not current_video or 'sequence_number' not in current_video:
+        logger.warning(f"Current video {current_uuid} not found or missing sequence_number for next chronological lookup. Attempting to get first video.")
+        return get_first_video_by_sequence_number(category)
 
-    current_timestamp = current_video.get('timestamp', 0)
+    current_sequence = current_video['sequence_number']
 
     next_video = media_collection.find_one(
-        {'category': category, 'timestamp': {'$gt': current_timestamp}},
-        sort=[('timestamp', ASCENDING)]
+        {'category': category, 'sequence_number': current_sequence + 1},
+        sort=[('sequence_number', ASCENDING)]
     )
 
     if next_video:
         return next_video
     else:
-        logger.info(f"End of videos reached for category '{category}'. Looping to first video.")
-        return get_first_video_by_upload_time(category)
+        logger.info(f"End of videos reached for category '{category}' (sequence_number). Looping to first video.")
+        return get_first_video_by_sequence_number(category)
 
 def get_previous_video_chronological(current_uuid: str, category: str) -> dict | None:
     """
-    Retrieves the video uploaded immediately before the current video in the same category,
-    based on timestamp. Loops to the last video if at the beginning.
+    Retrieves the video immediately before the current video in the same category,
+    based on sequence_number. Loops to the last video if at the beginning.
     """
-    current_video = media_collection.find_one({'uuid': current_uuid})
-    if not current_video:
-        logger.warning(f"Current video {current_uuid} not found for previous chronological lookup. Attempting to get last video.")
+    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
+    if not current_video or 'sequence_number' not in current_video:
+        logger.warning(f"Current video {current_uuid} not found or missing sequence_number for previous chronological lookup. Attempting to get last video.")
         return media_collection.find_one(
             {'category': category},
-            sort=[('timestamp', DESCENDING)]
+            sort=[('sequence_number', DESCENDING)]
         )
 
-    current_timestamp = current_video.get('timestamp', float('inf'))
+    current_sequence = current_video['sequence_number']
 
-    prev_video = media_collection.find_one(
-        {'category': category, 'timestamp': {'$lt': current_timestamp}},
-        sort=[('timestamp', DESCENDING)]
-    )
-
-    if prev_video:
-        return prev_video
+    if current_sequence <= 1: # Already at the first video or before it
+        logger.info(f"Beginning of videos reached for category '{category}' (sequence_number). Looping to last video.")
+        return media_collection.find_one(
+            {'category': category},
+            sort=[('sequence_number', DESCENDING)]
+        )
     else:
-        logger.info(f"Beginning of videos reached for category '{category}'. Looping to last video.")
-        return media_collection.find_one(
-            {'category': category},
-            sort=[('timestamp', DESCENDING)]
+        prev_video = media_collection.find_one(
+            {'category': category, 'sequence_number': current_sequence - 1},
+            sort=[('sequence_number', DESCENDING)]
         )
+        return prev_video # This should not be None if current_sequence > 1 and data is consistent
 
 def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
     """
@@ -1459,7 +1458,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             )
     
     if not video:
-        video = get_first_video_by_upload_time(category_name)
+        video = get_first_video_by_sequence_number(category_name) # Use sequence number for first video
 
     if not video:
         logger.warning(f"No videos found in category '{category_name}' for user {user_id}.")
@@ -1680,14 +1679,10 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 video = get_previous_saved_video_chronological(user_id, current_uuid, category)
 
             if not video:
-                await callback_query.answer("No more saved videos in this category. Starting from the beginning/end. ❤️", show_alert=True)
-                # If no video found (e.g., category became empty), redirect to saved categories menu
-                # This case is handled by get_next/previous_saved_video_chronological returning None
-                # and the subsequent check, which will then trigger the "no more saved videos" message.
-                # If it loops, video will not be None.
+                await callback_query.answer("No more saved videos in this category. Looping to the beginning/end. ❤️", show_alert=True)
                 return
             
-        else: # Not a saved video, use regular chronological navigation
+        else: # Not a saved video, use regular chronological navigation based on sequence_number
             if category not in get_categories():
                 logger.warning(f"User {user_id} used invalid category '{category}' for navigation (non-saved).")
                 await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
@@ -1698,7 +1693,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             elif action == "prev":
                 video = get_previous_video_chronological(current_uuid, category)
 
-            if not video:
+            if not video: # This case should ideally not be hit with looping logic
                 await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
                 return
         
@@ -2241,9 +2236,8 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                         {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
                     )
             
-            # After removing, check if there are any saved videos left in the *same category*
-            # or if we should go back to the saved categories menu.
             current_video_info = media_collection.find_one({'uuid': video_uuid})
+            
             if current_video_info:
                 current_category_of_removed_video = current_video_info.get('category')
                 
@@ -2898,6 +2892,15 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
 
         video_uuid = str(uuid.uuid4())
         
+        # Determine the next sequence number for this category
+        last_video_in_category = media_collection.find_one(
+            {'category': category},
+            sort=[('sequence_number', DESCENDING)]
+        )
+        next_sequence_number = 1
+        if last_video_in_category and 'sequence_number' in last_video_in_category:
+            next_sequence_number = last_video_in_category['sequence_number'] + 1
+
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
         try:
@@ -2934,14 +2937,15 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             "file_unique_id": file_unique_id,
             "category": category,
             "size_bytes": file_size,
-            "timestamp": get_current_time(),
+            "timestamp": get_current_time(), # Keep timestamp for general info, but sequence_number for order
+            "sequence_number": next_sequence_number, # NEW: Store sequence number
             "message_id": message_id_in_channel,
             "banned": False,
             "custom_caption": custom_caption
         }
         media_collection.insert_one(video_data)
         batch_add_state[user_id]['count'] = batch_add_state[user_id].get('count', 0) + 1
-        logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id}. Message ID in channel: {message_id_in_channel}")
+        logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id} with sequence_number {next_sequence_number}. Message ID in channel: {message_id_in_channel}")
         
         admin_reply_caption = f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>! 🎉\n"
         if custom_caption:
@@ -2949,6 +2953,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         admin_reply_caption += (
             f"📁 Category: {html.escape(category)}\n"
             f"📊 Size: {format_size(file_size)}\n"
+            f"🔢 Sequence: {next_sequence_number}\n" # Display sequence number
             f"🆔 File ID: <code>{file_id}</code>\n"
             f"Videos added in this batch: <b>{batch_add_state[user_id]['count']}</b> 🔢"
         )
