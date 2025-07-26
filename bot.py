@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid
 from pyrogram.enums import ChatMemberStatus
@@ -110,33 +110,6 @@ def create_tracked_task(coro):
     task.add_done_callback(active_tasks.discard)
     logger.debug(f"Task {task.get_name()} created and tracked. Total active tasks: {len(active_tasks)}")
     return task
-
-# No longer used, but kept for reference if needed later.
-# async def cancel_all_active_tasks():
-#     """
-#     Cancels all tasks currently being tracked in the_active_tasks set.
-#     Awaits their completion gracefully (or handles CancelledError).
-#     """
-#     if not active_tasks:
-#         logger.info("No active tasks to cancel.")
-#         return
-
-#     logger.info(f"Attempting to cancel {len(active_tasks)} active tasks...")
-#     tasks_to_cancel = list(active_tasks) 
-    
-#     for task in tasks_to_cancel:
-#         if not task.done():
-#             task.cancel()
-#             logger.debug(f"Task {task.get_name()} cancellation requested.")
-            
-#     try:
-#         await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-#         logger.info("All active tasks cancelled or completed.")
-#     except Exception as e:
-#         logger.error(f"Error during asyncio.gather for task cancellation: {e}", exc_info=True)
-#     finally:
-#         active_tasks.clear()
-#         logger.info("Active tasks set cleared.")
 
 # --- Admin Check Utility ---
 def is_admin(user_id: int) -> bool:
@@ -745,7 +718,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
     if row:
         buttons.append(row)
 
-    buttons.append([InlineKeyboardButton("🔖 Saved Videos", callback_data="cat_saved_videos")])
+    # Removed "🔖 Saved Videos" from this keyboard as it's now a main menu button
     return InlineKeyboardMarkup(buttons)
 
 def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: bool = False) -> InlineKeyboardMarkup:
@@ -1269,11 +1242,11 @@ async def get_video(client: Client, message: Message):
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
-    """Handles category selection callback (including initial 'Saved Videos' button)."""
+    """Handles category selection callback (for main categories)."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
-    category_callback_data = callback_query.data[4:] # e.g., "saved_videos" or "Action"
-    logger.info(f"User {user_id} selected category: {category_callback_data}.")
+    category_name = callback_query.data[4:] # e.g., "Action"
+    logger.info(f"User {user_id} selected category: {category_name}.")
     
     if not await check_membership(client, user_id):
         await callback_query.answer("You must join our channel first!", show_alert=True)
@@ -1318,47 +1291,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     # Send "Please wait" message before fetching video/menu
     temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
 
-    if category_callback_data == "saved_videos":
-        # If "Saved Videos" is selected, show categories from saved videos
-        saved_cats_keyboard = saved_category_keyboard(user_id)
-        if saved_cats_keyboard.inline_keyboard[0][0].callback_data in ["no_saved_videos", "no_valid_saved_videos"]:
-            # No saved videos at all, or no valid ones
-            await callback_query.answer(saved_cats_keyboard.inline_keyboard[0][0].text, show_alert=True)
-            await temp_msg.delete()
-            await callback_query.message.edit_text(
-                "You haven't saved any videos yet. ❤️",
-                reply_markup=category_keyboard() # Go back to main category selection
-            )
-            return
-
-        sent_success, sent_message_or_error = await send_and_replace_message(
-            client,
-            chat_id,
-            message_id_to_edit_or_delete=temp_msg.id,
-            new_message_type="text",
-            text_content="🗂️ <b>Select a Category from your Saved Videos:</b>",
-            reply_markup=saved_cats_keyboard,
-            force_new_message=True
-        )
-        if sent_success:
-            await callback_query.answer("Select a saved category.")
-            # Delete the original category selection message if it's different from temp_msg
-            if callback_query.message.id != temp_msg.id:
-                try:
-                    await client.delete_messages(chat_id, callback_query.message.id)
-                except MessageIdInvalid:
-                    pass
-                except Exception as e:
-                    logger.warning(f"Failed to delete original category selection message {callback_query.message.id}: {e}")
-        else:
-            await callback_query.answer("❌ Failed to load saved categories. Please try again. 😥", show_alert=True)
-            clear_active_video_message(user_id)
-            await temp_msg.delete()
-        return
-
-    # Original logic for other categories (non-saved videos path)
-    if category_callback_data not in get_categories():
-        logger.warning(f"User {user_id} selected invalid category '{category_callback_data}'.")
+    if category_name not in get_categories():
+        logger.warning(f"User {user_id} selected invalid category '{category_name}'.")
         await callback_query.answer("Category not found. Try again! 🧐", show_alert=True)
         await temp_msg.delete()
         await callback_query.message.edit_text(
@@ -1368,23 +1302,23 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         return
     
     user_doc = users_collection.find_one({'user_id': user_id})
-    last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category_callback_data)
+    last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category_name)
     
     video = None
     if last_viewed_uuid:
         video = get_video_by_uuid(last_viewed_uuid)
         if not video:
-            logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category_callback_data} not found. Falling back to first video.")
+            logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category_name} not found. Falling back to first video.")
             users_collection.update_one(
                 {'user_id': user_id},
-                {'$unset': {f'last_viewed_per_category.{category_callback_data}': ""}}
+                {'$unset': {f'last_viewed_per_category.{category_name}': ""}}
             )
     
     if not video:
-        video = get_first_video_by_upload_time(category_callback_data)
+        video = get_first_video_by_upload_time(category_name)
 
     if not video:
-        logger.warning(f"No videos found in category '{category_callback_data}' for user {user_id}.")
+        logger.warning(f"No videos found in category '{category_name}' for user {user_id}.")
         await callback_query.answer("No videos in this category. Try another! 😔", show_alert=True)
         await temp_msg.delete()
         await callback_query.message.edit_text(
@@ -1399,13 +1333,13 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         message_id_to_edit_or_delete=temp_msg.id,
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], category_callback_data, user_id, is_saved=False), # Not from saved_videos path
+        reply_markup=video_nav_keyboard(video['uuid'], category_name, user_id, is_saved=False), # Not from saved_videos path
         force_new_message=True
     )
     
     if sent_success:
-        save_history(user_id, video['uuid'], category_callback_data)
-        logger.info(f"User {user_id} selected category {category_callback_data} and new video {video['uuid']} sent.")
+        save_history(user_id, video['uuid'], category_name)
+        logger.info(f"User {user_id} selected category {category_name} and new video {video['uuid']} sent.")
         await callback_query.answer()
         if callback_query.message.id != temp_msg.id:
             try:
@@ -1669,10 +1603,6 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         )
         
         if sent_success:
-            # Only save history if it's a new "view" (e.g., from category selection or regular next/prev)
-            # For saved video navigation, we don't update last_viewed_per_category as it's a "browse" within saved.
-            # However, the general history collection might still be useful for total views.
-            # For now, keeping save_history for all successful video displays.
             save_history(user_id, video['uuid'], category)
             logger.info(f"User {user_id} navigated to {action} video {video['uuid']} in category {category}.")
             await callback_query.answer()
