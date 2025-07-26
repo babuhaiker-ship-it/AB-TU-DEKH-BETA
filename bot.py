@@ -409,6 +409,65 @@ def get_first_video_by_upload_time(category: str) -> dict | None:
     )
     return video
 
+def get_video_by_uuid(uuid_: str) -> dict | None:
+    """Retrieves a video by its UUID."""
+    return media_collection.find_one({'uuid': uuid_})
+
+def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_id: int = None) -> tuple[dict | None, int, int]:
+    """
+    Retrieves a video and its position (index + total) within its category,
+    considering if it's a regular or saved video.
+    Returns (video_data, current_position, total_videos).
+    """
+    if is_saved and user_id is not None:
+        user_doc = users_collection.find_one({'user_id': user_id})
+        bookmarked_videos = user_doc.get('bookmarked_videos', [])
+        
+        # Filter for the specific category and validity, then sort by bookmarked_at
+        filtered_saved_videos = []
+        for bookmark in bookmarked_videos:
+            video_data = get_video_by_uuid(bookmark['uuid'])
+            if video_data and video_data.get('category') == category:
+                filtered_saved_videos.append(bookmark)
+        
+        filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+        
+        total_videos = len(filtered_saved_videos)
+        if not total_videos:
+            return None, 0, 0
+
+        current_video_index = -1
+        for i, entry in enumerate(filtered_saved_videos):
+            if entry['uuid'] == video_uuid:
+                current_video_index = i
+                break
+        
+        if current_video_index != -1:
+            video = get_video_by_uuid(video_uuid)
+            return video, current_video_index + 1, total_videos
+        return None, 0, 0
+
+    else: # Regular category navigation
+        all_videos_in_category = list(media_collection.find(
+            {'category': category},
+            sort=[('timestamp', ASCENDING)]
+        ))
+        
+        total_videos = len(all_videos_in_category)
+        if not total_videos:
+            return None, 0, 0
+
+        current_video_index = -1
+        for i, video_doc in enumerate(all_videos_in_category):
+            if video_doc['uuid'] == video_uuid:
+                current_video_index = i
+                break
+        
+        if current_video_index != -1:
+            video = all_videos_in_category[current_video_index]
+            return video, current_video_index + 1, total_videos
+        return None, 0, 0
+
 def get_next_video_chronological(current_uuid: str, category: str) -> dict | None:
     """
     Retrieves the video uploaded immediately after the current video in the same category,
@@ -461,9 +520,80 @@ def get_previous_video_chronological(current_uuid: str, category: str) -> dict |
             sort=[('timestamp', DESCENDING)]
         )
 
-def get_video_by_uuid(uuid_: str) -> dict | None:
-    """Retrieves a video by its UUID."""
-    return media_collection.find_one({'uuid': uuid_})
+def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+    """
+    Retrieves the next saved video for a user in a specific category,
+    based on their bookmarking order. Loops to the first if at the end.
+    """
+    user_doc = users_collection.find_one({'user_id': user_id})
+    if not user_doc or not user_doc.get('bookmarked_videos'):
+        return None
+
+    bookmarked_videos = user_doc['bookmarked_videos']
+    
+    # Filter for the specific category and validity, then sort by bookmarked_at
+    filtered_saved_videos = []
+    for bookmark in bookmarked_videos:
+        video_data = get_video_by_uuid(bookmark['uuid'])
+        if video_data and video_data.get('category') == category:
+            filtered_saved_videos.append(bookmark)
+    
+    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+
+    if not filtered_saved_videos:
+        return None
+
+    current_video_index = -1
+    for i, entry in enumerate(filtered_saved_videos):
+        if entry['uuid'] == current_uuid:
+            current_video_index = i
+            break
+
+    if current_video_index == -1: # Current video not found in the filtered list, return first
+        return get_video_by_uuid(filtered_saved_videos[0]['uuid'])
+    
+    next_index = (current_video_index + 1) % len(filtered_saved_videos)
+    next_video_uuid = filtered_saved_videos[next_index]['uuid']
+    
+    return get_video_by_uuid(next_video_uuid)
+
+def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+    """
+    Retrieves the previous saved video for a user in a specific category,
+    based on their bookmarking order. Loops to the last if at the beginning.
+    """
+    user_doc = users_collection.find_one({'user_id': user_id})
+    if not user_doc or not user_doc.get('bookmarked_videos'):
+        return None
+
+    bookmarked_videos = user_doc['bookmarked_videos']
+    
+    # Filter for the specific category and validity, then sort by bookmarked_at
+    filtered_saved_videos = []
+    for bookmark in bookmarked_videos:
+        video_data = get_video_by_uuid(bookmark['uuid'])
+        if video_data and video_data.get('category') == category:
+            filtered_saved_videos.append(bookmark)
+    
+    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+
+    if not filtered_saved_videos:
+        return None
+
+    current_video_index = -1
+    for i, entry in enumerate(filtered_saved_videos):
+        if entry['uuid'] == current_uuid:
+            current_video_index = i
+            break
+
+    if current_video_index == -1: # Current video not found in the filtered list, return last
+        return get_video_by_uuid(filtered_saved_videos[-1]['uuid'])
+    
+    prev_index = (current_video_index - 1 + len(filtered_saved_videos)) % len(filtered_saved_videos)
+    prev_video_uuid = filtered_saved_videos[prev_index]['uuid']
+    
+    return get_video_by_uuid(prev_video_uuid)
+
 
 def save_history(user_id: int, video_uuid: str, category: str):
     """
@@ -508,7 +638,7 @@ def clear_active_video_message(user_id: int):
         del active_video_message[user_id]
         logger.info(f"Active video message cleared for user {user_id}.")
 
-async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False) -> tuple[bool, Message | str]:
+async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False, current_position: int = 0, total_videos: int = 0) -> tuple[bool, Message | str]:
     """
     Attempts to edit an existing message or deletes the old message (if provided) and sends a new one.
     Updates the active_video_message tracking.
@@ -529,6 +659,9 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     caption_text = video_data['custom_caption']
                 elif video_data.get('category'):
                     caption_text = f"Category: {html.escape(video_data['category'])}"
+                
+                if total_videos > 0:
+                    caption_text = f"#{current_position} of {total_videos}\n" + (caption_text if caption_text else "")
 
                 try:
                     sent_message = await client.edit_message_media(
@@ -617,6 +750,9 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     caption_text = video_data['custom_caption']
                 elif video_data.get('category'):
                     caption_text = f"Category: {html.escape(video_data['category'])}"
+
+                if total_videos > 0:
+                    caption_text = f"#{current_position} of {total_videos}\n" + (caption_text if caption_text else "")
                 
                 try:
                     sent_message = await client.copy_message(
@@ -1046,6 +1182,12 @@ async def start_cmd(client: Client, message: Message):
                     message_id_to_edit_or_delete = message.id
                     
                     is_saved_video_link = (deep_link_type == 'view_saved_video')
+                    
+                    # Get position for display
+                    video_to_display, current_position, total_videos = get_video_and_position(
+                        video['uuid'], video['category'], is_saved_video_link, user_id
+                    )
+
                     sent_success, sent_message_or_error = await send_and_replace_message(
                         client,
                         message.chat.id,
@@ -1053,7 +1195,9 @@ async def start_cmd(client: Client, message: Message):
                         new_message_type="video",
                         video_data=video,
                         reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved_video_link),
-                        force_new_message=True
+                        force_new_message=True,
+                        current_position=current_position,
+                        total_videos=total_videos
                     )
                     
                     if sent_success:
@@ -1327,6 +1471,11 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         )
         return
     
+    # Get position for display
+    video_to_display, current_position, total_videos = get_video_and_position(
+        video['uuid'], category_name, False, user_id
+    )
+
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
@@ -1334,7 +1483,9 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], category_name, user_id, is_saved=False), # Not from saved_videos path
-        force_new_message=True
+        force_new_message=True,
+        current_position=current_position,
+        total_videos=total_videos
     )
     
     if sent_success:
@@ -1437,6 +1588,11 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         )
         return
     
+    # Get position for display
+    video_to_display_with_pos, current_position, total_videos = get_video_and_position(
+        video_to_display['uuid'], selected_category, True, user_id
+    )
+
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
@@ -1444,7 +1600,9 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         new_message_type="video",
         video_data=video_to_display,
         reply_markup=video_nav_keyboard(video_to_display['uuid'], selected_category, user_id, is_saved=True),
-        force_new_message=True # Force new message for clean transition
+        force_new_message=True, # Force new message for clean transition
+        current_position=current_position,
+        total_videos=total_videos
     )
 
     if sent_success:
@@ -1516,66 +1674,17 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 
         video = None
         if is_saved:
-            user_doc = users_collection.find_one({'user_id': user_id})
-            bookmarked_videos = user_doc.get('bookmarked_videos', [])
-
-            # Filter for the specific category AND validity
-            existing_bookmarked_videos_in_category = []
-            for bookmark in bookmarked_videos:
-                video_data = get_video_by_uuid(bookmark['uuid'])
-                if video_data and video_data.get('category') == category:
-                    existing_bookmarked_videos_in_category.append(bookmark)
-                elif not video_data: # Clean up invalid bookmarks
-                    users_collection.update_one(
-                        {'user_id': user_id},
-                        {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
-                    )
-            
-            if not existing_bookmarked_videos_in_category:
-                await callback_query.answer(f"No saved videos found in category '{html.escape(category)}'. ❤️", show_alert=True)
-                # Redirect to saved categories menu if no videos left in this specific saved category
-                await send_and_replace_message(
-                    client,
-                    chat_id,
-                    message_id_to_edit_or_delete=callback_query.message.id,
-                    new_message_type="text",
-                    text_content="🗂️ <b>Select a Category from your Saved Videos:</b>",
-                    reply_markup=saved_category_keyboard(user_id)
-                )
-                return
-            
-            # Sort by bookmarked_at to ensure chronological navigation of saved videos
-            existing_bookmarked_videos_in_category.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
-            
-            current_video_index = -1
-            for i, entry in enumerate(existing_bookmarked_videos_in_category):
-                if entry['uuid'] == current_uuid:
-                    current_video_index = i
-                    break
-
-            if current_video_index == -1: # Current video not found in the filtered list
-                logger.warning(f"Current video {current_uuid} not found in saved category {category} for user {user_id}. Defaulting to first.")
-                video_to_fetch_uuid = existing_bookmarked_videos_in_category[0]['uuid']
-            elif action == "next":
-                if current_video_index < len(existing_bookmarked_videos_in_category) - 1:
-                    video_to_fetch_uuid = existing_bookmarked_videos_in_category[current_video_index + 1]['uuid']
-                else: # Loop back to the first
-                    video_to_fetch_uuid = existing_bookmarked_videos_in_category[0]['uuid']
+            if action == "next":
+                video = get_next_saved_video_chronological(user_id, current_uuid, category)
             elif action == "prev":
-                if current_video_index > 0:
-                    video_to_fetch_uuid = existing_bookmarked_videos_in_category[current_video_index - 1]['uuid']
-                else: # Loop back to the last
-                    video_to_fetch_uuid = existing_bookmarked_videos_in_category[-1]['uuid']
-            
-            video = get_video_by_uuid(video_to_fetch_uuid)
-            
+                video = get_previous_saved_video_chronological(user_id, current_uuid, category)
+
             if not video:
-                await callback_query.answer("Saved video not found. It may have been removed. 😔", show_alert=True)
-                # Clean up the invalid bookmark
-                users_collection.update_one(
-                    {'user_id': user_id},
-                    {'$pull': {'bookmarked_videos': {'uuid': video_to_fetch_uuid}}}
-                )
+                await callback_query.answer("No more saved videos in this category. Starting from the beginning/end. ❤️", show_alert=True)
+                # If no video found (e.g., category became empty), redirect to saved categories menu
+                # This case is handled by get_next/previous_saved_video_chronological returning None
+                # and the subsequent check, which will then trigger the "no more saved videos" message.
+                # If it loops, video will not be None.
                 return
             
         else: # Not a saved video, use regular chronological navigation
@@ -1593,13 +1702,20 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
                 return
         
+        # Get position for display
+        video_to_display_with_pos, current_position, total_videos = get_video_and_position(
+            video['uuid'], category, is_saved, user_id
+        )
+
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
             message_id_to_edit_or_delete=callback_query.message.id,
             new_message_type="video",
             video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved)
+            reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
+            current_position=current_position,
+            total_videos=total_videos
         )
         
         if sent_success:
@@ -2144,6 +2260,10 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                     next_video = get_video_by_uuid(next_video_uuid)
                     
                     if next_video:
+                        # Get position for display
+                        video_to_display_with_pos, current_position, total_videos = get_video_and_position(
+                            next_video['uuid'], current_category_of_removed_video, True, user_id
+                        )
                         sent_success, sent_message_or_error = await send_and_replace_message(
                             client,
                             chat_id,
@@ -2151,7 +2271,9 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                             new_message_type="video",
                             video_data=next_video,
                             reply_markup=video_nav_keyboard(next_video['uuid'], current_category_of_removed_video, user_id, is_saved=True),
-                            force_new_message=True
+                            force_new_message=True,
+                            current_position=current_position,
+                            total_videos=total_videos
                         )
                         if not sent_success:
                             await client.send_message(chat_id, "❌ Failed to load next saved video. Please try again. 😥")
@@ -2245,6 +2367,11 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
         )
         return
+    
+    # Get position for display
+    video_to_display_with_pos, current_position, total_videos = get_video_and_position(
+        video['uuid'], video['category'], True, user_id
+    )
 
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
@@ -2253,7 +2380,9 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=True),
-        force_new_message=True
+        force_new_message=True,
+        current_position=current_position,
+        total_videos=total_videos
     )
 
     if sent_success:
