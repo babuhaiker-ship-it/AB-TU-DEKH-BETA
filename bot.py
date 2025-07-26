@@ -355,8 +355,7 @@ def validate_category_name(name: str) -> tuple[bool, str]:
     """
     if not name:
         return False, "Category name cannot be empty."
-    # Removed regex to allow emojis and spaces.
-    # Max length check remains to prevent excessively long names in UI/DB.
+    # Allowing more characters, but still limiting length
     if len(name) > 64: # Increased max length slightly for longer names/emojis
         return False, "Category name cannot be longer than 64 characters."
     return True, ""
@@ -470,6 +469,9 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
         
         if current_video_index != -1:
             video = all_videos_in_category[current_video_index]
+            # Added log for missing sequence_number during navigation
+            if 'sequence_number' not in video:
+                logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number' but is being retrieved for navigation. This indicates a potential data inconsistency or failed migration.")
             return video, current_video_index + 1, total_videos
         return None, 0, 0
 
@@ -2918,6 +2920,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         next_sequence_number = 1
         if last_video_in_category and 'sequence_number' in last_video_in_category:
             next_sequence_number = last_video_in_category['sequence_number'] + 1
+        logger.info(f"Calculated next_sequence_number for category '{category}': {next_sequence_number}") # Added log
 
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
