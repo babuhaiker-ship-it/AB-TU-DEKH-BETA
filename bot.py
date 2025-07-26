@@ -83,7 +83,8 @@ refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=Tru
 refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
 
 # --- Pyrogram Client ---
-app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+# CORRECTED: Changed session file path from /data/spicynyraa to ./spicynyraa
+app = Client("./spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -157,12 +158,12 @@ async def send_force_subscribe_message(client: Client, chat_id: int):
 # --- Utility Functions ---
 def str_to_b64(string: str) -> str:
     """Encodes a string to URL-safe base64."""
-    return base64.urlsafe_b64encode(string.encode()).decode()
+    return base64.urlsafe_b64encode(string.encode('utf-8')).decode('utf-8')
 
 def b64_to_str(b64: str) -> str:
     """Decodes a URL-safe base64 string."""
     try:
-        return base64.urlsafe_b64decode(b64.encode()).decode()
+        return base64.urlsafe_b64decode(b64.encode('utf-8')).decode('utf-8')
     except Exception as e:
         logger.error(f"Failed to decode base64 string: {e}")
         return ""
@@ -347,13 +348,17 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
 
 # --- Category Management ---
 def validate_category_name(name: str) -> tuple[bool, str]:
-    """Validates a category name. Returns (is_valid, error_message)"""
+    """
+    Validates a category name.
+    Allows spaces, letters, numbers, and most Unicode characters including emojis.
+    Returns (is_valid, error_message).
+    """
     if not name:
         return False, "Category name cannot be empty."
-    if not re.match(r'^[a-zA-Z0-9_-]+$', name):
-        return False, "Category name can only contain letters, numbers, underscores, and hyphens."
-    if len(name) > 32:
-        return False, "Category name cannot be longer than 32 characters."
+    # Removed regex to allow emojis and spaces.
+    # Max length check remains to prevent excessively long names in UI/DB.
+    if len(name) > 64: # Increased max length slightly for longer names/emojis
+        return False, "Category name cannot be longer than 64 characters."
     return True, ""
 
 def get_categories() -> list[str]:
@@ -846,7 +851,8 @@ def category_keyboard() -> InlineKeyboardMarkup:
     buttons = []
     row = []
     for i, cat in enumerate(cats):
-        row.append(InlineKeyboardButton(f"🎬 {html.escape(cat)}", callback_data=f"cat_{cat}"))
+        # Changed: Encode category name for callback data
+        row.append(InlineKeyboardButton(f"🎬 {html.escape(cat)}", callback_data=f"cat_{str_to_b64(cat)}"))
         if (i + 1) % 3 == 0:
             buttons.append(row)
             row = []
@@ -864,8 +870,9 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
     buttons = []
 
     buttons.append([
-        InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{category}|{int(is_saved)}"), # Pass is_saved as int
-        InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category}|{int(is_saved)}") # Pass is_saved as int
+        # Changed: Encode category name for callback data
+        InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"), 
+        InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}") 
     ])
 
     row_2_buttons = [
@@ -921,7 +928,8 @@ def saved_category_keyboard(user_id: int) -> InlineKeyboardMarkup:
     row = []
     sorted_categories = sorted(list(saved_categories))
     for i, cat in enumerate(sorted_categories):
-        row.append(InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"view_saved_cat_{cat}"))
+        # Changed: Encode category name for callback data
+        row.append(InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"view_saved_cat_{str_to_b64(cat)}"))
         if (i + 1) % 2 == 0: # 2 buttons per row for saved categories
             buttons.append(row)
             row = []
@@ -1388,7 +1396,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     """Handles category selection callback (for main categories)."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
-    category_name = callback_query.data[4:] # e.g., "Action"
+    # Changed: Decode category name from callback data
+    category_name = b64_to_str(callback_query.data[4:]) 
     logger.info(f"User {user_id} selected category: {category_name}.")
     
     if not await check_membership(client, user_id):
@@ -1425,6 +1434,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
         try:
             await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            clear_active_video_message(user_id) # Clear old message state if it was an old button
         except MessageIdInvalid:
             pass
         except Exception as e:
@@ -1491,6 +1501,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         save_history(user_id, video['uuid'], category_name)
         logger.info(f"User {user_id} selected category {category_name} and new video {video['uuid']} sent.")
         await callback_query.answer()
+        # If the original message was the category selection, delete it
         if callback_query.message.id != temp_msg.id:
             try:
                 await client.delete_messages(chat_id, callback_query.message.id)
@@ -1509,7 +1520,8 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
     """Handles selection of a specific category within the 'Saved Videos' menu."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
-    selected_category = callback_query.data[15:] # Extract the actual category name
+    # Changed: Decode category name from callback data
+    selected_category = b64_to_str(callback_query.data[15:]) 
     logger.info(f"User {user_id} selected saved category: {selected_category}.")
 
     if not await check_membership(client, user_id):
@@ -1626,7 +1638,9 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("Invalid request. Please try again.", show_alert=True)
         return
 
-    action, current_uuid, category, is_saved_flag_str = parts
+    action, current_uuid, category_encoded, is_saved_flag_str = parts
+    # Changed: Decode category name from callback data
+    category = b64_to_str(category_encoded)
     is_saved = bool(int(is_saved_flag_str)) # Convert '0' or '1' to boolean
     
     logger.info(f"User {user_id} requested {action} video in category '{category}', is_saved: {is_saved}.")
@@ -2176,7 +2190,8 @@ async def saved_videos_btn(client: Client, message: Message):
 @app.on_callback_query(filters.regex(r"^remove_saved_(.+)$"))
 async def remove_saved_video_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
-    video_uuid = callback_query.data.split('_', 2)[2]
+    # Split by '_' and then take the part after 'remove_saved_'
+    video_uuid = callback_query.data.split('_', 2)[2] 
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested to remove saved video {video_uuid}.")
 
@@ -2306,6 +2321,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     """Handles viewing a specific saved video."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
+    # Split by '_' and then take the part after 'view_saved_video_'
     video_uuid = callback_query.data.split('_', 3)[3]
 
     logger.info(f"User {user_id} requested to view saved video {video_uuid}.")
@@ -2536,11 +2552,11 @@ async def addcategory_cmd(client: Client, message: Message):
             logger.warning(f"Admin {user_id} used addcategory with insufficient arguments.")
             await message.reply(
                 "Usage: <code>/addcategory &lt;category_name&gt;</code>\n"
-                "Category name can only contain letters, numbers, underscores, and hyphens. 📝"
+                "Category name can contain letters, numbers, spaces, underscores, hyphens, and emojis. 📝"
             )
             return
         
-        name = args[1]
+        name = args[1].strip() # Strip whitespace
         success, msg = add_category(name)
         if success:
             logger.info(f"Admin {user_id} successfully added category '{name}'.")
@@ -2566,7 +2582,8 @@ async def deletecategory_cmd(client: Client, message: Message):
 
         buttons = []
         for category in categories:
-            buttons.append([InlineKeyboardButton(f"🗑️ {html.escape(category)}", callback_data=f"confirmdelcat_{category}")])
+            # Changed: Encode category name for callback data
+            buttons.append([InlineKeyboardButton(f"🗑️ {html.escape(category)}", callback_data=f"confirmdelcat_{str_to_b64(category)}")])
 
         await message.reply_text(
             """Select a category to delete:
@@ -2583,16 +2600,15 @@ async def deletecategory_cmd(client: Client, message: Message):
 async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery):
     """Handles confirmation for category deletion."""
     user_id = callback_query.from_user.id
-    category_raw = callback_query.data[14:]
-    logger.info(f"Admin {user_id} confirmed deletion of category: {category_raw}.")
+    # Changed: Decode category name from callback data
+    category = b64_to_str(callback_query.data[14:]) 
+    logger.info(f"Admin {user_id} confirmed deletion of category: {category}.")
     try:
         if not is_admin(user_id):
             await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
             logger.warning(f"Non-admin user {user_id} attempted to confirm category deletion.")
             return
         
-        category = category_raw
-
         logger.warning(f"Admin {user_id} is confirming deletion of category: {category}")
 
         success, msg, deleted_count = delete_category(category)
@@ -2704,7 +2720,8 @@ async def batchadd_cmd(client: Client, message: Message):
         
         buttons = []
         for category in categories:
-            buttons.append([InlineKeyboardButton(f"🗂️ {html.escape(category)}", callback_data=f"batchselcat_{category}")])
+            # Changed: Encode category name for callback data
+            buttons.append([InlineKeyboardButton(f"🗂️ {html.escape(category)}", callback_data=f"batchselcat_{str_to_b64(category)}")])
 
         await message.reply(
             "🎬 <b>Choose a Category for Batch Adding:</b>",
@@ -2719,7 +2736,9 @@ async def batchadd_cmd(client: Client, message: Message):
 async def batch_select_category_callback(client: Client, callback_query: CallbackQuery):
     """Handles callback for selecting the category in batch add mode."""
     user_id = callback_query.from_user.id
-    logger.info(f"Admin {user_id} selected category for batch adding: {callback_query.data[12:]}.")
+    # Changed: Decode category name from callback data
+    category_name = b64_to_str(callback_query.data[12:]) 
+    logger.info(f"Admin {user_id} selected category for batch adding: {category_name}.")
     try:
         if not is_admin(user_id):
             await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
@@ -2731,13 +2750,12 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
             logger.warning(f"Admin {user_id} tried to select category but batch mode not initialized.")
             return
 
-        category_name = callback_query.data[12:]
-
         if category_name not in get_categories():
             await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
             await callback_query.message.edit_text(
                 "Category not found. Please try again! 🧐",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"batchselcat_{cat}")] for cat in get_categories()])
+                # Changed: Encode category name for callback data in error case
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"batchselcat_{str_to_b64(cat)}")] for cat in get_categories()])
             )
             logger.warning(f"Admin {user_id} tried to set invalid category for batch: '{category_name}'.")
             return
@@ -2982,7 +3000,8 @@ async def set_category_cmd(client: Client, message: Message):
 
         buttons = []
         for category in categories:
-            buttons.append([InlineKeyboardButton(f"🗂️ {html.escape(category)}", callback_data=f"setcat_{category}")])
+            # Changed: Encode category name for callback data
+            buttons.append([InlineKeyboardButton(f"🗂️ {html.escape(category)}", callback_data=f"setcat_{str_to_b64(category)}")])
 
         await message.reply_text(
             "Select a category for batch adding videos: 👇",
@@ -3004,7 +3023,8 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
             await callback_query.answer("❌ Invalid category data. 🐛", show_alert=True)
             logger.warning(f"Admin {user_id} received invalid category data in setcat_callback: {callback_query.data}.")
             return
-        category_name = match.group(1)
+        # Changed: Decode category name from callback data
+        category_name = b64_to_str(match.group(1))
 
         if not is_admin(user_id):
             await callback_query.answer("❌ Only admins can use this command. 🚫", show_alert=True)
@@ -3020,7 +3040,8 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
             await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
             await callback_query.message.edit_text(
                 "Category not found. Please try again! 🧐",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"setcat_{cat}")] for cat in get_categories()])
+                # Changed: Encode category name for callback data in error case
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"setcat_{str_to_b64(cat)}")] for cat in get_categories()])
             )
             logger.warning(f"Admin {user_id} tried to set invalid category: '{category_name}'.")
             return
@@ -3408,7 +3429,7 @@ async def verify_and_cleanup_media():
         await asyncio.sleep(6 * 3600)
 
 async def health_check():
-    print("Session file exists:", os.path.exists("/data/spicynyraa.session"))
+    print("Session file exists:", os.path.exists("./spicynyraa.session"))
     try:
         me = await app.get_me()
         print(f"Bot username: {me.username}")
