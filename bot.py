@@ -10,7 +10,7 @@ from pyrogram.types import (
 )
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid
 from pyrogram.enums import ChatMemberStatus
-from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument
+from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne
 import aiohttp
 from aiohttp import ClientTimeout
 from collections import defaultdict
@@ -83,7 +83,6 @@ refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=Tru
 refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
 
 # --- Pyrogram Client ---
-# CORRECTED: Changed session file path from /data/spicynyraa to ./spicynyraa
 app = Client("./spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
@@ -2702,6 +2701,45 @@ def format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
+# New function to rearrange sequences after deletion
+def rearrange_sequences_after_deletion(category: str, deleted_sequence_number: int):
+    """
+    Decrements sequence numbers for all videos in a category that come after a deleted video.
+    """
+    logger.info(f"Rearranging sequences for category '{category}' after deleting sequence {deleted_sequence_number}.")
+    try:
+        # Find all videos with sequence number greater than the deleted one
+        videos_to_update = list(media_collection.find(
+            {'category': category, 'sequence_number': {'$gt': deleted_sequence_number}},
+            projection={'_id': 1, 'sequence_number': 1} # Only fetch necessary fields
+        ).sort('sequence_number', ASCENDING)) # Sort to process in order, though not strictly necessary for bulk_write
+
+        if not videos_to_update:
+            logger.info(f"No videos found after sequence {deleted_sequence_number} in category '{category}' to rearrange.")
+            return
+
+        operations = []
+        for video_doc in videos_to_update:
+            current_seq = video_doc['sequence_number']
+            new_seq = current_seq - 1
+            operations.append(
+                UpdateOne(
+                    {'_id': video_doc['_id']},
+                    {'$set': {'sequence_number': new_seq}}
+                )
+            )
+            logger.debug(f"Preparing update: video_id={video_doc['_id']}, old_seq={current_seq}, new_seq={new_seq}")
+
+        if operations:
+            result = media_collection.bulk_write(operations)
+            logger.info(f"Successfully rearranged sequences for category '{category}'. Modified {result.modified_count} documents.")
+        else:
+            logger.info(f"No bulk write operations needed for category '{category}'.")
+
+    except Exception as e:
+        logger.error(f"Error rearranging sequences for category '{category}' after deleting sequence {deleted_sequence_number}: {e}", exc_info=True)
+
+
 @app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and choose category."""
@@ -2834,9 +2872,15 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
 
             video_uuid = video_to_delete['uuid']
             message_id_in_channel = video_to_delete.get('message_id')
+            deleted_category = video_to_delete.get('category')
+            deleted_sequence = video_to_delete.get('sequence_number')
 
             media_collection.delete_one({'uuid': video_uuid})
             logger.info(f"Video {video_uuid} deleted from media_collection.")
+
+            # Rearrange sequences after deletion
+            if deleted_category and deleted_sequence is not None:
+                rearrange_sequences_after_deletion(deleted_category, deleted_sequence)
 
             users_collection.update_many(
                 {},
@@ -2888,6 +2932,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
 
     logger.info(f"Admin {user_id} sent a video for batch adding.")
 
+    message_id_in_channel = None # Initialize to None for error handling
     try:
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
             logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
@@ -2929,12 +2974,13 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         
         # Use and increment the sequence number from batch_add_state
         next_sequence_number = batch_add_state[user_id]['next_sequence']
-        batch_add_state[user_id]['next_sequence'] += 1 # Increment for the next video
         
         logger.info(f"Using sequence_number for category '{category}': {next_sequence_number} (from batch state)")
 
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
+        # --- Attempt to send video to channel first ---
+        forwarded_message = None
         try:
             forwarded_message = await client.send_video(
                 chat_id=config.VIDEO_CHANNEL_ID,
@@ -2943,26 +2989,24 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
                 protect_content=False
             )
             message_id_in_channel = forwarded_message.id
+            logger.info(f"Video {video_uuid} successfully sent to channel {config.VIDEO_CHANNEL_ID} with message_id {message_id_in_channel}.")
         except FloodWait as fw:
             logger.warning(f"FloodWait encountered when forwarding video to channel: {fw.value}s. Retrying after delay.")
             await asyncio.sleep(fw.value + 1)
-            try:
-                forwarded_message = await client.send_video(
-                    chat_id=config.VIDEO_CHANNEL_ID,
-                    video=file_id,
-                    caption=channel_caption,
-                    protect_content=False
-                )
-                message_id_in_channel = forwarded_message.id
-            except Exception as forward_e_retry:
-                logger.error(f"Failed to forward video {file_unique_id} to channel after FloodWait: {forward_e_retry}", exc_info=True)
-                await message.reply_text("❌ Failed to forward video to channel after retry. Please check bot's permissions. 🐛")
-                return
+            forwarded_message = await client.send_video(
+                chat_id=config.VIDEO_CHANNEL_ID,
+                video=file_id,
+                caption=channel_caption,
+                protect_content=False
+            )
+            message_id_in_channel = forwarded_message.id
+            logger.info(f"Video {video_uuid} sent to channel after FloodWait retry with message_id {message_id_in_channel}.")
         except Exception as forward_e:
-            logger.error(f"Failed to forward video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
-            await message.reply_text("❌ Failed to forward video to channel. Please check bot's permissions. 🐛")
-            return
+            logger.error(f"Failed to send video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
+            await message.reply_text(f"❌ Failed to add video. Could not send to channel. Please check bot's permissions. 🐛")
+            return # Exit if channel upload fails
 
+        # --- If channel upload successful, attempt to save to DB ---
         video_data = {
             "uuid": video_uuid,
             "file_id": file_id,
@@ -2970,12 +3014,14 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             "category": category,
             "size_bytes": file_size,
             "timestamp": get_current_time(), # Keep timestamp for general info, but sequence_number for order
-            "sequence_number": next_sequence_number, # NEW: Store sequence number
+            "sequence_number": next_sequence_number, # Store sequence number
             "message_id": message_id_in_channel,
             "banned": False,
             "custom_caption": custom_caption
         }
+        
         media_collection.insert_one(video_data)
+        batch_add_state[user_id]['next_sequence'] += 1 # Increment for the next video
         batch_add_state[user_id]['count'] = batch_add_state[user_id].get('count', 0) + 1
         logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id} with sequence_number {next_sequence_number}. Message ID in channel: {message_id_in_channel}")
         
@@ -2991,8 +3037,21 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         await message.reply_text(admin_reply_caption)
 
     except Exception as e:
-        logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
-        await message.reply("❌ Failed to add video. Please try again. 🐛")
+        logger.error(f"Admin {user_id} error adding video to DB after channel upload: {e}", exc_info=True)
+        await message.reply_text("❌ Failed to add video to database. Attempting to clean up from channel... 🐛")
+        if message_id_in_channel:
+            try:
+                await client.delete_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                logger.info(f"Cleaned up video message {message_id_in_channel} from channel due to DB save failure.")
+                await message.reply_text("✅ Video cleaned up from channel. Please try adding the video again. 🔄")
+            except MessageIdInvalid:
+                logger.warning(f"Failed to clean up video message {message_id_in_channel} from channel: already deleted or invalid.")
+                await message.reply_text("⚠️ Failed to add video to database. Could not clean up from channel (message already gone or invalid). Please try again. 🐛")
+            except Exception as cleanup_e:
+                logger.error(f"Error during channel cleanup for video {message_id_in_channel}: {cleanup_e}", exc_info=True)
+                await message.reply_text(f"❌ Failed to add video to database. Error during channel cleanup: {cleanup_e}. Manual cleanup may be required. 🐛")
+        else:
+            await message.reply_text("❌ Failed to add video to database. No channel message ID to clean up. Please try again. 🐛")
 
 @app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_category_cmd(client: Client, message: Message):
@@ -3378,7 +3437,7 @@ async def cleanup_expired_menus():
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "Your menu has expired due0 to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
                     )
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
