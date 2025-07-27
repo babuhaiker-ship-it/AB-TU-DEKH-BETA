@@ -8,7 +8,7 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
 from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
@@ -486,15 +486,17 @@ def get_next_video_chronological(current_uuid: str, category: str) -> dict | Non
 
     current_sequence = current_video['sequence_number']
 
+    # Find the next video with a sequence number strictly greater than the current one
     next_video = media_collection.find_one(
-        {'category': category, 'sequence_number': current_sequence + 1},
+        {'category': category, 'sequence_number': {'$gt': current_sequence}},
         sort=[('sequence_number', ASCENDING)]
     )
 
     if next_video:
+        logger.debug(f"Found next video {next_video['uuid']} with sequence {next_video['sequence_number']} after {current_sequence}.")
         return next_video
     else:
-        logger.info(f"End of videos reached for category '{category}' (sequence_number). Looping to first video.")
+        logger.info(f"End of videos reached for category '{category}'. Looping to first video.")
         return get_first_video_by_sequence_number(category)
 
 def get_previous_video_chronological(current_uuid: str, category: str) -> dict | None:
@@ -512,18 +514,21 @@ def get_previous_video_chronological(current_uuid: str, category: str) -> dict |
 
     current_sequence = current_video['sequence_number']
 
-    if current_sequence <= 1: # Already at the first video or before it
-        logger.info(f"Beginning of videos reached for category '{category}' (sequence_number). Looping to last video.")
+    # Find the previous video with a sequence number strictly less than the current one
+    prev_video = media_collection.find_one(
+        {'category': category, 'sequence_number': {'$lt': current_sequence}},
+        sort=[('sequence_number', DESCENDING)] # Sort descending to get the largest sequence_number less than current
+    )
+
+    if prev_video:
+        logger.debug(f"Found previous video {prev_video['uuid']} with sequence {prev_video['sequence_number']} before {current_sequence}.")
+        return prev_video
+    else:
+        logger.info(f"Beginning of videos reached for category '{category}'. Looping to last video.")
         return media_collection.find_one(
             {'category': category},
             sort=[('sequence_number', DESCENDING)]
         )
-    else:
-        prev_video = media_collection.find_one(
-            {'category': category, 'sequence_number': current_sequence - 1},
-            sort=[('sequence_number', DESCENDING)]
-        )
-        return prev_video # This should not be None if current_sequence > 1 and data is consistent
 
 def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
     """
@@ -555,6 +560,7 @@ def get_next_saved_video_chronological(user_id: int, current_uuid: str, category
             break
 
     if current_video_index == -1: # Current video not found in the filtered list, return first
+        logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning first saved video in category {category}.")
         return get_video_by_uuid(filtered_saved_videos[0]['uuid'])
     
     next_index = (current_video_index + 1) % len(filtered_saved_videos)
@@ -592,6 +598,7 @@ def get_previous_saved_video_chronological(user_id: int, current_uuid: str, cate
             break
 
     if current_video_index == -1: # Current video not found in the filtered list, return last
+        logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning last saved video in category {category}.")
         return get_video_by_uuid(filtered_saved_videos[-1]['uuid'])
     
     prev_index = (current_video_index - 1 + len(filtered_saved_videos)) % len(filtered_saved_videos)
@@ -695,7 +702,10 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
             logger.info(f"Successfully deleted video {video_uuid} from media_collection.")
 
             # 2. Rearrange sequences
-            rearrange_sequences_after_deletion(category, sequence_number)
+            if category and sequence_number is not None:
+                rearrange_sequences_after_deletion(category, sequence_number)
+            else:
+                logger.warning(f"Skipping sequence rearrangement for {video_uuid}: category or sequence_number missing.")
 
             # 3. Clean up user bookmarks
             users_collection.update_many(
@@ -705,7 +715,7 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
             logger.info(f"Removed video {video_uuid} from all users' bookmarked_videos.")
 
             # 4. Clean up user history
-            history_collection.update_many( # Corrected from db['history'] to history_collection
+            history_collection.update_many(
                 {},
                 {'$pull': {'history': {'video_uuid': video_uuid}}}
             )
@@ -731,8 +741,8 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
 
             # 6. Attempt to delete from Telegram channel (only if bot has permission)
             if message_id_in_channel:
+                logger.info(f"Checking bot permissions to delete message {message_id_in_channel} from channel {config.VIDEO_CHANNEL_ID}.")
                 try:
-                    # Check bot's permission to delete messages in the channel
                     me = await client.get_me()
                     member = await client.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
                     
@@ -740,15 +750,18 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
                         await client.delete_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
                         logger.info(f"Successfully deleted message {message_id_in_channel} from channel {config.VIDEO_CHANNEL_ID}.")
                     else:
-                        logger.warning(f"Bot lacks 'Delete Messages' permission in channel {config.VIDEO_CHANNEL_ID}. Cannot delete message {message_id_in_channel}.")
+                        logger.warning(f"Bot lacks 'Delete Messages' permission in channel {config.VIDEO_CHANNEL_ID}. Cannot delete message {message_id_in_channel}. DB entry removed.")
                 except MessageIdInvalid:
-                    logger.warning(f"Message {message_id_in_channel} already deleted or invalid in channel {config.VIDEO_CHANNEL_ID}.")
+                    logger.warning(f"Message {message_id_in_channel} already deleted or invalid in channel {config.VIDEO_CHANNEL_ID}. DB entry removed.")
                 except FloodWait as fw:
-                    logger.warning(f"FloodWait deleting message {message_id_in_channel}: {fw.value}s. Skipping channel deletion for now.")
+                    logger.warning(f"FloodWait deleting message {message_id_in_channel}: {fw.value}s. Skipping channel deletion for now. DB entry removed.")
+                except ChatAdminRequired:
+                    logger.warning(f"Bot is not admin in channel {config.VIDEO_CHANNEL_ID}. Cannot delete message {message_id_in_channel}. DB entry removed.")
                 except Exception as e:
                     logger.error(f"Failed to delete channel message {message_id_in_channel} for broken video {video_uuid}: {e}", exc_info=True)
+                    logger.warning(f"Channel deletion failed for {video_uuid}. DB entry removed.")
             else:
-                logger.info(f"Video {video_uuid} has no message_id_in_channel. Skipping channel deletion.")
+                logger.info(f"Video {video_uuid} has no message_id_in_channel. Skipping channel deletion. DB entry removed.")
 
             return True
         else:
@@ -758,7 +771,7 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
         logger.error(f"Failed to delete broken video {video_uuid} from DB/channel: {e}", exc_info=True)
         return False
 
-async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False, current_position: int = 0, total_videos: int = 0, retry_count: int = 0) -> tuple[bool, Message | str]:
+async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False, retry_count: int = 0) -> tuple[bool, Message | str]:
     """
     Attempts to edit an existing message or deletes the old message (if provided) and sends a new one.
     Includes self-healing logic for broken videos.
@@ -773,15 +786,34 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
     settings = settings_collection.find_one({'_id': 'settings'}) or {}
     protect_content_for_user = settings.get('protect_content', True)
 
+    # Determine if it's a saved video navigation based on the current reply_markup
+    is_saved_from_markup = False
+    if reply_markup:
+        for row in reply_markup.inline_keyboard:
+            for button in row:
+                if button.callback_data and '|' in button.callback_data:
+                    parts = button.callback_data.split('|')
+                    # Check for 'next' or 'prev' callbacks and the is_saved flag
+                    if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
+                        is_saved_from_markup = bool(int(parts[3]))
+                        break
+            if is_saved_from_markup:
+                break
+
     try:
         if new_message_type == "video" and video_data:
+            # Recalculate position for the current video_data
+            video_to_display_with_pos, current_position, total_videos = get_video_and_position(
+                video_data['uuid'], video_data.get('category'), is_saved_from_markup, chat_id
+            )
+            
             caption_text = None
             if video_data.get('custom_caption'):
                 caption_text = video_data['custom_caption']
             elif video_data.get('category'):
                 caption_text = f"Category: {html.escape(video_data['category'])}"
             
-            if total_videos > 0:
+            if total_videos > 0 and current_position > 0: # Only show position if valid
                 caption_text = f"#{current_position} of {total_videos}\n" + (caption_text if caption_text else "")
 
             # --- Attempt to Edit Existing Message (for video) ---
@@ -802,7 +834,6 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     logger.warning(f"Video edit failed for {video_data['uuid']} (Msg ID: {video_data.get('message_id')}) due to Telegram API error: {e}. Assuming broken video. Retries: {retry_count}/{MAX_RETRIES}")
                     
                     if retry_count < MAX_RETRIES:
-                        # Handle broken video: delete from DB and channel, then try next video
                         await client.send_message(chat_id, "Oops! This video was unavailable and has been removed. Trying the next one... 🔄")
                         await delete_broken_video_from_db_and_channel(
                             client,
@@ -814,44 +845,31 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                         
                         # Determine next video based on current navigation type
                         next_video = None
-                        # Check if it was a saved video navigation
-                        is_saved_from_markup = False
-                        if reply_markup: # Check if the reply_markup has the is_saved flag
-                            for row in reply_markup.inline_keyboard:
-                                for button in row:
-                                    if button.callback_data and '|' in button.callback_data:
-                                        parts = button.callback_data.split('|')
-                                        if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
-                                            is_saved_from_markup = bool(int(parts[3]))
-                                            break
-                                if is_saved_from_markup:
-                                    break
-
                         if is_saved_from_markup:
                             next_video = get_next_saved_video_chronological(chat_id, video_data['uuid'], video_data.get('category'))
                         else:
                             next_video = get_next_video_chronological(video_data['uuid'], video_data.get('category'))
 
                         if next_video:
+                            logger.info(f"Attempting recursive call for next video {next_video['uuid']} after deleting broken one.")
                             # Recursively call send_and_replace_message for the next video
-                            logger.info(f"Attempting to send next video {next_video['uuid']} after deleting broken one.")
                             return await send_and_replace_message(
                                 client,
                                 chat_id,
                                 message_id_to_edit_or_delete, # Try to edit the same message again
                                 "video",
                                 next_video,
+                                # IMPORTANT: Generate new keyboard for the NEXT video
                                 video_nav_keyboard(next_video['uuid'], next_video['category'], chat_id, is_saved=is_saved_from_markup),
-                                current_position=current_position, # Position will be recalculated inside the recursive call
-                                total_videos=total_videos,         # Total will be recalculated
+                                force_new_message=False, # Try to edit again
                                 retry_count=retry_count + 1
                             )
                         else:
-                            logger.error(f"No valid next video found after deleting broken {video_data['uuid']}.")
+                            logger.error(f"No valid next video found after deleting broken {video_data['uuid']}. Ending navigation.")
                             error_message = "❌ No more valid videos found in this category. 😔"
                             success = False
                     else:
-                        logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}.")
+                        logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}. Ending navigation.")
                         error_message = "❌ Multiple videos unavailable. Please try changing category. 😥"
                         success = False
                 except FloodWait as fw:
@@ -875,9 +893,11 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                         success = False
                 except Exception as e:
                     logger.error(f"Failed to edit message {message_id_to_edit_or_delete} with new video: {e}", exc_info=True)
-                    pass # Fallback to sending new message if edit fails for other reasons
+                    # Fallback to sending new message if edit fails for other reasons, but don't loop
+                    error_message = f"❌ <b>Failed to update message.</b>\nReason: {e}\nPlease try again later. 😥"
+                    success = False
 
-        if not success or force_new_message:
+        if not success or force_new_message: # If edit failed or forced new message
             if message_id_to_edit_or_delete:
                 try:
                     await client.delete_messages(chat_id, message_id_to_edit_or_delete)
@@ -903,7 +923,6 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     logger.warning(f"Video send failed for {video_data['uuid']} (Msg ID: {video_data.get('message_id')}) due to Telegram API error: {e}. Assuming broken video. Retries: {retry_count}/{MAX_RETRIES}")
                     
                     if retry_count < MAX_RETRIES:
-                        # Handle broken video: delete from DB and channel, then try next video
                         await client.send_message(chat_id, "Oops! This video was unavailable and has been removed. Trying the next one... 🔄")
                         await delete_broken_video_from_db_and_channel(
                             client,
@@ -915,45 +934,31 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                         
                         # Determine next video based on current navigation type
                         next_video = None
-                        # Check if it was a saved video navigation
-                        is_saved_from_markup = False
-                        if reply_markup: # Check if the reply_markup has the is_saved flag
-                            for row in reply_markup.inline_keyboard:
-                                for button in row:
-                                    if button.callback_data and '|' in button.callback_data:
-                                        parts = button.callback_data.split('|')
-                                        if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
-                                            is_saved_from_markup = bool(int(parts[3]))
-                                            break
-                                if is_saved_from_markup:
-                                    break
-
                         if is_saved_from_markup:
                             next_video = get_next_saved_video_chronological(chat_id, video_data['uuid'], video_data.get('category'))
                         else:
                             next_video = get_next_video_chronological(video_data['uuid'], video_data.get('category'))
 
                         if next_video:
+                            logger.info(f"Attempting recursive call for next video {next_video['uuid']} after deleting broken one.")
                             # Recursively call send_and_replace_message for the next video
-                            logger.info(f"Attempting to send next video {next_video['uuid']} after deleting broken one.")
                             return await send_and_replace_message(
                                 client,
                                 chat_id,
-                                message_id_to_edit_or_delete, # Try to edit the same message again
+                                message_id_to_edit_or_delete, # Try to edit the same message again (will force new message if fails)
                                 "video",
                                 next_video,
+                                # IMPORTANT: Generate new keyboard for the NEXT video
                                 video_nav_keyboard(next_video['uuid'], next_video['category'], chat_id, is_saved=is_saved_from_markup),
                                 force_new_message=True, # Force new message if previous attempt was also a new message
-                                current_position=current_position, # Position will be recalculated inside the recursive call
-                                total_videos=total_videos,         # Total will be recalculated
                                 retry_count=retry_count + 1
                             )
                         else:
-                            logger.error(f"No valid next video found after deleting broken {video_data['uuid']}.")
+                            logger.error(f"No valid next video found after deleting broken {video_data['uuid']}. Ending navigation.")
                             error_message = "❌ No more valid videos found in this category. 😔"
                             success = False
                     else:
-                        logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}.")
+                        logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}. Ending navigation.")
                         error_message = "❌ Multiple videos unavailable. Please try changing category. 😥"
                         success = False
                 except FloodWait as fw:
@@ -988,7 +993,6 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                         logger.warning(f"Video send failed by file_id for {video_data['uuid']} due to Telegram API error: {e2}. Assuming broken video. Retries: {retry_count}/{MAX_RETRIES}")
                         
                         if retry_count < MAX_RETRIES:
-                            # Handle broken video: delete from DB and channel, then try next video
                             await client.send_message(chat_id, "Oops! This video was unavailable and has been removed. Trying the next one... 🔄")
                             await delete_broken_video_from_db_and_channel(
                                 client,
@@ -1000,45 +1004,31 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                             
                             # Determine next video based on current navigation type
                             next_video = None
-                            # Check if it was a saved video navigation
-                            is_saved_from_markup = False
-                            if reply_markup: # Check if the reply_markup has the is_saved flag
-                                for row in reply_markup.inline_keyboard:
-                                    for button in row:
-                                        if button.callback_data and '|' in button.callback_data:
-                                            parts = button.callback_data.split('|')
-                                            if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
-                                                is_saved_from_markup = bool(int(parts[3]))
-                                                break
-                                    if is_saved_from_markup:
-                                        break
-
                             if is_saved_from_markup:
                                 next_video = get_next_saved_video_chronological(chat_id, video_data['uuid'], video_data.get('category'))
                             else:
                                 next_video = get_next_video_chronological(video_data['uuid'], video_data.get('category'))
 
                             if next_video:
+                                logger.info(f"Attempting recursive call for next video {next_video['uuid']} after deleting broken one.")
                                 # Recursively call send_and_replace_message for the next video
-                                logger.info(f"Attempting to send next video {next_video['uuid']} after deleting broken one.")
                                 return await send_and_replace_message(
                                     client,
                                     chat_id,
-                                    message_id_to_edit_or_delete, # Try to edit the same message again
+                                    message_id_to_edit_or_delete, # Try to edit the same message again (will force new message if fails)
                                     "video",
                                     next_video,
+                                    # IMPORTANT: Generate new keyboard for the NEXT video
                                     video_nav_keyboard(next_video['uuid'], next_video['category'], chat_id, is_saved=is_saved_from_markup),
                                     force_new_message=True, # Force new message if previous attempt was also a new message
-                                    current_position=current_position, # Position will be recalculated inside the recursive call
-                                    total_videos=total_videos,         # Total will be recalculated
                                     retry_count=retry_count + 1
                                 )
                             else:
-                                logger.error(f"No valid next video found after deleting broken {video_data['uuid']}.")
+                                logger.error(f"No valid next video found after deleting broken {video_data['uuid']}. Ending navigation.")
                                 error_message = "❌ No more valid videos found in this category. 😔"
                                 success = False
                         else:
-                            logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}.")
+                            logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}. Ending navigation.")
                             error_message = "❌ Multiple videos unavailable. Please try changing category. 😥"
                             success = False
                     except FloodWait as fw:
@@ -1453,7 +1443,7 @@ async def start_cmd(client: Client, message: Message):
                     is_saved_video_link = (deep_link_type == 'view_saved_video')
                     
                     # Get position for display
-                    video_to_display, current_position, total_videos = get_video_and_position(
+                    video_to_display_with_pos, current_position, total_videos = get_video_and_position(
                         video['uuid'], video['category'], is_saved_video_link, user_id
                     )
 
@@ -1464,9 +1454,7 @@ async def start_cmd(client: Client, message: Message):
                         new_message_type="video",
                         video_data=video,
                         reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved_video_link),
-                        force_new_message=True,
-                        current_position=current_position,
-                        total_videos=total_videos
+                        force_new_message=True # Always force new message for start deep links
                     )
                     
                     if sent_success:
@@ -1754,9 +1742,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], category_name, user_id, is_saved=False), # Not from saved_videos path
-        force_new_message=True,
-        current_position=current_position,
-        total_videos=total_videos
+        force_new_message=True # Force a new message for a clean transition from category menu
     )
     
     if sent_success:
@@ -1861,7 +1847,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         )
         return
     
-    # Get position for display
+    # Get position for display (recalculated for this specific video)
     video_to_display_with_pos, current_position, total_videos = get_video_and_position(
         video_to_display['uuid'], selected_category, True, user_id
     )
@@ -1873,9 +1859,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         new_message_type="video",
         video_data=video_to_display,
         reply_markup=video_nav_keyboard(video_to_display['uuid'], selected_category, user_id, is_saved=True),
-        force_new_message=True, # Force new message for clean transition
-        current_position=current_position,
-        total_videos=total_videos
+        force_new_message=False # Try to edit the existing message
     )
 
     if sent_success:
@@ -1969,11 +1953,6 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
                 return
         
-        # Get position for display
-        video_to_display_with_pos, current_position, total_videos = get_video_and_position(
-            video['uuid'], category, is_saved, user_id
-        )
-
         # Call send_and_replace_message. It will handle broken videos and recursive retries.
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
@@ -1982,8 +1961,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             new_message_type="video",
             video_data=video,
             reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
-            current_position=current_position,
-            total_videos=total_videos
+            force_new_message=False # Try to edit the existing message
         )
         
         if sent_success:
@@ -2539,9 +2517,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                             new_message_type="video",
                             video_data=next_video,
                             reply_markup=video_nav_keyboard(next_video['uuid'], current_category_of_removed_video, user_id, is_saved=True),
-                            force_new_message=True,
-                            current_position=current_position,
-                            total_videos=total_videos
+                            force_new_message=False # Try to edit the existing message
                         )
                         if not sent_success:
                             await client.send_message(chat_id, "❌ Failed to load next saved video. Please try again. 😥")
@@ -2649,9 +2625,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=True),
-        force_new_message=True,
-        current_position=current_position,
-        total_videos=total_videos
+        force_new_message=False # Try to edit the existing message
     )
 
     if sent_success:
@@ -3607,7 +3581,7 @@ async def cleanup_expired_menus():
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "Your menu has expired due0 to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
                     )
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
