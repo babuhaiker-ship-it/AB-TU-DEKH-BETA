@@ -8,9 +8,9 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired
 from pyrogram.enums import ChatMemberStatus
-from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne
+from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
 from aiohttp import ClientTimeout
 from collections import defaultdict
@@ -34,7 +34,7 @@ class BotConfig:
     BOT_USERNAME = '@Spicynyraabot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    VIDEO_CHANNEL_ID = -1002621716446
+    VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
@@ -136,7 +136,7 @@ async def check_membership(client: Client, user_id: int) -> bool:
             return False
     except PeerIdInvalid:
         logger.error(f"Force subscribe channel ID {config.FORCE_SUB_CHANNEL_ID} is invalid. Please check config.")
-        return True
+        return True # Allow access if force sub channel itself is invalid
     except Exception as e:
         logger.error(f"Error checking membership for user {user_id} in channel {config.FORCE_SUB_CHANNEL_ID}: {e}", exc_info=True)
         return False
@@ -643,12 +643,129 @@ def clear_active_video_message(user_id: int):
         del active_video_message[user_id]
         logger.info(f"Active video message cleared for user {user_id}.")
 
-async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False, current_position: int = 0, total_videos: int = 0) -> tuple[bool, Message | str]:
+# --- Real-time self-healing functions ---
+def rearrange_sequences_after_deletion(category: str, deleted_sequence_number: int):
+    """
+    Decrements sequence numbers for all videos in a category that come after a deleted video.
+    This is a synchronous function for use within async contexts.
+    """
+    logger.info(f"Rearranging sequences for category '{category}' after deleting sequence {deleted_sequence_number}.")
+    try:
+        # Find all videos with sequence number greater than the deleted one
+        videos_to_update = list(media_collection.find(
+            {'category': category, 'sequence_number': {'$gt': deleted_sequence_number}},
+            projection={'_id': 1, 'sequence_number': 1}
+        ).sort('sequence_number', ASCENDING))
+
+        if not videos_to_update:
+            logger.info(f"No videos found after sequence {deleted_sequence_number} in category '{category}' to rearrange.")
+            return
+
+        operations = []
+        for video_doc in videos_to_update:
+            current_seq = video_doc['sequence_number']
+            new_seq = current_seq - 1
+            operations.append(
+                UpdateOne(
+                    {'_id': video_doc['_id']},
+                    {'$set': {'sequence_number': new_seq}}
+                )
+            )
+            logger.debug(f"Preparing update: video_id={video_doc['_id']}, old_seq={current_seq}, new_seq={new_seq}")
+
+        if operations:
+            result = media_collection.bulk_write(operations)
+            logger.info(f"Successfully rearranged sequences for category '{category}'. Modified {result.modified_count} documents.")
+        else:
+            logger.info(f"No bulk write operations needed for category '{category}'.")
+
+    except Exception as e:
+        logger.error(f"Error rearranging sequences for category '{category}' after deleting sequence {deleted_sequence_number}: {e}", exc_info=True)
+
+async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: str, category: str, sequence_number: int, message_id_in_channel: int):
+    """
+    Deletes a video entry from MongoDB and attempts to delete its message from the channel.
+    Handles sequence rearrangement and user data cleanup.
+    """
+    logger.info(f"Attempting to delete broken video {video_uuid} from DB and channel.")
+    try:
+        # 1. Delete from media collection
+        result = media_collection.delete_one({'uuid': video_uuid})
+        if result.deleted_count > 0:
+            logger.info(f"Successfully deleted video {video_uuid} from media_collection.")
+
+            # 2. Rearrange sequences
+            rearrange_sequences_after_deletion(category, sequence_number)
+
+            # 3. Clean up user bookmarks
+            users_collection.update_many(
+                {},
+                {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+            )
+            logger.info(f"Removed video {video_uuid} from all users' bookmarked_videos.")
+
+            # 4. Clean up user history
+            history_collection.update_many( # Corrected from db['history'] to history_collection
+                {},
+                {'$pull': {'history': {'video_uuid': video_uuid}}}
+            )
+            logger.info(f"Removed video {video_uuid} from all users' history.")
+
+            # 5. Clean up last_viewed_per_category
+            all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
+            for user_doc in all_users_with_last_viewed:
+                user_id_to_update = user_doc['user_id']
+                updated_last_viewed = {}
+                changed = False
+                for cat, vid_uuid_in_map in user_doc['last_viewed_per_category'].items():
+                    if vid_uuid_in_map == video_uuid:
+                        changed = True
+                    else:
+                        updated_last_viewed[cat] = vid_uuid_in_map
+                if changed:
+                    users_collection.update_one(
+                        {'user_id': user_id_to_update},
+                        {'$set': {'last_viewed_per_category': updated_last_viewed}}
+                    )
+                    logger.info(f"Removed video {video_uuid} from last_viewed_per_category for user {user_id_to_update}.")
+
+            # 6. Attempt to delete from Telegram channel (only if bot has permission)
+            if message_id_in_channel:
+                try:
+                    # Check bot's permission to delete messages in the channel
+                    me = await client.get_me()
+                    member = await client.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
+                    
+                    if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER] and member.can_delete_messages:
+                        await client.delete_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                        logger.info(f"Successfully deleted message {message_id_in_channel} from channel {config.VIDEO_CHANNEL_ID}.")
+                    else:
+                        logger.warning(f"Bot lacks 'Delete Messages' permission in channel {config.VIDEO_CHANNEL_ID}. Cannot delete message {message_id_in_channel}.")
+                except MessageIdInvalid:
+                    logger.warning(f"Message {message_id_in_channel} already deleted or invalid in channel {config.VIDEO_CHANNEL_ID}.")
+                except FloodWait as fw:
+                    logger.warning(f"FloodWait deleting message {message_id_in_channel}: {fw.value}s. Skipping channel deletion for now.")
+                except Exception as e:
+                    logger.error(f"Failed to delete channel message {message_id_in_channel} for broken video {video_uuid}: {e}", exc_info=True)
+            else:
+                logger.info(f"Video {video_uuid} has no message_id_in_channel. Skipping channel deletion.")
+
+            return True
+        else:
+            logger.warning(f"Video {video_uuid} not found in media_collection for deletion (already deleted?).")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to delete broken video {video_uuid} from DB/channel: {e}", exc_info=True)
+        return False
+
+async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False, current_position: int = 0, total_videos: int = 0, retry_count: int = 0) -> tuple[bool, Message | str]:
     """
     Attempts to edit an existing message or deletes the old message (if provided) and sends a new one.
-    Updates the active_video_message tracking.
+    Includes self-healing logic for broken videos.
     Returns (success: bool, sent_message: Message | error_message: str)
     """
+    MAX_RETRIES = 3 # Max attempts to find a valid video after encountering a broken one
+    
     sent_message = None
     success = False
     error_message = ""
@@ -657,17 +774,18 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
     protect_content_for_user = settings.get('protect_content', True)
 
     try:
-        if message_id_to_edit_or_delete and not force_new_message:
-            if new_message_type == "video" and video_data:
-                caption_text = None
-                if video_data.get('custom_caption'):
-                    caption_text = video_data['custom_caption']
-                elif video_data.get('category'):
-                    caption_text = f"Category: {html.escape(video_data['category'])}"
-                
-                if total_videos > 0:
-                    caption_text = f"#{current_position} of {total_videos}\n" + (caption_text if caption_text else "")
+        if new_message_type == "video" and video_data:
+            caption_text = None
+            if video_data.get('custom_caption'):
+                caption_text = video_data['custom_caption']
+            elif video_data.get('category'):
+                caption_text = f"Category: {html.escape(video_data['category'])}"
+            
+            if total_videos > 0:
+                caption_text = f"#{current_position} of {total_videos}\n" + (caption_text if caption_text else "")
 
+            # --- Attempt to Edit Existing Message (for video) ---
+            if message_id_to_edit_or_delete and not force_new_message:
                 try:
                     sent_message = await client.edit_message_media(
                         chat_id=chat_id,
@@ -680,9 +798,62 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     )
                     success = True
                     logger.info(f"Edited message {message_id_to_edit_or_delete} in chat {chat_id} with new video {video_data['uuid']}.")
-                except MessageIdInvalid:
-                    logger.warning(f"Message {message_id_to_edit_or_delete} for editing in chat {chat_id} was invalid or deleted. Falling back to send new.")
-                    pass
+                except (MessageIdInvalid, FileIdInvalid, FileReferenceExpired, RPCError) as e:
+                    logger.warning(f"Video edit failed for {video_data['uuid']} (Msg ID: {video_data.get('message_id')}) due to Telegram API error: {e}. Assuming broken video. Retries: {retry_count}/{MAX_RETRIES}")
+                    
+                    if retry_count < MAX_RETRIES:
+                        # Handle broken video: delete from DB and channel, then try next video
+                        await client.send_message(chat_id, "Oops! This video was unavailable and has been removed. Trying the next one... 🔄")
+                        await delete_broken_video_from_db_and_channel(
+                            client,
+                            video_data['uuid'],
+                            video_data.get('category'),
+                            video_data.get('sequence_number'),
+                            video_data.get('message_id')
+                        )
+                        
+                        # Determine next video based on current navigation type
+                        next_video = None
+                        # Check if it was a saved video navigation
+                        is_saved_from_markup = False
+                        if reply_markup: # Check if the reply_markup has the is_saved flag
+                            for row in reply_markup.inline_keyboard:
+                                for button in row:
+                                    if button.callback_data and '|' in button.callback_data:
+                                        parts = button.callback_data.split('|')
+                                        if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
+                                            is_saved_from_markup = bool(int(parts[3]))
+                                            break
+                                if is_saved_from_markup:
+                                    break
+
+                        if is_saved_from_markup:
+                            next_video = get_next_saved_video_chronological(chat_id, video_data['uuid'], video_data.get('category'))
+                        else:
+                            next_video = get_next_video_chronological(video_data['uuid'], video_data.get('category'))
+
+                        if next_video:
+                            # Recursively call send_and_replace_message for the next video
+                            logger.info(f"Attempting to send next video {next_video['uuid']} after deleting broken one.")
+                            return await send_and_replace_message(
+                                client,
+                                chat_id,
+                                message_id_to_edit_or_delete, # Try to edit the same message again
+                                "video",
+                                next_video,
+                                video_nav_keyboard(next_video['uuid'], next_video['category'], chat_id, is_saved=is_saved_from_markup),
+                                current_position=current_position, # Position will be recalculated inside the recursive call
+                                total_videos=total_videos,         # Total will be recalculated
+                                retry_count=retry_count + 1
+                            )
+                        else:
+                            logger.error(f"No valid next video found after deleting broken {video_data['uuid']}.")
+                            error_message = "❌ No more valid videos found in this category. 😔"
+                            success = False
+                    else:
+                        logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}.")
+                        error_message = "❌ Multiple videos unavailable. Please try changing category. 😥"
+                        success = False
                 except FloodWait as fw:
                     logger.warning(f"FloodWait encountered when editing video: {fw.value}s. Retrying after delay.")
                     await asyncio.sleep(fw.value + 1)
@@ -704,40 +875,7 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                         success = False
                 except Exception as e:
                     logger.error(f"Failed to edit message {message_id_to_edit_or_delete} with new video: {e}", exc_info=True)
-                    pass
-
-            elif new_message_type == "text" and text_content:
-                try:
-                    sent_message = await client.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=message_id_to_edit_or_delete,
-                        text=text_content,
-                        reply_markup=reply_markup
-                    )
-                    success = True
-                    logger.info(f"Edited message {message_id_to_edit_or_delete} in chat {chat_id} with new text.")
-                except MessageIdInvalid:
-                    logger.warning(f"Message {message_id_to_edit_or_delete} for editing in chat {chat_id} was invalid or deleted. Falling back to send new.")
-                    pass
-                except FloodWait as fw:
-                    logger.warning(f"FloodWait encountered when editing text: {fw.value}s. Retrying after delay.")
-                    await asyncio.sleep(fw.value + 1)
-                    try:
-                        sent_message = await client.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id_to_edit_or_delete,
-                            text=text_content,
-                            reply_markup=reply_markup
-                        )
-                        success = True
-                        logger.info(f"Edited message {message_id_to_edit_or_delete} after FloodWait.")
-                    except Exception as e2:
-                        logger.error(f"Failed to edit text after FloodWait: {e2}")
-                        error_message = f"❌ <b>Failed to update message.</b>\nReason: {e2}\nPlease try again later. 😥"
-                        success = False
-                except Exception as e:
-                    logger.error(f"Failed to edit message {message_id_to_edit_or_delete} with new text: {e}", exc_info=True)
-                    pass
+                    pass # Fallback to sending new message if edit fails for other reasons
 
         if not success or force_new_message:
             if message_id_to_edit_or_delete:
@@ -750,15 +888,7 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     logger.error(f"Failed to delete old message {message_id_to_edit_or_delete} in chat {chat_id}: {e}")
             
             if new_message_type == "video" and video_data:
-                caption_text = None
-                if video_data.get('custom_caption'):
-                    caption_text = video_data['custom_caption']
-                elif video_data.get('category'):
-                    caption_text = f"Category: {html.escape(video_data['category'])}"
-
-                if total_videos > 0:
-                    caption_text = f"#{current_position} of {total_videos}\n" + (caption_text if caption_text else "")
-                
+                # --- Attempt to Send New Video Message ---
                 try:
                     sent_message = await client.copy_message(
                         chat_id=chat_id,
@@ -769,8 +899,82 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                         reply_markup=reply_markup
                     )
                     success = True
+                except (MessageIdInvalid, FileIdInvalid, FileReferenceExpired, RPCError) as e:
+                    logger.warning(f"Video send failed for {video_data['uuid']} (Msg ID: {video_data.get('message_id')}) due to Telegram API error: {e}. Assuming broken video. Retries: {retry_count}/{MAX_RETRIES}")
+                    
+                    if retry_count < MAX_RETRIES:
+                        # Handle broken video: delete from DB and channel, then try next video
+                        await client.send_message(chat_id, "Oops! This video was unavailable and has been removed. Trying the next one... 🔄")
+                        await delete_broken_video_from_db_and_channel(
+                            client,
+                            video_data['uuid'],
+                            video_data.get('category'),
+                            video_data.get('sequence_number'),
+                            video_data.get('message_id')
+                        )
+                        
+                        # Determine next video based on current navigation type
+                        next_video = None
+                        # Check if it was a saved video navigation
+                        is_saved_from_markup = False
+                        if reply_markup: # Check if the reply_markup has the is_saved flag
+                            for row in reply_markup.inline_keyboard:
+                                for button in row:
+                                    if button.callback_data and '|' in button.callback_data:
+                                        parts = button.callback_data.split('|')
+                                        if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
+                                            is_saved_from_markup = bool(int(parts[3]))
+                                            break
+                                if is_saved_from_markup:
+                                    break
+
+                        if is_saved_from_markup:
+                            next_video = get_next_saved_video_chronological(chat_id, video_data['uuid'], video_data.get('category'))
+                        else:
+                            next_video = get_next_video_chronological(video_data['uuid'], video_data.get('category'))
+
+                        if next_video:
+                            # Recursively call send_and_replace_message for the next video
+                            logger.info(f"Attempting to send next video {next_video['uuid']} after deleting broken one.")
+                            return await send_and_replace_message(
+                                client,
+                                chat_id,
+                                message_id_to_edit_or_delete, # Try to edit the same message again
+                                "video",
+                                next_video,
+                                video_nav_keyboard(next_video['uuid'], next_video['category'], chat_id, is_saved=is_saved_from_markup),
+                                force_new_message=True, # Force new message if previous attempt was also a new message
+                                current_position=current_position, # Position will be recalculated inside the recursive call
+                                total_videos=total_videos,         # Total will be recalculated
+                                retry_count=retry_count + 1
+                            )
+                        else:
+                            logger.error(f"No valid next video found after deleting broken {video_data['uuid']}.")
+                            error_message = "❌ No more valid videos found in this category. 😔"
+                            success = False
+                    else:
+                        logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}.")
+                        error_message = "❌ Multiple videos unavailable. Please try changing category. 😥"
+                        success = False
+                except FloodWait as fw:
+                    logger.warning(f"FloodWait encountered when sending video by message_id: {fw.value}s. Retrying after delay.")
+                    await asyncio.sleep(fw.value + 1)
+                    try:
+                        sent_message = await client.copy_message(
+                            chat_id=chat_id,
+                            from_chat_id=config.VIDEO_CHANNEL_ID,
+                            message_id=video_data.get('message_id'),
+                            caption=caption_text,
+                            protect_content=protect_content_for_user,
+                            reply_markup=reply_markup
+                        )
+                        success = True
+                    except Exception as e2:
+                        logger.error(f"Failed to copy video after FloodWait: {e2}")
+                        error_message = f"❌ <b>Failed to send message.</b>\nReason: {e2}\nPlease try again later. 😥"
+                        success = False
                 except Exception as e:
-                    logger.warning(f"Failed to copy video from channel by message_id: {e}. Falling back to file_id.")
+                    logger.error(f"Failed to copy video from channel by message_id: {e}. Falling back to file_id.", exc_info=True)
                     try:
                         sent_message = await client.send_video(
                             chat_id,
@@ -780,6 +984,63 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                             protect_content=protect_content_for_user
                         )
                         success = True
+                    except (MessageIdInvalid, FileIdInvalid, FileReferenceExpired, RPCError) as e2:
+                        logger.warning(f"Video send failed by file_id for {video_data['uuid']} due to Telegram API error: {e2}. Assuming broken video. Retries: {retry_count}/{MAX_RETRIES}")
+                        
+                        if retry_count < MAX_RETRIES:
+                            # Handle broken video: delete from DB and channel, then try next video
+                            await client.send_message(chat_id, "Oops! This video was unavailable and has been removed. Trying the next one... 🔄")
+                            await delete_broken_video_from_db_and_channel(
+                                client,
+                                video_data['uuid'],
+                                video_data.get('category'),
+                                video_data.get('sequence_number'),
+                                video_data.get('message_id')
+                            )
+                            
+                            # Determine next video based on current navigation type
+                            next_video = None
+                            # Check if it was a saved video navigation
+                            is_saved_from_markup = False
+                            if reply_markup: # Check if the reply_markup has the is_saved flag
+                                for row in reply_markup.inline_keyboard:
+                                    for button in row:
+                                        if button.callback_data and '|' in button.callback_data:
+                                            parts = button.callback_data.split('|')
+                                            if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
+                                                is_saved_from_markup = bool(int(parts[3]))
+                                                break
+                                    if is_saved_from_markup:
+                                        break
+
+                            if is_saved_from_markup:
+                                next_video = get_next_saved_video_chronological(chat_id, video_data['uuid'], video_data.get('category'))
+                            else:
+                                next_video = get_next_video_chronological(video_data['uuid'], video_data.get('category'))
+
+                            if next_video:
+                                # Recursively call send_and_replace_message for the next video
+                                logger.info(f"Attempting to send next video {next_video['uuid']} after deleting broken one.")
+                                return await send_and_replace_message(
+                                    client,
+                                    chat_id,
+                                    message_id_to_edit_or_delete, # Try to edit the same message again
+                                    "video",
+                                    next_video,
+                                    video_nav_keyboard(next_video['uuid'], next_video['category'], chat_id, is_saved=is_saved_from_markup),
+                                    force_new_message=True, # Force new message if previous attempt was also a new message
+                                    current_position=current_position, # Position will be recalculated inside the recursive call
+                                    total_videos=total_videos,         # Total will be recalculated
+                                    retry_count=retry_count + 1
+                                )
+                            else:
+                                logger.error(f"No valid next video found after deleting broken {video_data['uuid']}.")
+                                error_message = "❌ No more valid videos found in this category. 😔"
+                                success = False
+                        else:
+                            logger.error(f"Max retries ({MAX_RETRIES}) reached for broken video {video_data['uuid']}.")
+                            error_message = "❌ Multiple videos unavailable. Please try changing category. 😥"
+                            success = False
                     except FloodWait as fw:
                         logger.warning(f"FloodWait encountered when sending video by file_id: {fw.value}s. Retrying after delay.")
                         await asyncio.sleep(fw.value + 1)
@@ -1482,7 +1743,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         return
     
     # Get position for display
-    video_to_display, current_position, total_videos = get_video_and_position(
+    video_to_display_with_pos, current_position, total_videos = get_video_and_position(
         video['uuid'], category_name, False, user_id
     )
 
@@ -1675,15 +1936,11 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
+        # If the user clicks an old button, just answer and return. The active message logic will handle it.
         if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
             logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
             await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
-            try:
-                await client.delete_messages(chat_id, callback_query.message.id)
-            except MessageIdInvalid:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+            # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
             return
 
         video = None
@@ -1717,6 +1974,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             video['uuid'], category, is_saved, user_id
         )
 
+        # Call send_and_replace_message. It will handle broken videos and recursive retries.
         sent_success, sent_message_or_error = await send_and_replace_message(
             client,
             chat_id,
@@ -1778,7 +2036,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
             await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
             try:
-                await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+                await client.delete_messages(chat_id, callback_query.message.id)
             except MessageIdInvalid:
                 pass
             except Exception as e:
@@ -2701,45 +2959,6 @@ def format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
-# New function to rearrange sequences after deletion
-def rearrange_sequences_after_deletion(category: str, deleted_sequence_number: int):
-    """
-    Decrements sequence numbers for all videos in a category that come after a deleted video.
-    """
-    logger.info(f"Rearranging sequences for category '{category}' after deleting sequence {deleted_sequence_number}.")
-    try:
-        # Find all videos with sequence number greater than the deleted one
-        videos_to_update = list(media_collection.find(
-            {'category': category, 'sequence_number': {'$gt': deleted_sequence_number}},
-            projection={'_id': 1, 'sequence_number': 1} # Only fetch necessary fields
-        ).sort('sequence_number', ASCENDING)) # Sort to process in order, though not strictly necessary for bulk_write
-
-        if not videos_to_update:
-            logger.info(f"No videos found after sequence {deleted_sequence_number} in category '{category}' to rearrange.")
-            return
-
-        operations = []
-        for video_doc in videos_to_update:
-            current_seq = video_doc['sequence_number']
-            new_seq = current_seq - 1
-            operations.append(
-                UpdateOne(
-                    {'_id': video_doc['_id']},
-                    {'$set': {'sequence_number': new_seq}}
-                )
-            )
-            logger.debug(f"Preparing update: video_id={video_doc['_id']}, old_seq={current_seq}, new_seq={new_seq}")
-
-        if operations:
-            result = media_collection.bulk_write(operations)
-            logger.info(f"Successfully rearranged sequences for category '{category}'. Modified {result.modified_count} documents.")
-        else:
-            logger.info(f"No bulk write operations needed for category '{category}'.")
-
-    except Exception as e:
-        logger.error(f"Error rearranging sequences for category '{category}' after deleting sequence {deleted_sequence_number}: {e}", exc_info=True)
-
-
 @app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and choose category."""
@@ -2872,56 +3091,22 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
 
             video_uuid = video_to_delete['uuid']
             message_id_in_channel = video_to_delete.get('message_id')
-            deleted_category = video_to_delete.get('category')
-            deleted_sequence = video_to_delete.get('sequence_number')
+            category_of_deleted_video = video_to_delete.get('category')
+            sequence_number_of_deleted_video = video_to_delete.get('sequence_number')
 
-            media_collection.delete_one({'uuid': video_uuid})
-            logger.info(f"Video {video_uuid} deleted from media_collection.")
-
-            # Rearrange sequences after deletion
-            if deleted_category and deleted_sequence is not None:
-                rearrange_sequences_after_deletion(deleted_category, deleted_sequence)
-
-            users_collection.update_many(
-                {},
-                {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+            # Use the new centralized deletion function
+            success = await delete_broken_video_from_db_and_channel(
+                client,
+                video_uuid,
+                category_of_deleted_video,
+                sequence_number_of_deleted_video,
+                message_id_in_channel
             )
-            logger.info(f"Video {video_uuid} removed from all users' bookmarked_videos.")
 
-            history_collection.update_many(
-                {},
-                {'$pull': {'history': {'video_uuid': video_uuid}}}
-            )
-            logger.info(f"Video {video_uuid} removed from all users' history_collection.")
-
-            all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
-            for user_doc in all_users_with_last_viewed:
-                user_id_to_update = user_doc['user_id']
-                updated_last_viewed = {}
-                changed = False
-                for cat, vid_uuid in user_doc['last_viewed_per_category'].items():
-                    if vid_uuid == video_uuid:
-                        changed = True
-                    else:
-                        updated_last_viewed[cat] = vid_uuid
-                if changed:
-                    users_collection.update_one(
-                        {'user_id': user_id_to_update},
-                        {'$set': {'last_viewed_per_category': updated_last_viewed}}
-                    )
-                    logger.info(f"Video {video_uuid} removed from last_viewed_per_category for user {user_id_to_update}.")
-
-            if message_id_in_channel:
-                try:
-                    await client.delete_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
-                    logger.info(f"Video message {message_id_in_channel} deleted from channel {config.VIDEO_CHANNEL_ID}.")
-                except MessageIdInvalid:
-                    logger.warning(f"Video message {message_id_in_channel} already deleted or invalid in channel {config.VIDEO_CHANNEL_ID}.")
-                except Exception as channel_delete_e:
-                    logger.error(f"Failed to delete video message {message_id_in_channel} from channel {config.VIDEO_CHANNEL_ID}: {channel_delete_e}", exc_info=True)
-                    await message.reply_text(f"⚠️ Video deleted from database, but failed to delete from channel. Reason: {channel_delete_e}")
-
-            await message.reply_text(f"✅ Video (UUID: <code>{video_uuid}</code>) and its data have been deleted from the database and channel. 🗑️")
+            if success:
+                await message.reply_text(f"✅ Video (UUID: <code>{video_uuid}</code>) and its data have been deleted from the database. Attempted to delete from channel. 🗑️")
+            else:
+                await message.reply_text(f"❌ Failed to delete video (UUID: <code>{video_uuid}</code>). Check logs for details. 🐛")
 
         except Exception as e:
             logger.error(f"Admin {user_id} error deleting video: {e}", exc_info=True)
@@ -2932,7 +3117,6 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
 
     logger.info(f"Admin {user_id} sent a video for batch adding.")
 
-    message_id_in_channel = None # Initialize to None for error handling
     try:
         if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
             logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
@@ -2974,13 +3158,12 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         
         # Use and increment the sequence number from batch_add_state
         next_sequence_number = batch_add_state[user_id]['next_sequence']
+        batch_add_state[user_id]['next_sequence'] += 1 # Increment for the next video
         
         logger.info(f"Using sequence_number for category '{category}': {next_sequence_number} (from batch state)")
 
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
-        # --- Attempt to send video to channel first ---
-        forwarded_message = None
         try:
             forwarded_message = await client.send_video(
                 chat_id=config.VIDEO_CHANNEL_ID,
@@ -2989,24 +3172,26 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
                 protect_content=False
             )
             message_id_in_channel = forwarded_message.id
-            logger.info(f"Video {video_uuid} successfully sent to channel {config.VIDEO_CHANNEL_ID} with message_id {message_id_in_channel}.")
         except FloodWait as fw:
             logger.warning(f"FloodWait encountered when forwarding video to channel: {fw.value}s. Retrying after delay.")
             await asyncio.sleep(fw.value + 1)
-            forwarded_message = await client.send_video(
-                chat_id=config.VIDEO_CHANNEL_ID,
-                video=file_id,
-                caption=channel_caption,
-                protect_content=False
-            )
-            message_id_in_channel = forwarded_message.id
-            logger.info(f"Video {video_uuid} sent to channel after FloodWait retry with message_id {message_id_in_channel}.")
+            try:
+                forwarded_message = await client.send_video(
+                    chat_id=config.VIDEO_CHANNEL_ID,
+                    video=file_id,
+                    caption=channel_caption,
+                    protect_content=False
+                )
+                message_id_in_channel = forwarded_message.id
+            except Exception as forward_e_retry:
+                logger.error(f"Failed to forward video {file_unique_id} to channel after FloodWait: {forward_e_retry}", exc_info=True)
+                await message.reply_text("❌ Failed to forward video to channel after retry. Please check bot's permissions. 🐛")
+                return
         except Exception as forward_e:
-            logger.error(f"Failed to send video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
-            await message.reply_text(f"❌ Failed to add video. Could not send to channel. Please check bot's permissions. 🐛")
-            return # Exit if channel upload fails
+            logger.error(f"Failed to forward video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
+            await message.reply_text("❌ Failed to forward video to channel. Please check bot's permissions. 🐛")
+            return
 
-        # --- If channel upload successful, attempt to save to DB ---
         video_data = {
             "uuid": video_uuid,
             "file_id": file_id,
@@ -3014,14 +3199,12 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             "category": category,
             "size_bytes": file_size,
             "timestamp": get_current_time(), # Keep timestamp for general info, but sequence_number for order
-            "sequence_number": next_sequence_number, # Store sequence number
+            "sequence_number": next_sequence_number, # NEW: Store sequence number
             "message_id": message_id_in_channel,
             "banned": False,
             "custom_caption": custom_caption
         }
-        
         media_collection.insert_one(video_data)
-        batch_add_state[user_id]['next_sequence'] += 1 # Increment for the next video
         batch_add_state[user_id]['count'] = batch_add_state[user_id].get('count', 0) + 1
         logger.info(f"Video {video_uuid} (file ID: {file_id}) added to category {category} by admin {user_id} with sequence_number {next_sequence_number}. Message ID in channel: {message_id_in_channel}")
         
@@ -3037,21 +3220,8 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         await message.reply_text(admin_reply_caption)
 
     except Exception as e:
-        logger.error(f"Admin {user_id} error adding video to DB after channel upload: {e}", exc_info=True)
-        await message.reply_text("❌ Failed to add video to database. Attempting to clean up from channel... 🐛")
-        if message_id_in_channel:
-            try:
-                await client.delete_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
-                logger.info(f"Cleaned up video message {message_id_in_channel} from channel due to DB save failure.")
-                await message.reply_text("✅ Video cleaned up from channel. Please try adding the video again. 🔄")
-            except MessageIdInvalid:
-                logger.warning(f"Failed to clean up video message {message_id_in_channel} from channel: already deleted or invalid.")
-                await message.reply_text("⚠️ Failed to add video to database. Could not clean up from channel (message already gone or invalid). Please try again. 🐛")
-            except Exception as cleanup_e:
-                logger.error(f"Error during channel cleanup for video {message_id_in_channel}: {cleanup_e}", exc_info=True)
-                await message.reply_text(f"❌ Failed to add video to database. Error during channel cleanup: {cleanup_e}. Manual cleanup may be required. 🐛")
-        else:
-            await message.reply_text("❌ Failed to add video to database. No channel message ID to clean up. Please try again. 🐛")
+        logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
+        await message.reply("❌ Failed to add video. Please try again. 🐛")
 
 @app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_category_cmd(client: Client, message: Message):
@@ -3437,7 +3607,7 @@ async def cleanup_expired_menus():
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due0 to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
                     )
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
