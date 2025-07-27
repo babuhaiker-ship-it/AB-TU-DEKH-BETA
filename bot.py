@@ -2714,10 +2714,12 @@ async def batchadd_cmd(client: Client, message: Message):
             logger.warning(f"Admin {user_id} tried to start batch add with no categories.")
             return
 
+        # Initialize batch_add_state for the user
         batch_add_state[user_id] = {
             'batch_mode': False,
             'current_category': None,
-            'count': 0
+            'count': 0,
+            'next_sequence': 1 # Initialize next_sequence here, will be updated on category selection
         }
         
         buttons = []
@@ -2762,12 +2764,25 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
             logger.warning(f"Admin {user_id} tried to set invalid category for batch: '{category_name}'.")
             return
 
+        # Find the current highest sequence number for the selected category
+        last_video_in_category = media_collection.find_one(
+            {'category': category_name},
+            sort=[('sequence_number', DESCENDING)]
+        )
+        next_sequence_for_batch = 1
+        if last_video_in_category and 'sequence_number' in last_video_in_category:
+            next_sequence_for_batch = last_video_in_category['sequence_number'] + 1
+        
         batch_add_state[user_id]['batch_mode'] = True
         batch_add_state[user_id]['current_category'] = category_name
         batch_add_state[user_id]['count'] = 0
+        batch_add_state[user_id]['next_sequence'] = next_sequence_for_batch # Set the starting sequence for this batch
         
+        logger.info(f"Admin {user_id} starting batch add for category '{category_name}'. Next sequence will start from: {next_sequence_for_batch}")
+
         await callback_query.message.edit_text(
             f"✅ You are now in batch add mode for category: <b>{html.escape(category_name)}</b>! 🎉\n"
+            f"The next video will be sequence <b>{next_sequence_for_batch}</b>.\n"
             "Send me videos to add. Type /done when finished. ✅\n"
             "You can use /category to change the current batch category without exiting batch mode. 🔄"
         )
@@ -2912,19 +2927,11 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
 
         video_uuid = str(uuid.uuid4())
         
-        # Determine the next sequence number for this category using aggregation
-        pipeline = [
-            {'$match': {'category': category}},
-            {'$group': {'_id': None, 'max_sequence': {'$max': '$sequence_number'}}}
-        ]
+        # Use and increment the sequence number from batch_add_state
+        next_sequence_number = batch_add_state[user_id]['next_sequence']
+        batch_add_state[user_id]['next_sequence'] += 1 # Increment for the next video
         
-        max_seq_result = list(media_collection.aggregate(pipeline))
-        
-        next_sequence_number = 1
-        if max_seq_result and max_seq_result[0].get('max_sequence') is not None:
-            next_sequence_number = max_seq_result[0]['max_sequence'] + 1
-        
-        logger.info(f"Calculated next_sequence_number for category '{category}': {next_sequence_number}")
+        logger.info(f"Using sequence_number for category '{category}': {next_sequence_number} (from batch state)")
 
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
@@ -2979,7 +2986,6 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             f"📁 Category: {html.escape(category)}\n"
             f"📊 Size: {format_size(file_size)}\n"
             f"🔢 Sequence: {next_sequence_number}\n" # Display sequence number
-            f"🆔 File ID: <code>{file_id}</code>\n"
             f"Videos added in this batch: <b>{batch_add_state[user_id]['count']}</b> 🔢"
         )
         await message.reply_text(admin_reply_caption)
@@ -3053,10 +3059,26 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
             logger.warning(f"Admin {user_id} tried to set invalid category: '{category_name}'.")
             return
 
+        # When changing category within batch mode, re-calculate the next sequence for the new category
+        last_video_in_category = media_collection.find_one(
+            {'category': category_name},
+            sort=[('sequence_number', DESCENDING)]
+        )
+        next_sequence_for_batch = 1
+        if last_video_in_category and 'sequence_number' in last_video_in_category:
+            next_sequence_for_batch = last_video_in_category['sequence_number'] + 1
+
         batch_add_state[user_id]['current_category'] = category_name
-        await callback_query.message.edit_text(f"✅ Category set to '<b>{html.escape(category_name)}</b>' for batch adding. Send videos now or use /done to finish. 🎥")
+        batch_add_state[user_id]['next_sequence'] = next_sequence_for_batch # Update next_sequence for the new category
+        batch_add_state[user_id]['count'] = 0 # Reset count for the new category in this batch session
+
+        await callback_query.message.edit_text(
+            f"✅ Category set to '<b>{html.escape(category_name)}</b>' for batch adding. 🎉\n"
+            f"The next video will be sequence <b>{next_sequence_for_batch}</b>.\n"
+            "Send videos now or use /done to finish. 🎥"
+        )
         await callback_query.answer(f"Category set to '{html.escape(category_name)}'")
-        logger.info(f"Admin {user_id} successfully set batch category to '{category_name}'.")
+        logger.info(f"Admin {user_id} successfully set batch category to '{category_name}'. Next sequence: {next_sequence_for_batch}.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to set batch category: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
@@ -3390,7 +3412,7 @@ async def cleanup_used_refresh_tokens():
             now = datetime.utcnow()
             delete_threshold = now - timedelta(seconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
             result = refresh_tokens_used_collection.delete_many({'used_at': {'$lt': delete_threshold}})
-            logger.info(f"Cleaned up {result.deleted_count} old used refresh token entries.")
+            logger.info(f"Cleaned up {result.deleted_count} old used refresh token entries. (Used refresh tokens are kept for {config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2} seconds after use to prevent reuse.)")
         except asyncio.CancelledError:
             logger.info("cleanup_used_refresh_tokens task cancelled gracefully.")
             break
