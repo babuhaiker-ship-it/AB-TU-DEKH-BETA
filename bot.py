@@ -2913,14 +2913,19 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         video_uuid = str(uuid.uuid4())
         
         # Determine the next sequence number for this category
+        # Find the maximum sequence_number for the current category
         last_video_in_category = media_collection.find_one(
             {'category': category},
-            sort=[('sequence_number', DESCENDING)]
+            sort=[('sequence_number', DESCENDING)],
+            projection={'sequence_number': 1} # Only fetch the sequence_number field
         )
+        
         next_sequence_number = 1
         if last_video_in_category and 'sequence_number' in last_video_in_category:
             next_sequence_number = last_video_in_category['sequence_number'] + 1
-        logger.info(f"Calculated next_sequence_number for category '{category}': {next_sequence_number}") # Added log
+        # If there are no documents with 'sequence_number' in this category, next_sequence_number remains 1.
+        # This handles cases where a category is new or all existing videos lack a sequence_number.
+        logger.info(f"Calculated next_sequence_number for category '{category}': {next_sequence_number}")
 
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
