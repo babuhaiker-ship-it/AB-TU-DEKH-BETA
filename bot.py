@@ -28,15 +28,15 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7646433933:AAGBHd4xGgfNiPrZ_Tn36so6DdDbK9J6d84'
+    BOT_TOKEN = '7213744072:AAEu3sZPjBMV5KjgOJDi-2vU6xw3E4ky-AE'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@SpicyNyraa_bot'
+    BOT_USERNAME = '@Spicynyraabot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
-    OWNER_IDS = [6612030110] # Initial owner ID(s) - will be used to initialize DB if empty
+    ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
@@ -67,7 +67,6 @@ history_collection = db['history']
 categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
-bot_settings_collection = db['bot_settings'] # New collection for bot-wide settings like roles
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -101,9 +100,6 @@ admin_rename_category_state = defaultdict(dict)
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {} 
 
-# Global lists for dynamic admin/owner IDs
-GLOBAL_ADMIN_IDS = []
-GLOBAL_OWNER_IDS = []
 
 def create_tracked_task(coro):
     """
@@ -116,47 +112,10 @@ def create_tracked_task(coro):
     logger.debug(f"Task {task.get_name()} created and tracked. Total active tasks: {len(active_tasks)}")
     return task
 
-# --- Role Management ---
-def is_owner(user_id: int) -> bool:
-    """Checks if the given user ID belongs to an owner."""
-    return user_id in GLOBAL_OWNER_IDS
-
+# --- Admin Check Utility ---
 def is_admin(user_id: int) -> bool:
-    """Checks if the given user ID belongs to an administrator (including owners)."""
-    return user_id in GLOBAL_ADMIN_IDS or user_id in GLOBAL_OWNER_IDS
-
-async def load_roles_from_db():
-    """Loads admin and owner IDs from MongoDB into global variables."""
-    global GLOBAL_ADMIN_IDS, GLOBAL_OWNER_IDS
-    
-    roles_doc = bot_settings_collection.find_one({'_id': 'roles'})
-    if not roles_doc:
-        # Initialize with default owner and empty admin list
-        bot_settings_collection.insert_one({
-            '_id': 'roles',
-            'owner_ids': config.OWNER_IDS, # Use initial config owner IDs
-            'admin_ids': []
-        })
-        GLOBAL_OWNER_IDS = config.OWNER_IDS
-        GLOBAL_ADMIN_IDS = []
-        logger.info(f"Initialized bot_settings with default owner IDs: {GLOBAL_OWNER_IDS}")
-    else:
-        GLOBAL_OWNER_IDS = roles_doc.get('owner_ids', [])
-        GLOBAL_ADMIN_IDS = roles_doc.get('admin_ids', [])
-        logger.info(f"Loaded owner IDs: {GLOBAL_OWNER_IDS}, Admin IDs: {GLOBAL_ADMIN_IDS} from DB.")
-
-async def update_roles_in_db():
-    """Saves the current global admin and owner IDs to MongoDB."""
-    bot_settings_collection.update_one(
-        {'_id': 'roles'},
-        {'$set': {
-            'owner_ids': GLOBAL_OWNER_IDS,
-            'admin_ids': GLOBAL_ADMIN_IDS
-        }},
-        upsert=True
-    )
-    logger.info(f"Saved owner IDs: {GLOBAL_OWNER_IDS}, Admin IDs: {GLOBAL_ADMIN_IDS} to DB.")
-
+    """Checks if the given user ID belongs to an administrator."""
+    return user_id in config.ADMIN_IDS
 
 # --- Force Subscribe Check ---
 async def check_membership(client: Client, user_id: int) -> bool:
@@ -164,7 +123,7 @@ async def check_membership(client: Client, user_id: int) -> bool:
     Checks if the user is a member of the force subscribe channel.
     Returns True if a member (or admin), False otherwise.
     """
-    if is_admin(user_id): # Use the global is_admin function
+    if is_admin(user_id):
         return True
 
     try:
@@ -1136,7 +1095,7 @@ def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
     ])
 
 def category_keyboard() -> InlineKeyboardMarkup:
-    """Keyboard for selecting video categories, with 2 buttons per row."""
+    """Keyboard for selecting video categories, with 3 buttons per row."""
     cats = get_categories()
     if not cats:
         return InlineKeyboardMarkup([[InlineKeyboardButton("😔 No Categories Available", callback_data="no_cat")]])
@@ -1146,7 +1105,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
     for i, cat in enumerate(cats):
         # Changed: Encode category name for callback data
         row.append(InlineKeyboardButton(f"🎬 {html.escape(cat)}", callback_data=f"cat_{str_to_b64(cat)}"))
-        if (i + 1) % 2 == 0: # Changed from 3 to 2 buttons per row
+        if (i + 1) % 3 == 0:
             buttons.append(row)
             row = []
     if row:
@@ -1187,8 +1146,6 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
     """Keyboard for displaying a referral link."""
-    # User requested to remove the "Copy Referral Link" button from profile.
-    # This function is still used by refer_btn, so we keep it.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Copy Referral Link", url=ref_link)]
     ])
@@ -1606,22 +1563,21 @@ async def profile_cmd(client: Client, message: Message):
         else:
             save_limit_display = f"{len(bookmarked_videos)}/{config.FREE_USER_SAVE_LIMIT}"
 
-        # Removed Video Views from profile
-        # views_doc = history_collection.find_one({'user_id': user_id})
-        # view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
-        
+
+        views_doc = history_collection.find_one({'user_id': user_id})
+        view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
         
         await message.reply(
             f"👤 <b>Your Profile</b> ✨\n\n"
             f"<b>Status:</b> {user_status}\n"
             f"<b>Tokens:</b> {tokens_count} 🪙\n"
-            # Removed: f"<b>Video Views:</b> {view_count} 🎞️\n"
+            f"<b>Video Views:</b> {view_count} 🎞️\n"
             f"<b>Saved Videos:</b> {save_limit_display} ❤️\n"
             f"<b>Referrals:</b> {referral_count} 👥\n"
             f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗\n"
-            f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}"
-            # Removed: reply_markup=referral_keyboard(ref_link)
+            f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}",
+            reply_markup=referral_keyboard(ref_link)
         )
         logger.info(f"User {user_id}: Profile sent successfully.")
     except Exception as e:
@@ -2228,14 +2184,9 @@ async def refresh_token_btn(client: Client, message: Message):
             disable_preview = True
 
         user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
-        
-        token_timeout_hours = config.TOKEN_EXPIRY / 3600 # Calculate hours from seconds
-        
         await message.reply_text(
             f"💡 <b>Information</b>\nHere's how to get your token! 🚀\n\n"
-            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n"
-            f"<b>Token Timeout:</b> {token_timeout_hours:.0f} hours ⏰\n\n" # Modified line
-            f"<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for {token_timeout_hours:.0f} hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
+            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> 24 hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
             disable_web_page_preview = disable_preview,
             reply_markup=token_earning_keyboard(ad_url)
         )
@@ -2444,12 +2395,6 @@ async def saved_videos_btn(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in saved_videos_btn.")
         return
 
-    # NEW: Token check for saved videos
-    if not user_has_token(user_id):
-        logger.info(f"User {user_id} has no tokens, prompting earning options for saved videos.")
-        await send_token_earning_options(client, message)
-        return
-    
     user = users_collection.find_one({'user_id': user_id})
     if not user or not user.get('bookmarked_videos'):
         await message.reply("You haven't saved any videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
@@ -2767,7 +2712,7 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     await callback_query.answer("Operation cancelled.")
 
 # --- Admin Commands ---
-@app.on_message(filters.command("broadcast") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
     """Admin command to broadcast a replied message to all users."""
     user_id = message.from_user.id
@@ -2829,7 +2774,7 @@ async def broadcast_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to complete broadcast: {e}", exc_info=True)
         await message.reply("❌ An error occurred during broadcast. Check logs for details. 🐛")
 
-@app.on_message(filters.command("addcategory") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("addcategory") & filters.private & filters.user(config.ADMIN_IDS))
 async def addcategory_cmd(client: Client, message: Message):
     """Admin command to add a new video category."""
     user_id = message.from_user.id
@@ -2856,7 +2801,7 @@ async def addcategory_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to add category: {e}", exc_info=True)
         await message.reply("❌ An error occurred while adding category. Please try again. 🐛")
 
-@app.on_message(filters.command("deletecategory") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("deletecategory") & filters.private & filters.user(config.ADMIN_IDS))
 async def deletecategory_cmd(client: Client, message: Message):
     """Admin command to delete a video category."""
     user_id = message.from_user.id
@@ -2913,7 +2858,7 @@ async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery)
         logger.error(f"Admin {user_id} failed to confirm category deletion: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred during category deletion. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("addtoken") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("addtoken") & filters.private & filters.user(config.ADMIN_IDS))
 async def addtoken_cmd(client: Client, message: Message):
     """Admin command to add tokens to a specific user and grant premium access."""
     user_id = message.from_user.id
@@ -2988,7 +2933,7 @@ def format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
-@app.on_message(filters.command("batchadd") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
 async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and choose category."""
     user_id = message.from_user.id
@@ -3078,7 +3023,7 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
         logger.error(f"Admin {user_id} failed to set batch category in callback: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("done") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("done") & filters.private & filters.user(config.ADMIN_IDS))
 async def done_cmd(client: Client, message: Message):
     """Admin command to exit batch video adding mode."""
     user_id = message.from_user.id
@@ -3096,7 +3041,7 @@ async def done_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
-@app.on_message(filters.video & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.video & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_video_batch_add_or_delete(client: Client, message: Message):
     """
     Handles incoming video messages for either batch adding mode or delete video mode.
@@ -3252,7 +3197,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
         await message.reply("❌ Failed to add video. Please try again. 🐛")
 
-@app.on_message(filters.command("category") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_category_cmd(client: Client, message: Message):
     """Admin command to set the current category for batch adding."""
     user_id = message.from_user.id
@@ -3341,7 +3286,7 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"Admin {user_id} failed to set batch category: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("stats") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("stats") & filters.private & filters.user(config.ADMIN_IDS))
 async def stats_cmd(client: Client, message: Message):
     """Admin command to display bot statistics, including category video counts."""
     user_id = message.from_user.id
@@ -3373,7 +3318,7 @@ async def stats_cmd(client: Client, message: Message):
 
 # --- New Admin Commands ---
 
-@app.on_message(filters.command("setshortener") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_shortener_cmd(client: Client, message: Message):
     """Admin command to set the URL shortener API template URL."""
     user_id = message.from_user.id
@@ -3386,7 +3331,7 @@ async def set_shortener_cmd(client: Client, message: Message):
         "If your shortener doesn't use `api=` in the URL, provide the full API endpoint URL that accepts the long URL as a parameter (e.g., `https://api.shortener.com/shorten?url={long_url}&key=YOUR_API_KEY`)."
     )
 
-@app.on_message(filters.command("deletevideo") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("deletevideo") & filters.private & filters.user(config.ADMIN_IDS))
 async def deletevideo_cmd(client: Client, message: Message):
     """Admin command to initiate video deletion mode."""
     user_id = message.from_user.id
@@ -3394,7 +3339,7 @@ async def deletevideo_cmd(client: Client, message: Message):
     admin_delete_video_state[user_id] = True
     await message.reply("Send the <b>video file from the database</b> to delete it. This must be the original video file, not a forwarded one. 🎥")
 
-@app.on_message(filters.command("categoryrename") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command("categoryrename") & filters.private & filters.user(config.ADMIN_IDS))
 async def categoryrename_cmd(client: Client, message: Message):
     """Admin command to initiate category renaming flow."""
     user_id = message.from_user.id
@@ -3402,160 +3347,7 @@ async def categoryrename_cmd(client: Client, message: Message):
     admin_rename_category_state[user_id] = {'step': 'await_old_name'}
     await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
 
-# New Admin Commands for Owner
-@app.on_message(filters.command("addadmin") & filters.private & filters.user(lambda _, __, msg: is_owner(msg.from_user.id)))
-async def addadmin_cmd(client: Client, message: Message):
-    """Owner command to add a new admin."""
-    user_id = message.from_user.id
-    logger.info(f"Owner {user_id} initiated /addadmin command.")
-    
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        await message.reply(
-            "Usage: <code>/addadmin &lt;user_id&gt; &lt;username&gt;</code>\n"
-            "Example: <code>/addadmin 123456789 testuser</code>"
-        )
-        return
-    
-    try:
-        target_user_id = int(args[1])
-        target_username = args[2].strip()
-        
-        if target_user_id <= 0:
-            await message.reply("User ID must be a positive integer. 🔢")
-            return
-        
-        if target_user_id in GLOBAL_OWNER_IDS:
-            await message.reply(f"User {target_user_id} is already an owner. Owners have all admin powers. 👑")
-            return
-
-        if target_user_id in GLOBAL_ADMIN_IDS:
-            await message.reply(f"User {target_user_id} (<code>{html.escape(target_username)}</code>) is already an admin. 👮‍♂️")
-            return
-        
-        GLOBAL_ADMIN_IDS.append(target_user_id)
-        await update_roles_in_db()
-        
-        await message.reply(f"✅ User <b>{target_user_id}</b> (<code>{html.escape(target_username)}</code>) has been added as an admin. 👮‍♀️")
-        logger.info(f"Owner {user_id} added admin: {target_user_id} ({target_username}).")
-        
-        try:
-            await client.send_message(target_user_id, "🎉 Congratulations! You have been promoted to an admin of this bot! Use /helpadmin for a list of commands. 🚀")
-        except (UserIsBlocked, ChatInvalid):
-            logger.warning(f"Could not notify new admin {target_user_id}; user blocked or chat invalid.")
-        
-    except ValueError:
-        await message.reply("Invalid user ID. Please provide a valid integer. 🔢")
-    except Exception as e:
-        logger.error(f"Owner {user_id} failed to add admin: {e}", exc_info=True)
-        await message.reply("❌ An error occurred while adding admin. Please try again. 🐛")
-
-@app.on_message(filters.command("removeadmin") & filters.private & filters.user(lambda _, __, msg: is_owner(msg.from_user.id)))
-async def removeadmin_cmd(client: Client, message: Message):
-    """Owner command to remove an admin."""
-    user_id = message.from_user.id
-    logger.info(f"Owner {user_id} initiated /removeadmin command.")
-    
-    if not GLOBAL_ADMIN_IDS:
-        await message.reply("There are no admins to remove. 🤷‍♀️")
-        return
-        
-    buttons = []
-    for admin_id in GLOBAL_ADMIN_IDS:
-        try:
-            # Try to get user info for username, but don't block if fails
-            admin_user = await client.get_users(admin_id)
-            admin_name = html.escape(admin_user.username or admin_user.first_name or str(admin_id))
-        except Exception:
-            admin_name = str(admin_id) # Fallback to ID if fetching user fails
-        buttons.append([InlineKeyboardButton(f"🗑️ {admin_name} ({admin_id})", callback_data=f"rmadmin_{admin_id}")])
-
-    await message.reply_text(
-        "Select an admin to remove: 👇\n\n"
-        "⚠️ This will remove their admin privileges.",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
-    logger.info(f"Owner {user_id}: Remove admin options sent.")
-
-@app.on_callback_query(filters.regex(r"^rmadmin_(\d+)$"))
-async def removeadmin_callback(client: Client, callback_query: CallbackQuery):
-    """Handles callback for removing an admin."""
-    user_id = callback_query.from_user.id
-    target_admin_id = int(callback_query.data.split('_')[1])
-    logger.info(f"Owner {user_id} confirmed removal of admin: {target_admin_id}.")
-    
-    if not is_owner(user_id):
-        await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
-        logger.warning(f"Non-owner user {user_id} attempted to remove admin.")
-        return
-
-    if target_admin_id in GLOBAL_OWNER_IDS:
-        await callback_query.answer("You cannot remove an owner using this command. 👑", show_alert=True)
-        return
-
-    if target_admin_id not in GLOBAL_ADMIN_IDS:
-        await callback_query.answer("This user is not currently an admin. 🧐", show_alert=True)
-        await callback_query.message.edit_text("This user is not currently an admin. 🧐")
-        return
-
-    try:
-        GLOBAL_ADMIN_IDS.remove(target_admin_id)
-        await update_roles_in_db()
-        
-        await callback_query.message.edit_text(f"✅ User <b>{target_admin_id}</b> has been removed as an admin. 🗑️")
-        await callback_query.answer("Admin removed successfully. ✅")
-        logger.info(f"Owner {user_id} removed admin: {target_admin_id}.")
-        
-        try:
-            await client.send_message(target_admin_id, "⚠️ Your admin privileges have been revoked by an owner. 🚫")
-        except (UserIsBlocked, ChatInvalid):
-            logger.warning(f"Could not notify removed admin {target_admin_id}; user blocked or chat invalid.")
-            
-    except Exception as e:
-        logger.error(f"Owner {user_id} failed to remove admin {target_admin_id}: {e}", exc_info=True)
-        await callback_query.answer("❌ An error occurred while removing admin. Please try again. 🐛", show_alert=True)
-        await callback_query.message.edit_text("❌ An error occurred while removing admin. Please try again. 🐛")
-
-@app.on_message(filters.command("helpadmin") & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
-async def helpadmin_cmd(client: Client, message: Message):
-    """Admin/Owner command to display a list of admin commands and their usage."""
-    user_id = message.from_user.id
-    logger.info(f"Admin/Owner {user_id} requested /helpadmin command.")
-
-    help_text = "<b>⚙️ Admin/Owner Commands Guide ⚙️</b>\n\n"
-
-    # Owner-specific commands
-    if is_owner(user_id):
-        help_text += "<b>👑 Owner Commands:</b>\n"
-        help_text += "  • <code>/addadmin &lt;user_id&gt; &lt;username&gt;</code>: Add a new admin.\n"
-        help_text += "  • <code>/removeadmin</code>: Remove an existing admin via inline menu.\n\n"
-
-    # General Admin commands
-    help_text += "<b>👮‍♂️ Admin Commands:</b>\n"
-    help_text += "  • <code>/broadcast</code> (reply to a message): Send a message to all bot users.\n"
-    help_text += "  • <code>/addcategory &lt;name&gt;</code>: Add a new video category.\n"
-    help_text += "  • <code>/deletecategory</code>: Delete a category and all its videos via inline menu.\n"
-    help_text += "  • <code>/addtoken &lt;user_id&gt; &lt;duration_days&gt;</code>: Grant premium access to a user.\n"
-    help_text += "  • <code>/batchadd</code>: Enter batch video adding mode. Select category, then send videos.\n"
-    help_text += "  • <code>/done</code>: Exit batch video adding mode.\n"
-    help_text += "  • <code>/category</code>: Change the current category while in batch add mode.\n"
-    help_text += "  • <code>/stats</code>: Show bot statistics (users, videos, categories).\n"
-    help_text += "  • <code>/setshortener</code>: Set the URL shortener API template URL.\n"
-    help_text += "  • <code>/deletevideo</code>: Enter video deletion mode. Send the video file to delete it.\n"
-    help_text += "  • <code>/categoryrename</code>: Rename an existing category.\n"
-    help_text += "  • <code>/toggle_auto_delete</code>: Toggle auto-deletion of messages sent to the video channel.\n"
-    help_text += "  • <code>/toggle_protect</code>: Toggle content protection (forwarding restriction) for videos sent to users.\n\n"
-    help_text += "<b>💡 Usage Tips:</b>\n"
-    help_text += "  - For <code>/addadmin</code>, <code>/addtoken</code>, replace <code>&lt;...&gt;</code> with actual values.\n"
-    help_text += "  - For <code>/broadcast</code>, reply to the message you want to send.\n"
-    help_text += "  - In batch mode, just send video files after selecting a category.\n"
-    help_text += "  - When deleting a video, send the *original* video file you uploaded.\n"
-    help_text += "  - Commands with inline menus will guide you through the process.\n"
-
-    await message.reply(help_text)
-
-
-@app.on_message(filters.text & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
 async def handle_admin_text_input(client: Client, message: Message):
     """Handles admin's text input for various multi-step commands."""
     user_id = message.from_user.id
@@ -3685,7 +3477,7 @@ async def handle_admin_text_input(client: Client, message: Message):
 
 
 # --- Auto-Delete & Protect Content Settings ---
-@app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.user(config.ADMIN_IDS))
 async def toggle_auto_delete(client: Client, message: Message):
     """Admin command to toggle auto-deletion of sent videos."""
     user_id = message.from_user.id
@@ -3700,7 +3492,7 @@ async def toggle_auto_delete(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to toggle auto-delete: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling auto-delete. Please try again. 🐛")
 
-@app.on_message(filters.command('toggle_protect') & filters.private & filters.user(lambda _, __, msg: is_admin(msg.from_user.id)))
+@app.on_message(filters.command('toggle_protect') & filters.private & filters.user(config.ADMIN_IDS))
 async def toggle_protect(client: Client, message: Message):
     """Admin command to toggle content protection for sent videos."""
     user_id = message.from_user.id
@@ -3890,7 +3682,6 @@ async def main_bot_logic():
     logger.info("Starting bot and scheduling background tasks...")
     
     await app.start()
-    await load_roles_from_db() # Load roles after app starts
     await health_check()
     logger.info("Bot has connected to Telegram.")
 
