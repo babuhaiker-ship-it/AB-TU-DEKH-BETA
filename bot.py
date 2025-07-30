@@ -36,7 +36,8 @@ class BotConfig:
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
-    ADMIN_IDS = [6612030110]
+    # OWNER_ID is the only hardcoded ID. All other admins are managed dynamically.
+    OWNER_ID = 6612030110 # Replace with the actual Telegram User ID of the bot owner
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
@@ -52,8 +53,8 @@ class BotConfig:
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK, config.OWNER_ID]):
+        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK, OWNER_ID.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -67,6 +68,7 @@ history_collection = db['history']
 categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
+admins_collection = db['admins'] # New collection for dynamic admins
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -81,6 +83,7 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
+admins_collection.create_index([("user_id", ASCENDING)], unique=True) # Index for admins collection
 
 # --- Pyrogram Client ---
 app = Client("./spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
@@ -96,6 +99,10 @@ admin_delete_video_state = defaultdict(bool)
 
 # --- Admin State for Category Rename ---
 admin_rename_category_state = defaultdict(dict)
+
+# --- Owner State for Add/Remove Admin ---
+owner_addadmin_state = defaultdict(bool) # True when awaiting user_id|username
+owner_removeadmin_state = defaultdict(bool) # True when awaiting admin selection
 
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {} 
@@ -113,9 +120,15 @@ def create_tracked_task(coro):
     return task
 
 # --- Admin Check Utility ---
+def is_owner(user_id: int) -> bool:
+    """Checks if the given user ID belongs to the bot owner."""
+    return user_id == config.OWNER_ID
+
 def is_admin(user_id: int) -> bool:
-    """Checks if the given user ID belongs to an administrator."""
-    return user_id in config.ADMIN_IDS
+    """Checks if the given user ID belongs to an administrator (including the owner)."""
+    if is_owner(user_id):
+        return True
+    return admins_collection.find_one({'user_id': user_id}) is not None
 
 # --- Force Subscribe Check ---
 async def check_membership(client: Client, user_id: int) -> bool:
@@ -123,7 +136,7 @@ async def check_membership(client: Client, user_id: int) -> bool:
     Checks if the user is a member of the force subscribe channel.
     Returns True if a member (or admin), False otherwise.
     """
-    if is_admin(user_id):
+    if is_admin(user_id): # Admins and Owners bypass
         return True
 
     try:
@@ -1747,7 +1760,6 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     
     if sent_success:
         save_history(user_id, video['uuid'], category_name)
-        logger.info(f"User {user_id} selected category {category_name} and new video {video['uuid']} sent.")
         await callback_query.answer()
         # If the original message was the category selection, delete it
         if callback_query.message.id != temp_msg.id:
@@ -2712,7 +2724,7 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     await callback_query.answer("Operation cancelled.")
 
 # --- Admin Commands ---
-@app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
+@app.on_message(filters.command("broadcast") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)) & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
     """Admin command to broadcast a replied message to all users."""
     user_id = message.from_user.id
@@ -2774,7 +2786,7 @@ async def broadcast_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to complete broadcast: {e}", exc_info=True)
         await message.reply("❌ An error occurred during broadcast. Check logs for details. 🐛")
 
-@app.on_message(filters.command("addcategory") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("addcategory") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def addcategory_cmd(client: Client, message: Message):
     """Admin command to add a new video category."""
     user_id = message.from_user.id
@@ -2801,7 +2813,7 @@ async def addcategory_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to add category: {e}", exc_info=True)
         await message.reply("❌ An error occurred while adding category. Please try again. 🐛")
 
-@app.on_message(filters.command("deletecategory") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("deletecategory") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def deletecategory_cmd(client: Client, message: Message):
     """Admin command to delete a video category."""
     user_id = message.from_user.id
@@ -2858,7 +2870,7 @@ async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery)
         logger.error(f"Admin {user_id} failed to confirm category deletion: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred during category deletion. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("addtoken") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("addtoken") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def addtoken_cmd(client: Client, message: Message):
     """Admin command to add tokens to a specific user and grant premium access."""
     user_id = message.from_user.id
@@ -2933,7 +2945,7 @@ def format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
-@app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("batchadd") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and choose category."""
     user_id = message.from_user.id
@@ -3023,7 +3035,7 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
         logger.error(f"Admin {user_id} failed to set batch category in callback: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("done") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("done") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def done_cmd(client: Client, message: Message):
     """Admin command to exit batch video adding mode."""
     user_id = message.from_user.id
@@ -3041,7 +3053,7 @@ async def done_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
-@app.on_message(filters.video & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.video & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def handle_video_batch_add_or_delete(client: Client, message: Message):
     """
     Handles incoming video messages for either batch adding mode or delete video mode.
@@ -3197,7 +3209,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
         await message.reply("❌ Failed to add video. Please try again. 🐛")
 
-@app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("category") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def set_category_cmd(client: Client, message: Message):
     """Admin command to set the current category for batch adding."""
     user_id = message.from_user.id
@@ -3286,7 +3298,7 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"Admin {user_id} failed to set batch category: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("stats") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("stats") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def stats_cmd(client: Client, message: Message):
     """Admin command to display bot statistics, including category video counts."""
     user_id = message.from_user.id
@@ -3318,7 +3330,7 @@ async def stats_cmd(client: Client, message: Message):
 
 # --- New Admin Commands ---
 
-@app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("setshortener") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def set_shortener_cmd(client: Client, message: Message):
     """Admin command to set the URL shortener API template URL."""
     user_id = message.from_user.id
@@ -3331,7 +3343,7 @@ async def set_shortener_cmd(client: Client, message: Message):
         "If your shortener doesn't use `api=` in the URL, provide the full API endpoint URL that accepts the long URL as a parameter (e.g., `https://api.shortener.com/shorten?url={long_url}&key=YOUR_API_KEY`)."
     )
 
-@app.on_message(filters.command("deletevideo") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("deletevideo") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def deletevideo_cmd(client: Client, message: Message):
     """Admin command to initiate video deletion mode."""
     user_id = message.from_user.id
@@ -3339,7 +3351,7 @@ async def deletevideo_cmd(client: Client, message: Message):
     admin_delete_video_state[user_id] = True
     await message.reply("Send the <b>video file from the database</b> to delete it. This must be the original video file, not a forwarded one. 🎥")
 
-@app.on_message(filters.command("categoryrename") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("categoryrename") & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def categoryrename_cmd(client: Client, message: Message):
     """Admin command to initiate category renaming flow."""
     user_id = message.from_user.id
@@ -3347,12 +3359,136 @@ async def categoryrename_cmd(client: Client, message: Message):
     admin_rename_category_state[user_id] = {'step': 'await_old_name'}
     await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
 
-@app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
-async def handle_admin_text_input(client: Client, message: Message):
-    """Handles admin's text input for various multi-step commands."""
+# --- Owner Commands ---
+@app.on_message(filters.command("addadmin") & filters.private & filters.create(lambda _, __, msg: is_owner(msg.from_user.id)))
+async def addadmin_cmd(client: Client, message: Message):
+    """Owner command to add a new admin."""
+    user_id = message.from_user.id
+    logger.info(f"Owner {user_id} initiated /addadmin command.")
+    owner_addadmin_state[user_id] = True
+    await message.reply("Please send the User ID and Username (format: <code>user_id|username</code>) to add as admin. 📝\n\n<b>Example:</b> <code>123456789|john_doe</code>")
+
+@app.on_message(filters.command("removeadmin") & filters.private & filters.create(lambda _, __, msg: is_owner(msg.from_user.id)))
+async def removeadmin_cmd(client: Client, message: Message):
+    """Owner command to remove an admin."""
+    user_id = message.from_user.id
+    logger.info(f"Owner {user_id} initiated /removeadmin command.")
+    
+    try:
+        admins = list(admins_collection.find({}))
+        if not admins:
+            await message.reply("😔 No dynamic admins to remove. 🚫")
+            return
+
+        buttons = []
+        for admin in admins:
+            buttons.append([InlineKeyboardButton(f"❌ @{html.escape(admin['username'])} ({admin['user_id']})", callback_data=f"remove_admin_confirm_{admin['user_id']}")])
+
+        owner_removeadmin_state[user_id] = True
+        await message.reply(
+            "Select an admin to remove: 👇\n\n"
+            "⚠️ This action cannot be undone.",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        logger.info(f"Owner {user_id}: Remove admin options sent.")
+    except Exception as e:
+        logger.error(f"Owner {user_id} failed to send remove admin options: {e}", exc_info=True)
+        await message.reply("❌ An error occurred while preparing remove admin options. Please try again. 🐛")
+
+@app.on_callback_query(filters.regex(r"^remove_admin_confirm_(.+)$"))
+async def remove_admin_confirm_callback(client: Client, callback_query: CallbackQuery):
+    """Handles confirmation for removing an admin."""
+    owner_id = callback_query.from_user.id
+    admin_id_to_remove = int(callback_query.data.split('_')[-1])
+    logger.info(f"Owner {owner_id} confirmed removal of admin {admin_id_to_remove}.")
+
+    try:
+        if not is_owner(owner_id):
+            await callback_query.answer("❌ Not authorized. Only the owner can remove admins. 🚫", show_alert=True)
+            logger.warning(f"Non-owner user {owner_id} attempted to remove admin.")
+            return
+
+        admin_to_remove_doc = admins_collection.find_one({'user_id': admin_id_to_remove})
+        if not admin_to_remove_doc:
+            await callback_query.answer("Admin not found in the database. 🧐", show_alert=True)
+            await callback_query.message.edit_text("Admin not found or already removed. 🧐")
+            return
+
+        # Prevent owner from removing themselves
+        if admin_id_to_remove == config.OWNER_ID:
+            await callback_query.answer("❌ You cannot remove yourself (the owner) as an admin. 🚫", show_alert=True)
+            return
+
+        result = admins_collection.delete_one({'user_id': admin_id_to_remove})
+        
+        if result.deleted_count > 0:
+            username = admin_to_remove_doc.get('username', 'N/A')
+            await callback_query.message.edit_text(f"❌ Admin @{html.escape(username)} (<code>{admin_id_to_remove}</code>) removed successfully. 🗑️")
+            await callback_query.answer(f"Admin @{username} removed.")
+            logger.info(f"Owner {owner_id} successfully removed admin {admin_id_to_remove} (@{username}).")
+        else:
+            await callback_query.answer("Failed to remove admin. Admin not found or already removed. 🐛", show_alert=True)
+            await callback_query.message.edit_text("Failed to remove admin. Admin not found or already removed. 🐛")
+    except Exception as e:
+        logger.error(f"Owner {owner_id} failed to remove admin {admin_id_to_remove}: {e}", exc_info=True)
+        await callback_query.answer("❌ An error occurred during admin removal. Please try again. 🐛", show_alert=True)
+    finally:
+        del owner_removeadmin_state[owner_id] # Clear state after action
+
+
+@app.on_message(filters.text & filters.private & filters.create(lambda _, __, msg: is_owner(msg.from_user.id)))
+async def handle_owner_text_input(client: Client, message: Message):
+    """Handles owner's text input for multi-step commands like addadmin."""
     user_id = message.from_user.id
 
-    if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
+    if user_id in owner_addadmin_state and owner_addadmin_state[user_id]:
+        input_text = message.text.strip()
+        parts = input_text.split('|', 1) # Split only on the first '|'
+
+        if len(parts) != 2:
+            await message.reply("❌ Invalid format. Please use: <code>user_id|username</code>")
+            logger.warning(f"Owner {user_id} provided invalid format for addadmin: {input_text}")
+            return
+
+        try:
+            target_user_id = int(parts[0].strip())
+            target_username = parts[1].strip().replace('@', '') # Remove @ if present
+            
+            if not target_username:
+                await message.reply("❌ Username cannot be empty. Please provide a valid username.")
+                return
+
+            if admins_collection.find_one({'user_id': target_user_id}):
+                await message.reply(f"⚠️ User ID <code>{target_user_id}</code> is already an admin. ✅")
+                logger.warning(f"Owner {user_id} attempted to add existing admin: {target_user_id}")
+                del owner_addadmin_state[user_id]
+                return
+
+            admins_collection.insert_one({
+                'user_id': target_user_id,
+                'username': target_username,
+                'added_by': user_id,
+                'added_at': datetime.utcnow()
+            })
+            await message.reply(f"✅ Admin @{html.escape(target_username)} (<code>{target_user_id}</code>) added successfully! 🎉")
+            logger.info(f"Owner {user_id} successfully added admin {target_user_id} (@{target_username}).")
+            try:
+                await client.send_message(target_user_id, "🎉 Congratulations! You have been added as an admin of the bot! You can now use admin commands. 🚀")
+            except (UserIsBlocked, ChatInvalid):
+                logger.warning(f"Could not notify new admin {target_user_id}; user blocked or chat invalid.")
+            except Exception as notify_e:
+                logger.error(f"Failed to notify new admin {target_user_id}: {notify_e}")
+
+        except ValueError:
+            await message.reply("❌ Invalid User ID. Please ensure it's a number. 🔢")
+            logger.warning(f"Owner {user_id} provided non-integer user ID for addadmin: {parts[0]}")
+        except Exception as e:
+            logger.error(f"Owner {user_id} failed to add admin: {e}", exc_info=True)
+            await message.reply("❌ An error occurred while adding admin. Please try again. 🐛")
+        finally:
+            del owner_addadmin_state[user_id] # Clear state after processing
+
+    elif user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
         template_url = message.text.strip()
         
         if not template_url.startswith("http://") and not template_url.startswith("https://"):
@@ -3392,7 +3528,7 @@ async def handle_admin_text_input(client: Client, message: Message):
             del admin_shortener_setup_state[user_id]
         return
 
-    if user_id in admin_rename_category_state:
+    elif user_id in admin_rename_category_state:
         current_step = admin_rename_category_state[user_id].get('step')
         
         if current_step == 'await_old_name':
@@ -3473,11 +3609,11 @@ async def handle_admin_text_input(client: Client, message: Message):
                 del admin_rename_category_state[user_id]
             return
     
-    logger.debug(f"Admin {user_id} sent text message '{message.text}' not part of any active multi-step command. Ignoring.")
+    logger.debug(f"Owner {user_id} sent text message '{message.text}' not part of any active multi-step command. Ignoring.")
 
 
 # --- Auto-Delete & Protect Content Settings ---
-@app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def toggle_auto_delete(client: Client, message: Message):
     """Admin command to toggle auto-deletion of sent videos."""
     user_id = message.from_user.id
@@ -3492,7 +3628,7 @@ async def toggle_auto_delete(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to toggle auto-delete: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling auto-delete. Please try again. 🐛")
 
-@app.on_message(filters.command('toggle_protect') & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command('toggle_protect') & filters.private & filters.create(lambda _, __, msg: is_admin(msg.from_user.id)))
 async def toggle_protect(client: Client, message: Message):
     """Admin command to toggle content protection for sent videos."""
     user_id = message.from_user.id
