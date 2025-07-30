@@ -306,6 +306,10 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
     if last_known_premium_status and not current_premium_status:
         try:
             await client.send_message(user_id, "⚠️ <b>Your Premium Access Has Expired!</b> 💔\n\nYour premium token has expired. You are no longer a premium user. Enjoy regular features or purchase new premium access! 🛒")
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$set': {'last_premium_check_status': current_premium_status}}
+            )
             logger.info(f"Notified user {user_id} about premium expiry.")
         except (UserIsBlocked, ChatInvalid):
             logger.warning(f"Could not notify user {user_id} about premium expiry; user blocked or chat invalid.")
@@ -1159,6 +1163,7 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
     """Keyboard for displaying a referral link."""
+    # This function is now unused as per the new profile design, but kept for reference if needed elsewhere.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Copy Referral Link", url=ref_link)]
     ])
@@ -1565,32 +1570,33 @@ async def profile_cmd(client: Client, message: Message):
             tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
 
         referral_count = user.get('referral_count', 0)
-        referred_by = user.get('referred_by', None)
+        # Removed referred_by as it's not displayed in the new format
         bookmarked_videos = user.get('bookmarked_videos', [])
         
         is_premium = is_premium_user(user_id)
         user_status = "Premium User 💎" if is_premium else "Free User ✨"
         
-        if is_premium:
-            save_limit_display = f"{len(bookmarked_videos)}/Unlimited"
-        else:
-            save_limit_display = f"{len(bookmarked_videos)}/{config.FREE_USER_SAVE_LIMIT}"
+        # The prompt only asks for "Saved Videos: 3" without the limit, so simplifying this
+        # If premium, it's unlimited, so just show the count.
+        # If free, still show the count, the limit is implied by the "Free User" status.
+        save_limit_display = f"{len(bookmarked_videos)}"
 
 
-        views_doc = history_collection.find_one({'user_id': user_id})
-        view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
+        # Removed views_doc and view_count calculation as per request
+        # views_doc = history_collection.find_one({'user_id': user_id})
+        # view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
+        
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
         
         await message.reply(
             f"👤 <b>Your Profile</b> ✨\n\n"
             f"<b>Status:</b> {user_status}\n"
-            f"<b>Tokens:</b> {tokens_count} 🪙\n"
-            f"<b>Video Views:</b> {view_count} 🎞️\n"
-            f"<b>Saved Videos:</b> {save_limit_display} ❤️\n"
-            f"<b>Referrals:</b> {referral_count} 👥\n"
-            f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗\n"
-            f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}",
-            reply_markup=referral_keyboard(ref_link)
+            f"<b>Tokens:</b> {tokens_count}\n"
+            f"<b>Saved Videos:</b> {save_limit_display}\n"
+            f"<b>Referrals:</b> {referral_count}\n"
+            f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗",
+            # Removed referral_keyboard as per request
+            reply_markup=None # No inline keyboard for profile anymore
         )
         logger.info(f"User {user_id}: Profile sent successfully.")
     except Exception as e:
@@ -1696,7 +1702,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
         await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
         try:
-            await client.delete_messages(callback_query.message.chat.id, callback_query.message.id)
+            await client.delete_messages(chat_id, callback_query.message.id)
             clear_active_video_message(user_id) # Clear old message state if it was an old button
         except MessageIdInvalid:
             pass
@@ -1859,7 +1865,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         )
         return
     
-    # Get position for display (recalculated for this specific video)
+    # Get position for display
     video_to_display_with_pos, current_position, total_videos = get_video_and_position(
         video_to_display['uuid'], selected_category, True, user_id
     )
@@ -2095,7 +2101,7 @@ async def refer_btn(client: Client, message: Message):
             return
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢", reply_markup=referral_keyboard(ref_link))
+        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢", reply_markup=None) # Removed inline button
         logger.info(f"User {user_id}: Referral link sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
@@ -2196,9 +2202,16 @@ async def refresh_token_btn(client: Client, message: Message):
             disable_preview = True
 
         user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
+        
+        # Calculate configured_hours dynamically
+        configured_hours = config.TOKEN_EXPIRY // 3600 # Convert seconds to hours
+
         await message.reply_text(
             f"💡 <b>Information</b>\nHere's how to get your token! 🚀\n\n"
-            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> 24 hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
+            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n"
+            f"<b>Token Timeout:</b> {configured_hours} hours ⏰\n\n"
+            f"<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for {configured_hours} hours after passing the ad. It's that simple! ✨\n\n"
+            f"<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
             disable_web_page_preview = disable_preview,
             reply_markup=token_earning_keyboard(ad_url)
         )
@@ -3146,7 +3159,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         next_sequence_number = batch_add_state[user_id]['next_sequence']
         batch_add_state[user_id]['next_sequence'] += 1 # Increment for the next video
         
-        logger.info(f"Using sequence_number for category '{category}': {next_sequence_number} (from batch state)")
+        logger.info(f"Using sequence_number for category '{category}'. Next sequence will be: {next_sequence_number} (from batch state)")
 
         channel_caption = custom_caption if custom_caption else f"Category: {html.escape(category)}\nSize: {format_size(file_size)}\nUUID: {video_uuid}"
 
