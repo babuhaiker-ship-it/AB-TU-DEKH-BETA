@@ -35,11 +35,11 @@ class BotConfig:
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 'https://t.me/@SpicyNyraaSupport_bot'
+    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
     # OWNER_ID is the only hardcoded ID. All other admins are managed dynamically.
     OWNER_ID = 6612030110 # Replace with the actual Telegram User ID of the bot owner
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 43200  # 24 hours in seconds (for regular tokens, not premium)
+    TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
@@ -49,7 +49,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_ID = -1002622483638
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     MENU_EXPIRY_MINUTES = 60
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 300 # 5 minutes for refresh token links to be valid
 
 try:
     config = BotConfig()
@@ -1590,11 +1590,11 @@ async def profile_cmd(client: Client, message: Message):
         
         await message.reply(
             f"👤 <b>Your Profile</b> ✨\n\n"
-            f"🔹 Status: {user_status}\n"
-            f"🔹 Tokens: {tokens_count} 🎟️\n"
-            f"🔹 Saved Videos: {save_limit_display} 💾\n"
-            f"🔹 Referrals: {referral_count} 🤝\n"
-            f"🔹 Referral Link: <code>{html.escape(ref_link)}</code> 🔗",
+            f"<b>Status:</b> {user_status}\n"
+            f"<b>Tokens:</b> {tokens_count}\n"
+            f"<b>Saved Videos:</b> {save_limit_display}\n"
+            f"<b>Referrals:</b> {referral_count}\n"
+            f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗",
             # Removed referral_keyboard as per request
             reply_markup=None # No inline keyboard for profile anymore
         )
@@ -2324,10 +2324,6 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                 chat_id,
                 f"✨ Unlock Exclusive Downloads! ✨\n\n"
                 f"Ready to download your favorite content? 🤩 Get blazing-fast, direct downloads with our Premium Access!\n\n"
-                f"✅ Unlimited downloads\n"
-                f"✅ High-quality content\n"
-                f"✅ Ad-free experience\n"
-                f"✅ Priority support\n\n"
                 f"💎 Try a 7-day trial for just ₹{config.PREMIUM_TRIAL_PRICE_INR} or go all-in with 1-month premium access for ₹{config.PREMIUM_MONTH_PRICE_INR}! 🚀\n\n"
                 f"Tap below to elevate your experience! 👇",
                 reply_markup=reply_markup
@@ -2485,6 +2481,17 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
             await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
             return
 
+        if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+            logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+            await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+            try:
+                await client.delete_messages(chat_id, callback_query.message.id)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+            return
+
         result = users_collection.update_one(
             {'user_id': user_id},
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
@@ -2604,6 +2611,17 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
                 logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
         clear_active_video_message(user_id)
         await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
+        return
+
+    if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+        logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+        await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+        try:
+            await client.delete_messages(chat_id, callback_query.message.id)
+        except MessageIdInvalid:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
         return
 
     if not user_has_token(user_id):
@@ -2924,7 +2942,7 @@ async def addtoken_cmd(client: Client, message: Message):
 
     except ValueError:
         logger.warning(f"Admin {user_id} provided invalid input for addtoken: {message.text}")
-        await message.reply("User ID and duration (in days) must be valid integers.🔢")
+        await message.reply("User ID and duration (in days) must be valid integers. 🔢")
     except Exception as e:
         logger.error(f"Admin {user_id} error adding tokens/premium access: {e}", exc_info=True)
         await message.reply("❌ Failed to add premium access. Please try again. 🐛")
@@ -3836,4 +3854,3 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
-
