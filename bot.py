@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAEu3sZPjBMV5KjgOJDi-2vU6xw3E4ky-AE'
+    BOT_TOKEN = '7646433933:AAGBHd4xGgfNiPrZ_Tn36so6DdDbK9J6d84'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@Spicynyraabot'
+    BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
@@ -49,7 +49,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_ID = -1002622483638
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     MENU_EXPIRY_MINUTES = 60
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 300 # 5 minutes for refresh token links to be valid
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
 
 try:
     config = BotConfig()
