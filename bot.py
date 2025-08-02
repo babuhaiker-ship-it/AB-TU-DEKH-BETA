@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAFsS2dueBD5459kFkkq1FOAF-o7FlZBmD8'
+    BOT_TOKEN = '7213744072:AAHsVPoyuRGgx4Bg96JTmwEqc0IHSk2EsGA'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@Spicynyraabot'
