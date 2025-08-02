@@ -81,6 +81,25 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
+# --- Pyrogram Client Initialization (with MongoDB session) ---
+existing_session = settings_collection.find_one({'_id': 'bot_session'})
+if existing_session and 'session_string' in existing_session:
+    app = Client(
+        "spicynyraa",  # Arbitrary name
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN,
+        session_string=existing_session['session_string']
+    )
+else:
+    app = Client(
+        "spicynyraa",
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN,
+        in_memory=True
+    )
+
 def get_session_string():
     doc = settings_collection.find_one({'_id': 'bot_session'})
     return doc['session_string'] if doc and 'session_string' in doc else None
