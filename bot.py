@@ -81,9 +81,16 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
+def get_session_string():
+    doc = settings_collection.find_one({'_id': 'bot_session'})
+    return doc['session_string'] if doc and 'session_string' in doc else None
 
-# --- Pyrogram Client ---
-app = Client("/data/spicynyraa", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
+def set_session_string(session_string):
+    settings_collection.update_one(
+        {'_id': 'bot_session'},
+        {'$set': {'session_string': session_string}},
+        upsert=True,
+    )
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -3698,7 +3705,40 @@ async def main_bot_logic():
 if __name__ == "__main__":
     logger.info("Script started. Entering main execution block.")
     try:
-        app.run(main_bot_logic())
+        existing_session = get_session_string()
+        if existing_session:
+            app = Client(
+                "spicynyraa",  # Any string here is fine
+                api_id=config.API_ID,
+                api_hash=config.API_HASH,
+                bot_token=config.BOT_TOKEN,
+                session_string=existing_session
+            )
+        else:
+            app = Client(
+                "spicynyraa",
+                api_id=config.API_ID,
+                api_hash=config.API_HASH,
+                bot_token=config.BOT_TOKEN,
+                in_memory=True  # Ensures no file is created
+            )
+
+        async def main_startup_logic():
+            logger.info("Starting bot and scheduling background tasks...")
+            await app.start()
+            if not existing_session:
+                sess_str = await app.export_session_string()
+                set_session_string(sess_str)
+                logger.info("Session string exported and saved to MongoDB.")
+            await health_check()
+            create_tracked_task(cleanup_expired_data())
+            create_tracked_task(verify_and_cleanup_media())
+            create_tracked_task(cleanup_expired_menus())
+            create_tracked_task(cleanup_used_refresh_tokens())
+            logger.info("Background tasks initiated. Bot is now fully operational.")
+            await asyncio.Event().wait()
+
+        app.run(main_startup_logic())
     except KeyboardInterrupt:
         logger.info("Bot stopped by KeyboardInterrupt (Ctrl+C). Shutting down...")
     except Exception as e:
