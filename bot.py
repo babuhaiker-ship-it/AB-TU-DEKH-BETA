@@ -46,7 +46,7 @@ class BotConfig:
     PREMIUM_MONTH_PRICE_INR = 199
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638
-    FORCE_SUB_CHANNEL_LINK = \"https://t.me/SpicyNyraa\"
+    FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     MENU_EXPIRY_MINUTES = 60
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 300 # 5 minutes for refresh token links to be valid
 
