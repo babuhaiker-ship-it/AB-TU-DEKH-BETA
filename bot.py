@@ -3747,9 +3747,3 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
-```
-Google Search Suggestions
-Display of Search Suggestions is required when using Grounding with Google Search. Learn more
-pyrogram mongodb session
-pyrogram custom session storage
-pyrogram Client mongodb session example
