@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration #demo ---
 class BotConfig:
-    BOT_TOKEN = '7213744072:AAHsVPoyuRGgx4Bg96JTmwEqc0IHSk2EsGA'
+    BOT_TOKEN = '7646433933:AAGBHd4xGgfNiPrZ_Tn36so6DdDbK9J6d84'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@Spicynyraabot'
+    BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
@@ -67,7 +67,6 @@ history_collection = db['history']
 categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
-sessions_collection = db['sessions'] # For storing pyrogram session
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -76,56 +75,48 @@ media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("size_bytes", ASCENDING)])
-# IMPORTANT: New index for sequential navigation within categories
 media_collection.create_index([("category", ASCENDING), ("sequence_number", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
-sessions_collection.create_index([("_id", ASCENDING)], unique=True)
 
+# --- Session Management with MongoDB ---
+def get_session_string():
+    """Retrieves the session string from the database."""
+    session_doc = settings_collection.find_one({'_id': 'pyrogram_session'})
+    return session_doc.get('session_string') if session_doc else None
 
-# --- Pyrogram Client Setup with MongoDB Session ---
-SESSION_NAME = "spicynyraa_bot_session" # A unique name for our session document in MongoDB
-
-# Try to load the session from MongoDB
-session_doc = sessions_collection.find_one({'_id': SESSION_NAME})
-session_string = session_doc.get('session_string') if session_doc else None
-
-# This function will be called after the client connects to save the session string
-async def save_session_string_to_db():
-    # This should only run on the first start when no session string is in the DB
-    if not session_string:
-        logger.info("Exporting and saving new session string to MongoDB...")
-        # The session is created on disk, we export it
-        new_session_string = await app.export_session_string()
-        sessions_collection.update_one(
-            {'_id': SESSION_NAME},
-            {'$set': {'session_string': new_session_string}},
-            upsert=True
-        )
-        logger.info("Successfully saved new session string to MongoDB. The bot will use this for subsequent restarts.")
-        logger.warning("IMPORTANT: If you change the BOT_TOKEN, you must manually delete the session document from the 'sessions' collection in your MongoDB database to force re-authentication.")
-
-if session_string:
-    logger.info("Found session string in MongoDB. Initializing client from session string.")
-    app = Client(
-        name=SESSION_NAME, # In-memory session name
-        api_id=config.API_ID,
-        api_hash=config.API_HASH,
-        bot_token=config.BOT_TOKEN,
-        session_string=session_string,
-        in_memory=True # Ensures no .session file is created
+def set_session_string(session_string):
+    """Saves the session string to the database."""
+    settings_collection.update_one(
+        {'_id': 'pyrogram_session'},
+        {'$set': {'session_string': session_string}},
+        upsert=True
     )
-else:
-    logger.warning("No session string found in MongoDB. A new session will be created on disk for this run, then saved to the database for future runs.")
+    logger.info("Pyrogram session string has been saved to the database.")
+
+# --- Pyrogram Client Initialization ---
+SESSION_STRING = get_session_string()
+
+if SESSION_STRING:
+    logger.info("Found session string in DB. Initializing client from session string.")
     app = Client(
-        name="./spicynyraa", # Creates a local .session file this one time
+        name="spicynyraa_from_string",
+        session_string=SESSION_STRING,
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         bot_token=config.BOT_TOKEN
     )
-
+else:
+    logger.warning("No session string found in DB. Initializing client in memory for the first run.")
+    app = Client(
+        name="spicynyraa_in_memory",
+        in_memory=True,
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN
+    )
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -235,12 +226,8 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         
     try:
         parsed_url = urllib.parse.urlparse(template_url)
-        base_site = parsed_url.hostname # Use hostname for the domain part
+        base_site = parsed_url.netloc
         
-        if not base_site:
-            logger.warning(f"Could not parse hostname from template_url: {template_url}. Returning original URL.")
-            return long_url
-
         query_params = urllib.parse.parse_qs(parsed_url.query)
         api_key_list = query_params.get('api')
         
@@ -250,6 +237,13 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         
         api_key = api_key_list[0]
         
+        if base_site.startswith("http://"):
+            base_site = base_site[len("http://"):]
+        elif base_site.startswith("https://"):
+            base_site = base_site[len("https://"):]
+
+        base_site = parsed_url.netloc
+
         shortzy_client = Shortzy(api_key=api_key, base_site=base_site)
         logger.info(f"Initialized Shortzy with base_site: {base_site}, api_key: {'*' * len(api_key)}")
 
@@ -1760,7 +1754,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         video = get_first_video_by_sequence_number(category_name) # Use sequence number for first video
 
     if not video:
-        logger.warning(f"No videos found in category '{category_name}' for user {user_id}.\n")
+        logger.warning(f"No videos found in category '{category_name}' for user {user_id}.")
         await callback_query.answer("No videos in this category. Try another! 😔", show_alert=True)
         await temp_msg.delete()
         await callback_query.message.edit_text(
@@ -2098,7 +2092,7 @@ async def profile_btn(client: Client, message: Message):
         return
     try:
         await profile_cmd(client, message)
-        logger.info(f"User {user_id}: Profile command triggered from button.\n")
+        logger.info(f"User {user_id}: Profile command triggered from button.")
     except Exception as e:
         logger.error(f"User {user_id} failed to trigger profile command from button: {e}", exc_info=True)
         await handle_error(client, message, e)
@@ -2281,13 +2275,7 @@ async def send_token_earning_options(client: Client, message: Message):
 async def share_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Share' video callback to generate a shareable link with user_id."""
     user_id = callback_query.from_user.id
-    # Use regex match to extract the UUID safely
-    match = re.match(r"^share_(.+)$", callback_query.data)
-    if not match:
-        logger.error(f"Invalid callback data format for share: {callback_query.data}")
-        await callback_query.answer("Invalid request. Please try again.", show_alert=True)
-        return
-    video_uuid = match.group(1)
+    video_uuid = callback_query.data.split('_', 1)[1]
     
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -2322,13 +2310,7 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
 async def download_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Download' video callback for premium users."""
     user_id = callback_query.from_user.id
-    # Use regex match to extract the UUID safely
-    match = re.match(r"^download_(.+)$", callback_query.data)
-    if not match:
-        logger.error(f"Invalid callback data format for download: {callback_query.data}")
-        await callback_query.answer("Invalid request. Please try again.", show_alert=True)
-        return
-    video_uuid = match.group(1)
+    video_uuid = callback_query.data.split('_', 1)[1]
     chat_id = callback_query.message.chat.id
 
     logger.info(f"User {user_id} requested download for video {video_uuid}.")
@@ -2380,13 +2362,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
 async def bookmark_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Bookmark' video callback."""
     user_id = callback_query.from_user.id
-    # Use regex match to extract the UUID safely
-    match = re.match(r"^bookmark_(.+)$", callback_query.data)
-    if not match:
-        logger.error(f"Invalid callback data format for bookmark: {callback_query.data}")
-        await callback_query.answer("Invalid request. Please try again.", show_alert=True)
-        return
-    video_uuid = match.group(1)
+    video_uuid = callback_query.data.split('_', 1)[1]
 
     logger.info(f"User {user_id} requested to bookmark video {video_uuid}.")
     
@@ -2484,13 +2460,8 @@ async def saved_videos_btn(client: Client, message: Message):
 @app.on_callback_query(filters.regex(r"^remove_saved_(.+)$"))
 async def remove_saved_video_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
-    # Use regex match to extract the UUID safely
-    match = re.match(r"^remove_saved_(.+)$", callback_query.data)
-    if not match:
-        logger.error(f"Invalid callback data format for remove_saved: {callback_query.data}")
-        await callback_query.answer("Invalid request. Please try again.", show_alert=True)
-        return
-    video_uuid = match.group(1)
+    # Split by '_' and then take the part after 'remove_saved_'
+    video_uuid = callback_query.data.split('_', 2)[2] 
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested to remove saved video {video_uuid}.")
 
@@ -2618,13 +2589,8 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     """Handles viewing a specific saved video."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
-    # Use regex match to extract the UUID safely
-    match = re.match(r"^view_saved_video_(.+)$", callback_query.data)
-    if not match:
-        logger.error(f"Invalid callback data format for view_saved_video: {callback_query.data}")
-        await callback_query.answer("Invalid request. Please try again.", show_alert=True)
-        return
-    video_uuid = match.group(1)
+    # Split by '_' and then take the part after 'view_saved_video_'
+    video_uuid = callback_query.data.split('_', 3)[3]
 
     logger.info(f"User {user_id} requested to view saved video {video_uuid}.")
 
@@ -2708,13 +2674,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
 async def unavailable_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles clicks on unavailable videos in the saved list."""
     user_id = callback_query.from_user.id
-    # Use regex match to extract the UUID safely
-    match = re.match(r"^unavailable_(.+)$", callback_query.data)
-    if not match:
-        logger.error(f"Invalid callback data format for unavailable: {callback_query.data}")
-        await callback_query.answer("Invalid request. Please try again.", show_alert=True)
-        return
-    video_uuid = match.group(1)
+    video_uuid = callback_query.data.split('_', 1)[1]
     
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -3734,23 +3694,15 @@ async def verify_and_cleanup_media():
         await asyncio.sleep(6 * 3600)
 
 async def health_check():
-    # This check is less relevant for session files now, but good for sanity check
-    if not session_string:
-        print("Local session file should exist on first run:", os.path.exists("./spicynyraa.session"))
-    else:
-        print("Running from session string, no local file expected.")
     try:
         me = await app.get_me()
-        print(f"Bot username: {me.username}")
+        logger.info(f"Bot username: {me.username}")
         member = await app.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
-        print(f"Bot status in channel: {member.status}")
-        # Getting message 1 might fail if it was deleted, let's get the chat instead
-        chat_info = await app.get_chat(config.VIDEO_CHANNEL_ID)
-        print("Fetched video channel info:", chat_info.title)
+        logger.info(f"Bot status in channel: {member.status}")
         force_sub_member = await app.get_chat_member(config.FORCE_SUB_CHANNEL_ID, me.id)
-        print(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
+        logger.info(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
     except Exception as e:
-        print("Health check failed:", e)
+        logger.error(f"Health check failed: {e}", exc_info=True)
 
 async def main_bot_logic():
     """
@@ -3760,7 +3712,14 @@ async def main_bot_logic():
     logger.info("Starting bot and scheduling background tasks...")
     
     await app.start()
-    await save_session_string_to_db() # Save the session if it's the first run
+
+    # If this is the first run (in-memory session), export and save the session string
+    if not SESSION_STRING:
+        logger.info("First run with in-memory session detected. Exporting and saving session string to DB...")
+        new_session_string = await app.export_session_string()
+        set_session_string(new_session_string)
+        logger.info("Session string has been saved. Future runs will use this session.")
+
     await health_check()
     logger.info("Bot has connected to Telegram.")
 
