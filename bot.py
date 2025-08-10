@@ -59,7 +59,7 @@ except Exception as e:
 
 # --- MongoDB Setup ---
 client = MongoClient(config.MONGO_URI)
-db = client[config.MONGO_DB_name]
+db = client[config.MONGO_DB_NAME]
 users_collection = db['users']
 tokens_collection = db['tokens']
 media_collection = db['media']
@@ -806,9 +806,8 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
 
 async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False) -> tuple[bool, Message | str]:
     """
-    [MODIFIED] Sends a video using a robust, two-key system (channel message_id and original file_id).
-    This function is now more resilient to token changes and avoids incorrect deletions.
-    It attempts to edit an existing message or deletes the old one and sends a new one.
+    [MODIFIED] Prefers editing media/text over sending new messages for a smoother experience.
+    It attempts to edit an existing message. If that fails, or if forced, it deletes the old one and sends a new one.
     Returns (success: bool, sent_message: Message | error_message: str)
     """
     sent_message = None
@@ -818,7 +817,6 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
     # --- Prepare Caption ---
     caption_text = ""
     if new_message_type == "video" and video_data:
-        # Determine if it's a saved video navigation based on the current reply_markup
         is_saved_from_markup = False
         if reply_markup:
             for row in reply_markup.inline_keyboard:
@@ -831,7 +829,6 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                 if is_saved_from_markup:
                     break
 
-        # Recalculate position for the current video_data
         _, current_position, total_videos = get_video_and_position(
             video_data['uuid'], video_data.get('category'), is_saved_from_markup, chat_id
         )
@@ -845,7 +842,7 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
 
         caption_text = f"{position_caption}{custom_caption or category_caption}".strip()
 
-    # --- Delete Old Message if Necessary ---
+    # --- Delete Old Message if Forced ---
     if force_new_message and message_id_to_edit_or_delete:
         try:
             await client.delete_messages(chat_id, message_id_to_edit_or_delete)
@@ -857,7 +854,7 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
 
     # --- Attempt to Send/Edit Video ---
     if new_message_type == "video" and video_data:
-        # Method 1: Try to edit the existing message (if not forcing a new one)
+        # Method 1: Try to edit the existing message
         if not force_new_message and message_id_to_edit_or_delete:
             try:
                 sent_message = await client.edit_message_media(
@@ -869,16 +866,14 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                 logger.info(f"Successfully edited message {message_id_to_edit_or_delete} with video {video_data['uuid']}.")
             except Exception as e:
                 logger.warning(f"Editing message {message_id_to_edit_or_delete} failed: {e}. Will send a new message instead.")
-                # Force sending a new message on any edit failure
                 try:
                     await client.delete_messages(chat_id, message_id_to_edit_or_delete)
                 except Exception:
-                    pass # Ignore deletion errors here
-                sent_message = None # Ensure we proceed to sending a new message
+                    pass
+                sent_message = None
 
         # Method 2: Send a new message if editing failed or was skipped
         if not sent_message:
-            # Primary Send Method: copy_message from the permanent channel copy
             try:
                 logger.info(f"Attempting to send video {video_data['uuid']} via copy_message from channel.")
                 sent_message = await client.copy_message(
@@ -891,14 +886,12 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                 )
                 logger.info(f"Successfully sent video {video_data['uuid']} via copy_message.")
             except (MessageIdInvalid, ChatAdminRequired) as e:
-                logger.warning(f"copy_message failed for video {video_data['uuid']} (Msg ID: {video_data.get('message_id')}). Reason: {e}. This may indicate the video was deleted from the channel or bot lacks permissions.")
-                # This is a strong indicator the video is truly gone or inaccessible. Trigger deletion.
+                logger.warning(f"copy_message failed for video {video_data['uuid']} (Msg ID: {video_data.get('message_id')}). Reason: {e}. Triggering deletion.")
                 await client.send_message(chat_id, "Oops! This video seems to be permanently unavailable and has been removed. Trying the next one... 🔄")
                 await delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id'))
-                return False, "Video was permanently unavailable." # End the process for this video
+                return False, "Video was permanently unavailable."
             except Exception as e:
                 logger.error(f"copy_message failed for video {video_data['uuid']}. Error: {e}. Falling back to send_video.", exc_info=True)
-                # Fallback Send Method: send_video with the original file_id ("Golden Ticket")
                 try:
                     logger.info(f"Attempting to send video {video_data['uuid']} via send_video fallback.")
                     sent_message = await client.send_video(
@@ -909,26 +902,21 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                         protect_content=protect_content_for_user
                     )
                     logger.info(f"Successfully sent video {video_data['uuid']} via send_video fallback.")
-                except FileReferenceExpired as fre:
-                    # THIS IS THE KEY CHANGE. We expect this error after a token change.
-                    # We DO NOT delete the video. We log it and fail gracefully for this attempt.
-                    # The primary copy_message method should work on the next try.
-                    logger.critical(f"FileReferenceExpired for video {video_data['uuid']} using fallback file_id. THIS IS EXPECTED AFTER A TOKEN CHANGE. The video will NOT be deleted. The primary copy_message method should be used.")
+                except FileReferenceExpired:
+                    logger.critical(f"FileReferenceExpired for video {video_data['uuid']}. This is expected after a token change. The video will NOT be deleted.")
                     return False, "A temporary error occurred (file reference expired). Please try the action again."
                 except Exception as e2:
                     logger.error(f"Fallback send_video also failed for {video_data['uuid']}: {e2}. The video might be broken.", exc_info=True)
-                    # If both methods fail for other reasons, then it's likely broken.
                     await client.send_message(chat_id, "Oops! This video is unavailable and has been removed. Trying the next one... 🔄")
                     await delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id'))
                     return False, "Video was unavailable by all methods."
 
-    # --- Handle Text Message Sending ---
+    # --- Handle Text Message Sending/Editing ---
     elif new_message_type == "text" and text_content:
         try:
-            # Try to edit first
             if not force_new_message and message_id_to_edit_or_delete:
                  sent_message = await client.edit_message_text(chat_id, message_id_to_edit_or_delete, text_content, reply_markup=reply_markup)
-            else: # Send new
+            else:
                 sent_message = await client.send_message(chat_id, text_content, reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Failed to send/edit text message: {e}. Sending new as fallback.")
@@ -943,11 +931,10 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
         set_active_video_message(chat_id, sent_message.id, chat_id)
         return True, sent_message
     else:
-        # This path is taken if sending fails and is handled inside the logic.
-        # We return the specific error message from there.
         error_message = "Failed to send or edit the message due to an unexpected error."
         logger.error(error_message)
         return False, error_message
+
 
 # --- Keyboards ---
 async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
