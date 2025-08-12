@@ -2948,29 +2948,33 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
             await message.reply_text("⚠️ This video has already been added. Skipping.⏩")
             return
 
-        # 1. Forward the video to the database channel to create a permanent copy
+        # 1. Send the video to the database channel to get a permanent, bot-owned file_id
         try:
-            forwarded_messages = await client.forward_messages(
+            sent_video_message = await client.send_video(
                 chat_id=config.VIDEO_CHANNEL_ID,
-                from_chat_id=message.chat.id,
-                message_ids=message.id
+                video=original_file_id,
+                caption=f"Added by admin {user_id} for category {category}"
             )
-            if not forwarded_messages:
-                raise Exception("Forwarding returned no message.")
+            if not sent_video_message or not sent_video_message.video:
+                raise Exception("send_video did not return a valid video message.")
+
             # The message_id of the new, permanent copy in the channel
-            message_id_in_channel = forwarded_messages[0].id
-        except Exception as forward_e:
-            logger.error(f"Failed to forward video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {forward_e}", exc_info=True)
-            await message.reply_text("❌ Failed to forward video to storage channel. Please check bot's permissions (must be admin). 🐛")
+            message_id_in_channel = sent_video_message.id
+            # The new, permanent, bot-owned file_id
+            permanent_file_id = sent_video_message.video.file_id
+
+        except Exception as send_e:
+            logger.error(f"Failed to send video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {send_e}", exc_info=True)
+            await message.reply_text("❌ Failed to save video to storage channel. Please check bot's permissions (must be admin). 🐛")
             return
 
-        # 2. Prepare data for MongoDB, including both the original file_id and the new message_id
+        # 2. Prepare data for MongoDB, using the new permanent file_id
         video_uuid = str(uuid.uuid4())
         next_sequence_number = batch_add_state[user_id]['next_sequence']
 
         video_data = {
             "uuid": video_uuid,
-            "file_id": original_file_id,  # The "Golden Ticket"
+            "file_id": permanent_file_id,  # Use the new, stable file_id
             "file_unique_id": file_unique_id,
             "category": category,
             "size_bytes": file_size,
@@ -2986,7 +2990,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         batch_add_state[user_id]['next_sequence'] += 1
         batch_add_state[user_id]['count'] += 1
 
-        logger.info(f"Video {video_uuid} added to '{category}' by admin {user_id}. Original file_id and channel message_id {message_id_in_channel} saved.")
+        logger.info(f"Video {video_uuid} added to '{category}' by admin {user_id}. New file_id and channel message_id {message_id_in_channel} saved.")
 
         admin_reply_caption = (
             f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>! 🎉\n"
