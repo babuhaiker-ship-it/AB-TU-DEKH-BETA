@@ -864,13 +864,37 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     reply_markup=reply_markup
                 )
                 logger.info(f"Successfully edited message {message_id_to_edit_or_delete} with video {video_data['uuid']}.")
-            except Exception as e:
-                logger.warning(f"Editing message {message_id_to_edit_or_delete} failed: {e}. Will send a new message instead.")
+            except FileReferenceExpired:
+                logger.warning(f"FileReferenceExpired on edit_message_media for video {video_data['uuid']}. Attempting self-healing.")
                 try:
-                    await client.delete_messages(chat_id, message_id_to_edit_or_delete)
-                except Exception:
-                    pass
+                    message_id_in_channel = video_data.get('message_id')
+                    if not message_id_in_channel: raise ValueError("No message_id for healing.")
+                    healed_message = await client.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                    if not healed_message or not healed_message.video: raise ValueError("Failed to fetch healed message.")
+                    new_file_id = healed_message.video.file_id
+                    media_collection.update_one({'uuid': video_data['uuid']}, {'$set': {'file_id': new_file_id}})
+                    video_data['file_id'] = new_file_id
+                    logger.info(f"DB updated with new file_id for {video_data['uuid']}. Retrying edit.")
+
+                    sent_message = await client.edit_message_media(
+                        chat_id=chat_id,
+                        message_id=message_id_to_edit_or_delete,
+                        media=InputMediaVideo(media=video_data['file_id'], caption=caption_text),
+                        reply_markup=reply_markup
+                    )
+                    logger.info(f"Successfully edited message {message_id_to_edit_or_delete} after self-healing.")
+                except Exception as heal_e:
+                    logger.error(f"Self-healing or retry-edit failed: {heal_e}. Will send a new message instead.")
+                    sent_message = None
+            except Exception as e:
+                logger.warning(f"Editing message {message_id_to_edit_or_delete} failed with non-healable error: {e}. Will send a new message instead.")
                 sent_message = None
+
+            if not sent_message and message_id_to_edit_or_delete:
+                 try:
+                    await client.delete_messages(chat_id, message_id_to_edit_or_delete)
+                 except Exception:
+                    pass
 
         # Method 2: Send a new message if editing failed or was skipped
         if not sent_message:
@@ -903,8 +927,40 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     )
                     logger.info(f"Successfully sent video {video_data['uuid']} via send_video fallback.")
                 except FileReferenceExpired:
-                    logger.critical(f"FileReferenceExpired for video {video_data['uuid']}. This is expected after a token change. The video will NOT be deleted.")
-                    return False, "A temporary error occurred (file reference expired). Please try the action again."
+                    logger.warning(f"FileReferenceExpired for video {video_data['uuid']} on send_video. Attempting self-healing.")
+                    try:
+                        message_id_in_channel = video_data.get('message_id')
+                        if not message_id_in_channel:
+                            raise ValueError("No message_id found in DB for self-healing.")
+
+                        healed_message = await client.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                        if not healed_message or not healed_message.video:
+                            raise ValueError("Failed to fetch or find video in healed message.")
+
+                        new_file_id = healed_message.video.file_id
+                        logger.info(f"Successfully obtained new file_id for video {video_data['uuid']}: {new_file_id}")
+
+                        media_collection.update_one(
+                            {'uuid': video_data['uuid']},
+                            {'$set': {'file_id': new_file_id}}
+                        )
+                        logger.info(f"Database updated with new file_id for video {video_data['uuid']}.")
+                        video_data['file_id'] = new_file_id
+
+                        logger.info(f"Retrying send_video with healed file_id for {video_data['uuid']}.")
+                        sent_message = await client.send_video(
+                            chat_id,
+                            video_data['file_id'],
+                            caption=caption_text,
+                            reply_markup=reply_markup,
+                            protect_content=protect_content_for_user
+                        )
+                        logger.info(f"Successfully sent video {video_data['uuid']} via send_video after self-healing.")
+                    except Exception as heal_e:
+                        logger.error(f"Self-healing failed for video {video_data['uuid']}: {heal_e}", exc_info=True)
+                        await client.send_message(chat_id, "Oops! This video is unavailable and has been removed. Trying the next one... 🔄")
+                        await delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id'))
+                        return False, "Video was unavailable and self-healing failed."
                 except Exception as e2:
                     logger.error(f"Fallback send_video also failed for {video_data['uuid']}: {e2}. The video might be broken.", exc_info=True)
                     await client.send_message(chat_id, "Oops! This video is unavailable and has been removed. Trying the next one... 🔄")
@@ -2157,14 +2213,42 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
             return
 
-        await client.send_video(
-            chat_id,
-            video=video['file_id'],
-            caption=None,
-            protect_content=False
-        )
-        await callback_query.answer("Download initiated! 🚀")
-        logger.info(f"Premium user {user_id} successfully received download for video {video_uuid}.")
+        try:
+            await client.send_video(
+                chat_id,
+                video=video['file_id'],
+                caption=None,
+                protect_content=False
+            )
+            await callback_query.answer("Download initiated! 🚀")
+            logger.info(f"Premium user {user_id} successfully received download for video {video_uuid}.")
+        except FileReferenceExpired:
+            logger.warning(f"FileReferenceExpired during download for video {video['uuid']}. Attempting self-healing.")
+            try:
+                message_id_in_channel = video.get('message_id')
+                if not message_id_in_channel:
+                    raise ValueError("No message_id found in DB for self-healing during download.")
+
+                healed_message = await client.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
+                if not healed_message or not healed_message.video:
+                    raise ValueError("Failed to fetch or find video in healed message during download.")
+
+                new_file_id = healed_message.video.file_id
+                media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
+                logger.info(f"Database updated with new file_id for video {video['uuid']} during download.")
+
+                await client.send_video(
+                    chat_id,
+                    video=new_file_id,
+                    caption=None,
+                    protect_content=False
+                )
+                await callback_query.answer("Download initiated! 🚀")
+                logger.info(f"Premium user {user_id} successfully received download for video {video_uuid} after self-healing.")
+            except Exception as heal_e:
+                logger.error(f"Self-healing failed during download for video {video['uuid']}: {heal_e}", exc_info=True)
+                await callback_query.answer("❌ Failed to send video for download. Please try again later. 😥", show_alert=True)
+                return
 
     except Exception as e:
         logger.error(f"Error handling download for user {user_id}, video {video_uuid}: {e}", exc_info=True)
