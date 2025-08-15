@@ -44,11 +44,11 @@ class BotConfig:
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 199
-    FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
+    FREE_USER_SAVE_LIMIT = 50 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
-    FORCE_SUB_CHANNEL_ID_2 = -1002622483638 # ADDED: Second force sub channel
-    FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/SpicyNyraa" # ADDED: Second force sub link
+    FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
+    FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
     MENU_EXPIRY_MINUTES = 60
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 300 # 5 minutes for refresh token links to be valid
 
