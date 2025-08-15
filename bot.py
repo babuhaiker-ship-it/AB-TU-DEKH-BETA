@@ -135,6 +135,10 @@ admin_rename_category_state = defaultdict(dict)
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
 
+# --- Navigation Spam Control ---
+nav_cooldown = {}
+NAV_SPAM_THRESHOLD = timedelta(seconds=1.5)
+
 
 def create_tracked_task(coro):
     """
@@ -1839,6 +1843,15 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' video navigation."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
+
+    # --- Spam Control ---
+    now = datetime.utcnow()
+    last_click_time = nav_cooldown.get(user_id)
+    if last_click_time and (now - last_click_time) < NAV_SPAM_THRESHOLD:
+        await callback_query.answer("don't spam again", show_alert=True)
+        return
+    nav_cooldown[user_id] = now
+    # --- End Spam Control ---
 
     # Parse callback data: action (next/prev), current_uuid, category, is_saved_flag
     parts = callback_query.data.split('|')
