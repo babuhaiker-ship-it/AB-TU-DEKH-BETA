@@ -47,13 +47,15 @@ class BotConfig:
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
+    FORCE_SUB_CHANNEL_ID_2 = -1002622483638 # ADDED: Second force sub channel
+    FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/SpicyNyraa" # ADDED: Second force sub link
     MENU_EXPIRY_MINUTES = 60
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 300 # 5 minutes for refresh token links to be valid
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK]):
-        raise ValueError("One or more essential configuration variables are not set. Please check BOT_TOKEN, API_ID, API_HASH, MONGO_URI, BOT_USERNAME, FORCE_SUB_CHANNEL_ID, FORCE_SUB_CHANNEL_LINK.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK, config.FORCE_SUB_CHANNEL_ID_2, config.FORCE_SUB_CHANNEL_LINK_2]):
+        raise ValueError("One or more essential configuration variables are not set. Please check all config variables including both force sub channels.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -150,40 +152,54 @@ def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
     return user_id in config.ADMIN_IDS
 
+def is_owner(user_id: int) -> bool:
+    """Checks if the user is the bot owner (first admin ID)."""
+    return user_id == config.ADMIN_IDS[0]
+
 # --- Force Subscribe Check ---
 async def check_membership(client: Client, user_id: int) -> bool:
     """
-    Checks if the user is a member of the force subscribe channel.
-    Returns True if a member (or admin), False otherwise.
+    Checks if the user is a member of ALL force subscribe channels.
+    Returns True if a member of all (or admin), False otherwise.
     """
     if is_admin(user_id):
         return True
 
-    try:
-        member = await client.get_chat_member(config.FORCE_SUB_CHANNEL_ID, user_id)
-        if member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
-            logger.info(f"User {user_id} is a member of force sub channel {config.FORCE_SUB_CHANNEL_ID}.")
-            return True
-        else:
-            logger.info(f"User {user_id} is NOT a member of force sub channel {config.FORCE_SUB_CHANNEL_ID}. Status: {member.status}")
+    async def check_channel(channel_id):
+        try:
+            member = await client.get_chat_member(channel_id, user_id)
+            return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+        except PeerIdInvalid:
+            logger.error(f"Force subscribe channel ID {channel_id} is invalid. Please check config.")
+            return True # Allow access if a channel is misconfigured
+        except Exception as e:
+            logger.error(f"Error checking membership for user {user_id} in channel {channel_id}: {e}", exc_info=True)
             return False
-    except PeerIdInvalid:
-        logger.error(f"Force subscribe channel ID {config.FORCE_SUB_CHANNEL_ID} is invalid. Please check config.")
-        return True # Allow access if force sub channel itself is invalid
-    except Exception as e:
-        logger.error(f"Error checking membership for user {user_id} in channel {config.FORCE_SUB_CHANNEL_ID}: {e}", exc_info=True)
-        return False
+
+    results = await asyncio.gather(
+        check_channel(config.FORCE_SUB_CHANNEL_ID),
+        check_channel(config.FORCE_SUB_CHANNEL_ID_2)
+    )
+
+    is_member_of_all = all(results)
+    if is_member_of_all:
+        logger.info(f"User {user_id} is a member of all force sub channels.")
+    else:
+        logger.info(f"User {user_id} is NOT a member of all force sub channels. Results: {results}")
+
+    return is_member_of_all
 
 async def send_force_subscribe_message(client: Client, chat_id: int):
-    """Sends a message prompting the user to join the force subscribe channel."""
+    """Sends a message prompting the user to join the force subscribe channels."""
     logger.info(f"Sending force subscribe message to user {chat_id}.")
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Join Channel", url=config.FORCE_SUB_CHANNEL_LINK)]
+        [InlineKeyboardButton("📢 Daily Posting", url=config.FORCE_SUB_CHANNEL_LINK)],
+        [InlineKeyboardButton("📢 Daily Posting", url=config.FORCE_SUB_CHANNEL_LINK_2)]
     ])
     await client.send_message(
         chat_id,
-        "<b>⚠️ You must join our channel to use this bot.</b>\n\n"
-        "Please join the channel below and then try again. Once you join, click the '🎞️ Get Video' button or send /start again.",
+        "<b>⚠️ You must join our channels to use this bot.</b>\n\n"
+        "Please join the channels below and then try again. Once you join, click the '🎞️ Get Video' button or send /start again.",
         reply_markup=reply_markup
     )
 
@@ -909,7 +925,11 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
                     reply_markup=reply_markup
                 )
                 logger.info(f"Successfully sent video {video_data['uuid']} via copy_message.")
-            except (MessageIdInvalid, ChatAdminRequired) as e:
+            except ChatAdminRequired:
+                logger.critical(f"Bot is not an admin in the video channel {config.VIDEO_CHANNEL_ID}. Cannot copy messages.")
+                await client.send_message(chat_id, "Please wait, the bot just got restarted. The admin is adding the bot to the channel.")
+                return False, "Bot is not admin in video channel."
+            except MessageIdInvalid as e:
                 logger.warning(f"copy_message failed for video {video_data['uuid']} (Msg ID: {video_data.get('message_id')}). Reason: {e}. Triggering deletion.")
                 await client.send_message(chat_id, "Oops! This video seems to be permanently unavailable and has been removed. Trying the next one... 🔄")
                 await delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id'))
@@ -1067,10 +1087,28 @@ def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📋 Copy Referral Link", url=ref_link)]
     ])
 
+def get_premium_vs_free_text() -> str:
+    """Returns the detailed text comparing premium and free user features."""
+    return (
+        "💎 <b>Premium vs. Free Users</b> 💎\n\n"
+        "✨ <b><u>Premium User Benefits:</u></b>\n"
+        "✅ <b>Unlimited Saved Videos</b> — keep as many bookmarks as you like.\n"
+        "✅ <b>Direct Video Downloads</b> — instantly get the actual file with no restrictions.\n"
+        "✅ <b>No Ad Refresh Needed</b> — enjoy uninterrupted access for your entire premium period.\n"
+        "✅ <b>Bookmarks Never Deleted</b> — your saved videos are safe.\n"
+        "✅ <b>Priority Content Delivery</b> — faster, self-healed downloads to ensure you always get the video.\n\n"
+        "✨ <b><u>Free User Features:</u></b>\n"
+        "⏳ Limited to <b>100 saved videos</b>.\n"
+        "📦 Need tokens (via ads or referrals) for daily access.\n"
+        "🔒 No direct download — view only in-app.\n"
+        "🗑️ Extra saved videos are removed automatically when over limit.\n\n"
+        f"💳 Upgrade for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all premium benefits instantly!"
+    )
+
 def buy_token_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for buying tokens."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)]
+        [InlineKeyboardButton("💳 Buy Premium Access", url=config.BUY_BOT_URL)]
     ])
 
 def saved_category_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -1343,11 +1381,14 @@ async def start_cmd(client: Client, message: Message):
                 if is_new_user and referrer_id_from_video_link:
                     handle_referral(user_id, deep_link_arg)
 
+                wait_msg = await message.reply("Just a moment, checking your access...")
                 if not user_has_token(user_id):
+                    await wait_msg.delete()
                     await message.reply("You need a token to watch this video. Please get a token first! 🧐", reply_markup=await get_main_keyboard(user_id))
                     await send_token_earning_options(client, message)
                     break
                 else:
+                    await wait_msg.delete()
                     success, result_or_msg = await handle_shared_video(client, user_id, video_uuid_from_link)
                     if not success:
                         await message.reply(result_or_msg, reply_markup=await get_main_keyboard(user_id))
@@ -1515,10 +1556,13 @@ async def get_video(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
+    wait_msg = await message.reply("Just a moment, checking your access...")
     if not user_has_token(user_id):
+        await wait_msg.delete()
         logger.info(f"User {user_id} has no tokens, prompting earning options.")
         await send_token_earning_options(client, message)
         return
+    await wait_msg.delete()
 
     message_id_to_edit_or_delete = message.id
 
@@ -1762,7 +1806,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         new_message_type="video",
         video_data=video_to_display,
         reply_markup=video_nav_keyboard(video_to_display['uuid'], selected_category, user_id, is_saved=True),
-        force_new_message=True 
+        force_new_message=True
     )
 
     if sent_success:
@@ -2036,7 +2080,7 @@ async def buy_token_btn(client: Client, message: Message):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
-        await message.reply("💳 Need more tokens? You can buy them from our support bot! Click the button below to proceed. 👇", reply_markup=buy_token_keyboard())
+        await message.reply(get_premium_vs_free_text(), reply_markup=buy_token_keyboard())
         logger.info(f"User {user_id}: Buy token message sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send buy token message: {e}", exc_info=True)
@@ -2194,17 +2238,11 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     try:
         if not is_premium_user(user_id):
             logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
-            reply_markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)]
-            ])
             await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
             await client.send_message(
                 chat_id,
-                f"✨ Unlock Exclusive Downloads! ✨\n\n"
-                f"Ready to download your favorite content? 🤩 Get blazing-fast, direct downloads with our Premium Access!\n\n"
-                f"💎 Try a 7-day trial for just ₹{config.PREMIUM_TRIAL_PRICE_INR} or go all-in with 1-month premium access for ₹{config.PREMIUM_MONTH_PRICE_INR}! 🚀\n\n"
-                f"Tap below to elevate your experience! 👇",
-                reply_markup=reply_markup
+                get_premium_vs_free_text(),
+                reply_markup=buy_token_keyboard()
             )
             return
 
@@ -2526,10 +2564,13 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
             logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
         return
 
+    wait_msg = await callback_query.message.reply("Just a moment, checking your access...")
     if not user_has_token(user_id):
+        await wait_msg.delete()
         await callback_query.answer("You need a token to watch this video. Please get a token first! 🧐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
+    await wait_msg.delete()
 
     video = get_video_by_uuid(video_uuid)
     if not video:
@@ -3212,6 +3253,65 @@ async def stats_cmd(client: Client, message: Message):
         await message.reply("❌ An error occurred while fetching stats. Please try again. 🐛")
 
 # --- New Admin Commands ---
+
+@app.on_message(filters.command("addadmin") & filters.private)
+async def add_admin_cmd(client: Client, message: Message):
+    """Owner command to add a new admin."""
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        user_id_to_add = int(message.text.split()[1])
+        if user_id_to_add in config.ADMIN_IDS:
+            await message.reply("This user is already an admin.")
+            return
+        config.ADMIN_IDS.append(user_id_to_add)
+        await message.reply(f"✅ User {user_id_to_add} has been promoted to admin.")
+        logger.info(f"Owner {message.from_user.id} added new admin: {user_id_to_add}")
+    except (ValueError, IndexError):
+        await message.reply("Usage: `/addadmin <user_id>`")
+    except Exception as e:
+        await message.reply(f"An error occurred: {e}")
+        logger.error(f"Error in /addadmin: {e}")
+
+@app.on_message(filters.command("removeadmin") & filters.private)
+async def remove_admin_cmd(client: Client, message: Message):
+    """Owner command to remove an admin."""
+    if not is_owner(message.from_user.id):
+        return
+    
+    buttons = []
+    # List all admins except the owner for removal
+    for admin_id in config.ADMIN_IDS[1:]:
+        try:
+            user = await client.get_users(admin_id)
+            buttons.append([InlineKeyboardButton(f"{user.first_name} ({user.id})", callback_data=f"rem_admin_{admin_id}")])
+        except Exception:
+            buttons.append([InlineKeyboardButton(f"ID: {admin_id}", callback_data=f"rem_admin_{admin_id}")])
+
+    if not buttons:
+        await message.reply("No other admins to remove.")
+        return
+
+    await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_callback_query(filters.regex(r"^rem_admin_(\d+)$"))
+async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
+    """Callback to handle admin removal."""
+    if not is_owner(callback_query.from_user.id):
+        await callback_query.answer("You are not authorized to perform this action.", show_alert=True)
+        return
+
+    try:
+        admin_id_to_remove = int(callback_query.data.split("_")[2])
+        if admin_id_to_remove in config.ADMIN_IDS:
+            config.ADMIN_IDS.remove(admin_id_to_remove)
+            await callback_query.message.edit_text(f"✅ Admin {admin_id_to_remove} has been removed.")
+            logger.info(f"Owner {callback_query.from_user.id} removed admin: {admin_id_to_remove}")
+        else:
+            await callback_query.message.edit_text("User is no longer an admin.")
+    except Exception as e:
+        await callback_query.message.edit_text(f"An error occurred: {e}")
+        logger.error(f"Error in remove_admin_callback: {e}")
 
 @app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
 async def set_shortener_cmd(client: Client, message: Message):
