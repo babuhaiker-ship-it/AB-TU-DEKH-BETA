@@ -35,7 +35,7 @@ class BotConfig:
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 't.me/SpicyNyraaSupport_bot'
+    BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
@@ -1754,6 +1754,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         )
         return
 
+    # MODIFIED: Changed force_new_message to True for a robust transition
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
@@ -1761,7 +1762,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         new_message_type="video",
         video_data=video_to_display,
         reply_markup=video_nav_keyboard(video_to_display['uuid'], selected_category, user_id, is_saved=True),
-        force_new_message=False # Try to edit the existing message
+        force_new_message=True 
     )
 
     if sent_success:
