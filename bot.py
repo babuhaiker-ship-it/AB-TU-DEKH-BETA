@@ -28,14 +28,14 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration #demo ---
 class BotConfig:
-    BOT_TOKEN = '7965872423:AAHkSMHJVveM1ROKlPJGgsP_GcLb8iNvCic'
+    BOT_TOKEN = '8336714943:AAEDF5NRMs4MKIlu__ZoEi8VVfz0xwCIJFA'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@Testingnyraa_bot'
+    BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 'https://t.me/hanielxsupportbot'
+    BUY_BOT_URL = 't.me/SpicyNyraaSupport_bot'
     ADMIN_IDS = [6612030110]
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
