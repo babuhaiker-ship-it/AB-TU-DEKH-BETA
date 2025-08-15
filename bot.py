@@ -44,7 +44,7 @@ class BotConfig:
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 199
-    FREE_USER_SAVE_LIMIT = 50 # Maximum saved videos for free users
+    FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
     FORCE_SUB_CHANNEL_ID = -1002622483638
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
@@ -156,6 +156,12 @@ def is_owner(user_id: int) -> bool:
     """Checks if the user is the bot owner (first admin ID)."""
     return user_id == config.ADMIN_IDS[0]
 
+# MODIFIED: Custom filter for admin commands to allow dynamic admin list
+async def admin_filter(_, __, message: Message):
+    return is_admin(message.from_user.id)
+
+admin_only = filters.create(admin_filter)
+
 # --- Force Subscribe Check ---
 async def check_membership(client: Client, user_id: int) -> bool:
     """
@@ -192,14 +198,16 @@ async def check_membership(client: Client, user_id: int) -> bool:
 async def send_force_subscribe_message(client: Client, chat_id: int):
     """Sends a message prompting the user to join the force subscribe channels."""
     logger.info(f"Sending force subscribe message to user {chat_id}.")
+    # MODIFIED: Changed button text for force sub channels
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Daily Posting", url=config.FORCE_SUB_CHANNEL_LINK)],
-        [InlineKeyboardButton("📢 Daily Posting", url=config.FORCE_SUB_CHANNEL_LINK_2)]
+        [InlineKeyboardButton("Spicy Nyraa 🥵🔥", url=config.FORCE_SUB_CHANNEL_LINK)],
+        [InlineKeyboardButton("Spicy Posting 🌶️", url=config.FORCE_SUB_CHANNEL_LINK_2)],
+        [InlineKeyboardButton("🔄 Try Again", callback_data="check_join_status")]
     ])
     await client.send_message(
         chat_id,
         "<b>⚠️ You must join our channels to use this bot.</b>\n\n"
-        "Please join the channels below and then try again. Once you join, click the '🎞️ Get Video' button or send /start again.",
+        "Please join the channels below and then try again. Once you join, click the '🔄 Try Again' button or send /start again.",
         reply_markup=reply_markup
     )
 
@@ -1083,10 +1091,10 @@ def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: b
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
     """Keyboard for displaying a referral link."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Copy Referral Link", url=ref_link)]
-    ])
+    # MODIFIED: Removed the copy button as requested
+    return None
 
+# MODIFIED: Updated the premium vs free text
 def get_premium_vs_free_text() -> str:
     """Returns the detailed text comparing premium and free user features."""
     return (
@@ -1098,7 +1106,7 @@ def get_premium_vs_free_text() -> str:
         "✅ <b>Bookmarks Never Deleted</b> — your saved videos are safe.\n"
         "✅ <b>Priority Content Delivery</b> — faster, self-healed downloads to ensure you always get the video.\n\n"
         "✨ <b><u>Free User Features:</u></b>\n"
-        "⏳ Limited to <b>100 saved videos</b>.\n"
+        f"⏳ Limited to <b>{config.FREE_USER_SAVE_LIMIT} saved videos</b>.\n"
         "📦 Need tokens (via ads or referrals) for daily access.\n"
         "🔒 No direct download — view only in-app.\n"
         "🗑️ Extra saved videos are removed automatically when over limit.\n\n"
@@ -1163,6 +1171,7 @@ async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> 
     return True, video
 
 # --- Token Refresh ---
+# MODIFIED: Removed time-based expiry from token refresh links
 async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
     """Handles token refresh requests from users."""
     try:
@@ -1179,7 +1188,9 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             return False, "Oops, invalid link. Try again! 🧐"
 
         try:
-            code_user_id, timestamp = map(int, decoded.split(':'))
+            # The second part is now a UUID, not a timestamp, so we ignore it
+            code_user_id_str, _ = decoded.split(':', 1)
+            code_user_id = int(code_user_id_str)
         except ValueError:
             logger.error(f"User {user_id} provided invalid token refresh code format: {ad_code}")
             return False, "Invalid token refresh link format. 🐛"
@@ -1188,10 +1199,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             logger.warning(f"User {user_id} attempted to use another user's token refresh link ({code_user_id}).")
             return False, "This token refresh link is not for you! 😠"
 
-        if timestamp < get_current_time():
-            logger.warning(f"User {user_id} attempted to use expired token refresh link.")
-            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
-            return False, "This token refresh link has expired. ⏰"
+        # The time-based expiry check has been removed. We now rely on the one-time use check below.
 
         if refresh_tokens_used_collection.find_one({'ad_code': ad_code}):
             logger.warning(f"User {user_id} attempted to reuse token refresh link: {ad_code}")
@@ -1321,36 +1329,29 @@ async def start_cmd(client: Client, message: Message):
                     video_uuid_from_link = deep_link_arg[12:]
 
             if is_new_user:
+                welcome_message = (
+                    f"👋 Welcome, {first_name_safe}! 🎉\n\n"
+                    f"You've received <b>{config.NEW_USER_TOKENS} free token</b> to get started. 🌶️\n\n"
+                    "To watch exclusive content, just tap the '🎞️ Get Video' button below. Enjoy your stay!"
+                )
                 if deep_link_type == 'referral':
                     referrer_id = handle_referral(user_id, deep_link_data)
                     if referrer_id:
-                        await message.reply(
-                            f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨",
-                            reply_markup=await get_main_keyboard(user_id)
-                        )
+                        await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
                         await client.send_message(referrer_id, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined through your link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
                 elif deep_link_type == 'video_share' and referrer_id_from_video_link and referrer_id_from_video_link != user_id:
                     referrer_user_obj = users_collection.find_one({'user_id': referrer_id_from_video_link})
                     if referrer_user_obj:
-                        await message.reply(
-                            f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨",
-                            reply_markup=await get_main_keyboard(user_id)
-                        )
+                        await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
                         await client.send_message(referrer_id_from_video_link, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined through your shared video link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
                     else:
                         logger.warning(f"Referrer {referrer_id_from_video_link} not found for new user {user_id} via video share. Still sending new user welcome.")
-                        await message.reply(
-                            f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨",
-                            reply_markup=await get_main_keyboard(user_id)
-                        )
+                        await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
                 else:
-                    await message.reply(
-                        f"👋 Congratulations, {first_name_safe}! 🎉 You've received {config.NEW_USER_TOKENS} token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨",
-                        reply_markup=await get_main_keyboard(user_id)
-                    )
+                    await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
             elif not deep_link_type:
                 await message.reply(
-                    f"👋 Welcome back, {first_name_safe}! 🌶️ To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨",
+                    f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in. If you need anything, just use /help. ✨",
                     reply_markup=await get_main_keyboard(user_id)
                 )
 
@@ -1359,7 +1360,7 @@ async def start_cmd(client: Client, message: Message):
                 await message.reply(msg)
                 if success:
                     await message.reply(
-                        "🎉 <b>Success!</b> Click on '🎞️ Get Video' to watch spicy content.",
+                        "🎉 <b>Token Activated!</b>\nClick '🎞️ Get Video' to start watching.",
                         reply_markup=await get_main_keyboard(user_id)
                     )
             elif deep_link_type == 'video_share' or deep_link_type == 'view_saved_video':
@@ -1449,14 +1450,14 @@ async def help_cmd(client: Client, message: Message):
     ])
 
     await message.reply(
-        f"👋 dear {user_mention_safe}! This is how to use Spicy Nyraa Bot! 📚\n\n"
-        "- Use '🎞️ Get Video' to watch spicy content. 🔥\n"
-        "- Each token gives you 24 hours access. ⏳\n"
-        "- Earn tokens by referral, refreshing ads, or buying them. 💰\n"
-        "- Use '👤 Profile' to check your stats. 📈\n"
-        "- Use '🔖 Saved Videos' to view your bookmarked videos. ❤️\n\n"
-        "Enjoy your spicy journey! 🌶️\n\n"
-        "Any issue? DM here!",
+        f"👋 Hey {user_mention_safe}! Here's how to use the bot: 📚\n\n"
+        "- **🎞️ Get Video**: The main button to browse and watch content.\n"
+        "- **👤 Profile**: Check your status, tokens, and referral stats.\n"
+        "- **🔗 Refer & Earn**: Get your unique link to invite friends and earn free tokens.\n"
+        "- **💰 Buy Token**: Upgrade to Premium for the best experience.\n"
+        "- **🔄 Refresh Token**: Get a new 24-hour token by completing a simple task.\n"
+        "- **🔖 Saved Videos**: Access all your bookmarked videos.\n\n"
+        "If you have any issues, feel free to contact our support. Enjoy! 🌶️",
         reply_markup=reply_markup
     )
 
@@ -1512,26 +1513,26 @@ async def profile_cmd(client: Client, message: Message):
         user_status = "Premium User 💎" if is_premium else "Free User ✨"
 
         if is_premium:
-            save_limit_display = f"{len(bookmarked_videos)}/Unlimited"
+            save_limit_display = f"{len(bookmarked_videos)} / Unlimited"
         else:
-            save_limit_display = f"{len(bookmarked_videos)}/{config.FREE_USER_SAVE_LIMIT}"
+            save_limit_display = f"{len(bookmarked_videos)} / {config.FREE_USER_SAVE_LIMIT}"
 
 
         views_doc = history_collection.find_one({'user_id': user_id})
         view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
 
-        await message.reply(
-            f"👤 <b>Your Profile</b> ✨\n\n"
+        profile_text = (
+            f"👤 <b>Your Profile</b>\n\n"
             f"<b>Status:</b> {user_status}\n"
-            f"<b>Tokens:</b> {tokens_count} 🪙\n"
-            f"<b>Video Views:</b> {view_count} 🎞️\n"
+            f"<b>Active Tokens:</b> {tokens_count} 🪙\n"
             f"<b>Saved Videos:</b> {save_limit_display} ❤️\n"
-            f"<b>Referrals:</b> {referral_count} 👥\n"
-            f"<b>Referral Link:</b> <code>{html.escape(ref_link)}</code> 🔗\n"
-            f"{(f'Referred by: {referred_by} 👋') if referred_by else ''}",
-            reply_markup=referral_keyboard(ref_link)
+            f"<b>Total Referrals:</b> {referral_count} 👥\n\n"
+            f"🔗 <b>Your Referral Link:</b>\n`{html.escape(ref_link)}`"
         )
+
+        # MODIFIED: Removed the referral keyboard
+        await message.reply(profile_text)
         logger.info(f"User {user_id}: Profile sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send profile: {e}", exc_info=True)
@@ -1544,6 +1545,21 @@ async def get_video(client: Client, message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     logger.info(f"User {user_id} requested Get Video.")
+
+    # MODIFIED: Check if a menu is already open
+    if user_id in active_video_message:
+        menu_info = active_video_message[user_id]
+        try:
+            # Verify the message still exists to avoid errors
+            await client.get_messages(menu_info['chat_id'], menu_info['message_id'])
+            await message.reply_text(
+                "A menu is already open. Please use the one below. 👇",
+                reply_to_message_id=menu_info['message_id']
+            )
+            return
+        except Exception:
+            # If getting the message fails, it's probably deleted. Clear state and proceed.
+            clear_active_video_message(user_id)
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -2030,7 +2046,8 @@ async def refer_btn(client: Client, message: Message):
             return
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢", reply_markup=referral_keyboard(ref_link))
+        # MODIFIED: Removed the referral keyboard
+        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢")
         logger.info(f"User {user_id}: Referral link sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
@@ -2116,7 +2133,8 @@ async def refresh_token_btn(client: Client, message: Message):
             return
 
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
-        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS}")
+        # MODIFIED: Use a non-expiring UUID for the refresh link
+        ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
@@ -2148,6 +2166,7 @@ async def refresh_token_btn(client: Client, message: Message):
                 logger.warning(f"User {user_id}: Failed to delete 'Please wait...' message during error handling: {delete_e}")
         await handle_error(client, message, e)
 
+# MODIFIED: Added a "please wait" message
 async def send_token_earning_options(client: Client, message: Message):
     """Sends messages to a user detailing how to earn tokens."""
     user_id = message.from_user.id
@@ -2157,15 +2176,19 @@ async def send_token_earning_options(client: Client, message: Message):
         await send_force_subscribe_message(client, user_id)
         return
 
+    wait_msg = None
     try:
+        wait_msg = await message.reply("⏳ Preparing your options, please wait...")
         create_tracked_task(check_premium_status_and_notify(client, user_id))
 
         if await is_rate_limited(user_id):
             await message.reply_text("⚠️ You're requesting token options too quickly. Please wait a minute and try again. ⏳")
             logger.warning(f"User {user_id} hit rate limit in send_token_earning_options.")
+            if wait_msg: await wait_msg.delete()
             return
 
-        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS}")
+        # MODIFIED: Use a non-expiring UUID for the refresh link
+        ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
@@ -2180,8 +2203,12 @@ async def send_token_earning_options(client: Client, message: Message):
             reply_markup=token_earning_keyboard(ad_url),
             disable_web_page_preview=disable_preview
         )
+        if wait_msg: await wait_msg.delete()
         logger.info(f"User {user_id}: Token earning options sent.")
     except Exception as e:
+        if wait_msg:
+            try: await wait_msg.delete()
+            except: pass
         logger.error(f"User {user_id} failed to send token earning options: {e}", exc_info=True)
         await handle_error(client, message, e)
 
@@ -2675,7 +2702,8 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     await callback_query.answer("Operation cancelled.")
 
 # --- Admin Commands ---
-@app.on_message(filters.command("broadcast") & filters.private & filters.user(config.ADMIN_IDS) & filters.reply)
+# MODIFIED: Replaced filters.user with the custom admin_only filter
+@app.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
     """Admin command to broadcast a replied message to all users."""
     user_id = message.from_user.id
@@ -2737,7 +2765,7 @@ async def broadcast_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to complete broadcast: {e}", exc_info=True)
         await message.reply("❌ An error occurred during broadcast. Check logs for details. 🐛")
 
-@app.on_message(filters.command("addcategory") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("addcategory") & filters.private & admin_only)
 async def addcategory_cmd(client: Client, message: Message):
     """Admin command to add a new video category."""
     user_id = message.from_user.id
@@ -2764,7 +2792,7 @@ async def addcategory_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to add category: {e}", exc_info=True)
         await message.reply("❌ An error occurred while adding category. Please try again. 🐛")
 
-@app.on_message(filters.command("deletecategory") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("deletecategory") & filters.private & admin_only)
 async def deletecategory_cmd(client: Client, message: Message):
     """Admin command to delete a video category."""
     user_id = message.from_user.id
@@ -2821,7 +2849,7 @@ async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery)
         logger.error(f"Admin {user_id} failed to confirm category deletion: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred during category deletion. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("addtoken") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("addtoken") & filters.private & admin_only)
 async def addtoken_cmd(client: Client, message: Message):
     """Admin command to add tokens to a specific user and grant premium access."""
     user_id = message.from_user.id
@@ -2896,7 +2924,7 @@ def format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
 
-@app.on_message(filters.command("batchadd") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("batchadd") & filters.private & admin_only)
 async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and choose category."""
     user_id = message.from_user.id
@@ -2986,7 +3014,7 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
         logger.error(f"Admin {user_id} failed to set batch category in callback: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("done") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("done") & filters.private & admin_only)
 async def done_cmd(client: Client, message: Message):
     """Admin command to exit batch video adding mode."""
     user_id = message.from_user.id
@@ -3004,7 +3032,7 @@ async def done_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
-@app.on_message(filters.video & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.video & filters.private & admin_only)
 async def handle_video_batch_add_or_delete(client: Client, message: Message):
     """
     [MODIFIED] Handles incoming video messages for either batch adding mode or delete video mode.
@@ -3133,7 +3161,7 @@ async def handle_video_batch_add_or_delete(client: Client, message: Message):
         await message.reply("❌ Failed to add video. Please try again. 🐛")
 
 
-@app.on_message(filters.command("category") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("category") & filters.private & admin_only)
 async def set_category_cmd(client: Client, message: Message):
     """Admin command to set the current category for batch adding."""
     user_id = message.from_user.id
@@ -3222,7 +3250,7 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"Admin {user_id} failed to set batch category: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("stats") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("stats") & filters.private & admin_only)
 async def stats_cmd(client: Client, message: Message):
     """Admin command to display bot statistics, including category video counts."""
     user_id = message.from_user.id
@@ -3313,7 +3341,7 @@ async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.message.edit_text(f"An error occurred: {e}")
         logger.error(f"Error in remove_admin_callback: {e}")
 
-@app.on_message(filters.command("setshortener") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("setshortener") & filters.private & admin_only)
 async def set_shortener_cmd(client: Client, message: Message):
     """Admin command to set the URL shortener API template URL."""
     user_id = message.from_user.id
@@ -3326,7 +3354,7 @@ async def set_shortener_cmd(client: Client, message: Message):
         "If your shortener doesn't use `api=` in the URL, provide the full API endpoint URL that accepts the long URL as a parameter (e.g., `https://api.shortener.com/shorten?url={long_url}&key=YOUR_API_KEY`)."
     )
 
-@app.on_message(filters.command("deletevideo") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("deletevideo") & filters.private & admin_only)
 async def deletevideo_cmd(client: Client, message: Message):
     """Admin command to initiate video deletion mode."""
     user_id = message.from_user.id
@@ -3334,7 +3362,7 @@ async def deletevideo_cmd(client: Client, message: Message):
     admin_delete_video_state[user_id] = True
     await message.reply("Send the <b>video file from the database</b> to delete it. This must be the original video file, not a forwarded one. 🎥")
 
-@app.on_message(filters.command("categoryrename") & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command("categoryrename") & filters.private & admin_only)
 async def categoryrename_cmd(client: Client, message: Message):
     """Admin command to initiate category renaming flow."""
     user_id = message.from_user.id
@@ -3342,7 +3370,7 @@ async def categoryrename_cmd(client: Client, message: Message):
     admin_rename_category_state[user_id] = {'step': 'await_old_name'}
     await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
 
-@app.on_message(filters.text & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.text & filters.private & admin_only)
 async def handle_admin_text_input(client: Client, message: Message):
     """Handles admin's text input for various multi-step commands."""
     user_id = message.from_user.id
@@ -3472,7 +3500,7 @@ async def handle_admin_text_input(client: Client, message: Message):
 
 
 # --- Auto-Delete & Protect Content Settings ---
-@app.on_message(filters.command('toggle_auto_delete') & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command('toggle_auto_delete') & filters.private & admin_only)
 async def toggle_auto_delete(client: Client, message: Message):
     """Admin command to toggle auto-deletion of sent videos."""
     user_id = message.from_user.id
@@ -3487,7 +3515,7 @@ async def toggle_auto_delete(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to toggle auto-delete: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling auto-delete. Please try again. 🐛")
 
-@app.on_message(filters.command('toggle_protect') & filters.private & filters.user(config.ADMIN_IDS))
+@app.on_message(filters.command('toggle_protect') & filters.private & admin_only)
 async def toggle_protect(client: Client, message: Message):
     """Admin command to toggle content protection for sent videos."""
     user_id = message.from_user.id
