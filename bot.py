@@ -51,6 +51,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
     MENU_EXPIRY_MINUTES = 60
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 300 # 5 minutes for refresh token links to be valid
+    NAV_SPAM_COOLDOWN_SECONDS = 0.5 # Cooldown in seconds for navigation buttons
 
 try:
     config = BotConfig()
@@ -137,7 +138,7 @@ active_video_message = {}
 
 # --- Navigation Spam Control ---
 nav_cooldown = {}
-NAV_SPAM_THRESHOLD = timedelta(seconds=1.5)
+NAV_SPAM_THRESHOLD = timedelta(seconds=config.NAV_SPAM_COOLDOWN_SECONDS)
 
 
 def create_tracked_task(coro):
@@ -3746,3 +3747,4 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
+```
