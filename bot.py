@@ -36,7 +36,7 @@ class BotConfig:
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
-    ADMIN_IDS = [6612030110] # First ID is the OWNER
+    OWNER_AND_ADMINS = [6612030110] # First ID is the OWNER
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
@@ -152,11 +152,11 @@ def create_tracked_task(coro):
 # --- Admin Check Utility ---
 def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
-    return user_id in config.ADMIN_IDS
+    return user_id in config.OWNER_AND_ADMINS
 
 def is_owner(user_id: int) -> bool:
     """Checks if the user is the bot owner (first admin ID)."""
-    return user_id == config.ADMIN_IDS[0]
+    return user_id == config.OWNER_AND_ADMINS[0]
 
 # MODIFIED: Custom filter for admin commands to allow dynamic admin list
 async def admin_filter(_, __, message: Message):
@@ -1144,23 +1144,16 @@ def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
     # MODIFIED: Removed the copy button as requested
     return None
 
-# MODIFIED: Updated the premium vs free text
-def get_premium_vs_free_text() -> str:
-    """Returns the detailed text comparing premium and free user features."""
+def get_premium_only_text() -> str:
+    """Returns the text highlighting only premium user benefits."""
     return (
-        "💎 <b>Premium vs. Free Users</b> 💎\n\n"
-        "✨ <b><u>Premium User Benefits:</u></b>\n"
+        "✨ <b>Premium User Benefits</b> ✨\n\n"
         "✅ <b>Unlimited Saved Videos</b> — keep as many bookmarks as you like.\n"
         "✅ <b>Direct Video Downloads</b> — instantly get the actual file with no restrictions.\n"
         "✅ <b>No Ad Refresh Needed</b> — enjoy uninterrupted access for your entire premium period.\n"
         "✅ <b>Bookmarks Never Deleted</b> — your saved videos are safe.\n"
-        "✅ <b>Priority Content Delivery</b> — faster, self-healed downloads to ensure you always get the video.\n\n"
-        "✨ <b><u>Free User Features:</u></b>\n"
-        f"⏳ Limited to <b>{config.FREE_USER_SAVE_LIMIT} saved videos</b>.\n"
-        "📦 Need tokens (via ads or referrals) for daily access.\n"
-        "🔒 No direct download — view only in-app.\n"
-        "🗑️ Extra saved videos are removed automatically when over limit.\n\n"
-        f"💳 Upgrade for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all premium benefits instantly!"
+        "✅ <b>Priority Content Delivery</b> — faster, reliable downloads so you always get the video.\n\n"
+        f"💳 Upgrade for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all premium benefits instantly! 🚀"
     )
 
 def buy_token_keyboard() -> InlineKeyboardMarkup:
@@ -1362,6 +1355,19 @@ async def start_cmd(client: Client, message: Message):
             elif deep_link_arg.startswith('batch_'):
                 deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
 
+        if deep_link_type == 'batch':
+            if user_id in active_video_message:
+                menu_info = active_video_message[user_id]
+                try:
+                    await client.get_messages(menu_info['chat_id'], menu_info['message_id'])
+                    await message.reply_text(
+                        "A menu is already open. Please use the one below. 👇",
+                        reply_to_message_id=menu_info['message_id']
+                    )
+                    return
+                except Exception:
+                    clear_active_video_message(user_id)
+
         # --- 1. Handle Welcome Message ---
         if is_new_user:
             if deep_link_type in ['video_share', 'view_saved_video', 'batch']:
@@ -1522,32 +1528,30 @@ async def profile_cmd(client: Client, message: Message):
             tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
 
         referral_count = user.get('referral_count', 0)
-        referred_by = user.get('referred_by', None)
         bookmarked_videos = user.get('bookmarked_videos', [])
 
         is_premium = is_premium_user(user_id)
-        user_status = "Premium User 💎" if is_premium else "Free User ✨"
+        user_status = "💎 Premium User" if is_premium else "✨ Free User"
 
         if is_premium:
             save_limit_display = f"{len(bookmarked_videos)} / Unlimited"
         else:
             save_limit_display = f"{len(bookmarked_videos)} / {config.FREE_USER_SAVE_LIMIT}"
 
-
-        views_doc = history_collection.find_one({'user_id': user_id})
-        view_count = len(views_doc['history']) if views_doc and 'history' in views_doc else 0
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
 
         profile_text = (
             f"👤 <b>Your Profile</b>\n\n"
-            f"<b>Status:</b> {user_status}\n"
-            f"<b>Active Tokens:</b> {tokens_count} 🪙\n"
-            f"<b>Saved Videos:</b> {save_limit_display} ❤️\n"
-            f"<b>Total Referrals:</b> {referral_count} 👥\n\n"
-            f"🔗 <b>Your Referral Link:</b>\n`{html.escape(ref_link)}`"
+            f"📌 Status: {user_status}\n"
+            f"🪙 Active Tokens: {tokens_count}\n"
+            f"❤️ Saved Videos: {save_limit_display}\n"
+            f"👥 Total Referrals: {referral_count}\n\n"
+            f"───────────────────────\n"
+            f"🔗 Your Referral Link:\n{html.escape(ref_link)}\n"
+            f"───────────────────────\n\n"
+            f"💡 Share this link with friends to earn free tokens! 🎁"
         )
 
-        # MODIFIED: Removed the referral keyboard
         await message.reply(profile_text)
         logger.info(f"User {user_id}: Profile sent successfully.")
     except Exception as e:
@@ -2180,7 +2184,7 @@ async def buy_token_btn(client: Client, message: Message):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
-        await message.reply(get_premium_vs_free_text(), reply_markup=buy_token_keyboard())
+        await message.reply(get_premium_only_text(), reply_markup=buy_token_keyboard())
         logger.info(f"User {user_id}: Buy token message sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send buy token message: {e}", exc_info=True)
@@ -2351,7 +2355,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
             await client.send_message(
                 chat_id,
-                get_premium_vs_free_text(),
+                get_premium_only_text(),
                 reply_markup=buy_token_keyboard()
             )
             return
@@ -3334,10 +3338,10 @@ async def add_admin_cmd(client: Client, message: Message):
         return
     try:
         user_id_to_add = int(message.text.split()[1])
-        if user_id_to_add in config.ADMIN_IDS:
+        if user_id_to_add in config.OWNER_AND_ADMINS:
             await message.reply("This user is already an admin.")
             return
-        config.ADMIN_IDS.append(user_id_to_add)
+        config.OWNER_AND_ADMINS.append(user_id_to_add)
         await message.reply(f"✅ User {user_id_to_add} has been promoted to admin for this session.")
         logger.info(f"Owner {message.from_user.id} added new admin: {user_id_to_add}")
     except (ValueError, IndexError):
@@ -3354,7 +3358,7 @@ async def remove_admin_cmd(client: Client, message: Message):
     
     buttons = []
     # List all admins except the owner for removal
-    for admin_id in config.ADMIN_IDS[1:]:
+    for admin_id in config.OWNER_AND_ADMINS[1:]:
         try:
             user = await client.get_users(admin_id)
             buttons.append([InlineKeyboardButton(f"{user.first_name} ({user.id})", callback_data=f"rem_admin_{admin_id}")])
@@ -3376,8 +3380,8 @@ async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
 
     try:
         admin_id_to_remove = int(callback_query.data.split("_")[2])
-        if admin_id_to_remove in config.ADMIN_IDS:
-            config.ADMIN_IDS.remove(admin_id_to_remove)
+        if admin_id_to_remove in config.OWNER_AND_ADMINS:
+            config.OWNER_AND_ADMINS.remove(admin_id_to_remove)
             await callback_query.message.edit_text(f"✅ Admin {admin_id_to_remove} has been removed for this session.")
             logger.info(f"Owner {callback_query.from_user.id} removed admin: {admin_id_to_remove}")
         else:
