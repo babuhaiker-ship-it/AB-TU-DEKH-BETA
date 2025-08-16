@@ -130,6 +130,7 @@ admin_shortener_setup_state = defaultdict(dict)
 admin_delete_video_state = defaultdict(bool)
 admin_rename_category_state = defaultdict(dict)
 admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
+owner_add_admin_state = defaultdict(dict) # State for /addadmin
 
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
@@ -1124,8 +1125,11 @@ def video_nav_keyboard(
 
     # --- Action Row (Change Category/Share/Download) ---
     row_2_buttons = []
-    if not is_batch: # "Change Category" is not shown for batch menus
+    if is_saved:
+        row_2_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
+    elif not is_batch:
         row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
+    
     row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
     row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
@@ -1354,19 +1358,6 @@ async def start_cmd(client: Client, message: Message):
                 deep_link_type, deep_link_data = 'view_saved_video', deep_link_arg[12:]
             elif deep_link_arg.startswith('batch_'):
                 deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
-
-        if deep_link_type == 'batch':
-            if user_id in active_video_message:
-                menu_info = active_video_message[user_id]
-                try:
-                    await client.get_messages(menu_info['chat_id'], menu_info['message_id'])
-                    await message.reply_text(
-                        "A menu is already open. Please use the one below. 👇",
-                        reply_to_message_id=menu_info['message_id']
-                    )
-                    return
-                except Exception:
-                    clear_active_video_message(user_id)
 
         # --- 1. Handle Welcome Message ---
         if is_new_user:
@@ -2099,6 +2090,24 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
+@app.on_callback_query(filters.regex(r"^back_to_saved_cats$"))
+async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Back' button in the saved video menu."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} requested to go back to saved categories.")
+
+    await send_and_replace_message(
+        client,
+        chat_id,
+        message_id_to_edit_or_delete=callback_query.message.id,
+        new_message_type="text",
+        text_content="🗂️ <b>Select a Category from your Saved Videos:</b>",
+        reply_markup=saved_category_keyboard(user_id),
+        force_new_message=True
+    )
+    await callback_query.answer()
+
 @app.on_message(filters.regex("^👤 Profile$") & filters.private)
 async def profile_btn(client: Client, message: Message):
     """Handles 'Profile' button click."""
@@ -2476,6 +2485,11 @@ async def saved_videos_btn(client: Client, message: Message):
     if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
         logger.warning(f"User {user_id} hit rate limit in saved_videos_btn.")
+        return
+
+    if not user_has_token(user_id):
+        await message.reply("You need a token to view your saved videos. Please get a token first! 🧐")
+        await send_token_earning_options(client, message)
         return
 
     user = users_collection.find_one({'user_id': user_id})
@@ -3336,19 +3350,8 @@ async def add_admin_cmd(client: Client, message: Message):
     """Owner command to add a new admin."""
     if not is_owner(message.from_user.id):
         return
-    try:
-        user_id_to_add = int(message.text.split()[1])
-        if user_id_to_add in config.OWNER_AND_ADMINS:
-            await message.reply("This user is already an admin.")
-            return
-        config.OWNER_AND_ADMINS.append(user_id_to_add)
-        await message.reply(f"✅ User {user_id_to_add} has been promoted to admin for this session.")
-        logger.info(f"Owner {message.from_user.id} added new admin: {user_id_to_add}")
-    except (ValueError, IndexError):
-        await message.reply("Usage: `/addadmin <user_id>`")
-    except Exception as e:
-        await message.reply(f"An error occurred: {e}")
-        logger.error(f"Error in /addadmin: {e}")
+    owner_add_admin_state[message.from_user.id]['step'] = 'await_admin_id'
+    await message.reply("Please send the User ID of the new admin.")
 
 @app.on_message(filters.command("removeadmin") & filters.private)
 async def remove_admin_cmd(client: Client, message: Message):
@@ -3460,6 +3463,21 @@ async def categoryrename_cmd(client: Client, message: Message):
 async def handle_admin_text_input(client: Client, message: Message):
     """Handles admin's text input for various multi-step commands."""
     user_id = message.from_user.id
+
+    if is_owner(user_id) and user_id in owner_add_admin_state and owner_add_admin_state[user_id].get('step') == 'await_admin_id':
+        try:
+            new_admin_id = int(message.text.strip())
+            if new_admin_id in config.OWNER_AND_ADMINS:
+                await message.reply("This user is already an admin.")
+            else:
+                config.OWNER_AND_ADMINS.append(new_admin_id)
+                await message.reply(f"✅ User {new_admin_id} has been promoted to admin for this session.")
+                logger.info(f"Owner {user_id} added new admin: {new_admin_id}")
+        except ValueError:
+            await message.reply("Invalid User ID. Please send a valid integer ID.")
+        finally:
+            del owner_add_admin_state[user_id]
+        return
 
     if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
         template_url = message.text.strip()
@@ -3819,3 +3837,4 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
+```
