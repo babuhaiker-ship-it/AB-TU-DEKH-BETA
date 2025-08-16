@@ -136,8 +136,7 @@ admin_rename_category_state = defaultdict(dict)
 active_video_message = {}
 
 # --- Navigation Spam Control ---
-nav_cooldown = {}
-NAV_SPAM_THRESHOLD = timedelta(seconds=1.5)
+processing_navigation_lock = set()
 
 
 def create_tracked_task(coro):
@@ -1842,118 +1841,121 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
 async def navigate_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' video navigation."""
     user_id = callback_query.from_user.id
-    chat_id = callback_query.message.chat.id
 
-    # --- Spam Control ---
-    now = datetime.utcnow()
-    last_click_time = nav_cooldown.get(user_id)
-    if last_click_time and (now - last_click_time) < NAV_SPAM_THRESHOLD:
+    # --- Processing Lock to prevent race conditions ---
+    if user_id in processing_navigation_lock:
         await callback_query.answer("don't spam again", show_alert=True)
         return
-    nav_cooldown[user_id] = now
-    # --- End Spam Control ---
-
-    # Parse callback data: action (next/prev), current_uuid, category, is_saved_flag
-    parts = callback_query.data.split('|')
-    if len(parts) != 4:
-        logger.error(f"Invalid callback data for navigate_video: {callback_query.data}")
-        await callback_query.answer("Invalid request. Please try again.", show_alert=True)
-        return
-
-    action, current_uuid, category_encoded, is_saved_flag_str = parts
-    # Changed: Decode category name from callback data
-    category = b64_to_str(category_encoded)
-    is_saved = bool(int(is_saved_flag_str)) # Convert '0' or '1' to boolean
-
-    logger.info(f"User {user_id} requested {action} video in category '{category}', is_saved: {is_saved}.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    create_tracked_task(check_premium_status_and_notify(client, user_id))
+    processing_navigation_lock.add(user_id)
+    # --- End Processing Lock ---
 
     try:
-        if await is_rate_limited(user_id):
-            await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
-            logger.warning(f"User {user_id} hit rate limit in navigate_video.")
+        chat_id = callback_query.message.chat.id
+        # Parse callback data: action (next/prev), current_uuid, category, is_saved_flag
+        parts = callback_query.data.split('|')
+        if len(parts) != 4:
+            logger.error(f"Invalid callback data for navigate_video: {callback_query.data}")
+            await callback_query.answer("Invalid request. Please try again.", show_alert=True)
             return
 
-        current_active_tracked_message = active_video_message.get(user_id)
-        if current_active_tracked_message and \
-           current_active_tracked_message.get('message_id') == callback_query.message.id and \
-           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+        action, current_uuid, category_encoded, is_saved_flag_str = parts
+        # Changed: Decode category name from callback data
+        category = b64_to_str(category_encoded)
+        is_saved = bool(int(is_saved_flag_str)) # Convert '0' or '1' to boolean
 
-            logger.warning(f"User {user_id} tried to navigate but menu expired.")
-            await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
-            try:
-                await client.delete_messages(chat_id, callback_query.message.id)
-            except MessageIdInvalid:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
-            clear_active_video_message(user_id)
-            await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
+        logger.info(f"User {user_id} requested {action} video in category '{category}', is_saved: {is_saved}.")
+
+        if not await check_membership(client, user_id):
+            await send_force_subscribe_message(client, user_id)
             return
 
-        # If the user clicks an old button, just answer and return. The active message logic will handle it.
-        if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
-            logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
-            await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
-            # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
-            return
+        create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-        video = None
-        if is_saved:
-            if action == "next":
-                video = get_next_saved_video_chronological(user_id, current_uuid, category)
-            elif action == "prev":
-                video = get_previous_saved_video_chronological(user_id, current_uuid, category)
-
-            if not video:
-                await callback_query.answer("No more saved videos in this category. Looping to the beginning/end. ❤️", show_alert=True)
+        try:
+            if await is_rate_limited(user_id):
+                await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
+                logger.warning(f"User {user_id} hit rate limit in navigate_video.")
                 return
 
-        else: # Not a saved video, use regular chronological navigation based on sequence_number
-            if category not in get_categories():
-                logger.warning(f"User {user_id} used invalid category '{category}' for navigation (non-saved).")
-                await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
+            current_active_tracked_message = active_video_message.get(user_id)
+            if current_active_tracked_message and \
+               current_active_tracked_message.get('message_id') == callback_query.message.id and \
+               datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+
+                logger.warning(f"User {user_id} tried to navigate but menu expired.")
+                await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
+                try:
+                    await client.delete_messages(chat_id, callback_query.message.id)
+                except MessageIdInvalid:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
+                clear_active_video_message(user_id)
+                await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
                 return
 
-            if action == "next":
-                video = get_next_video_chronological(current_uuid, category)
-            elif action == "prev":
-                video = get_previous_video_chronological(current_uuid, category)
-
-            if not video: # This case should ideally not be hit with looping logic
-                await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
+            # If the user clicks an old button, just answer and return. The active message logic will handle it.
+            if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+                logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+                await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+                # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
                 return
 
-        # Call send_and_replace_message. It will handle broken videos and recursive retries.
-        sent_success, sent_message_or_error = await send_and_replace_message(
-            client,
-            chat_id,
-            message_id_to_edit_or_delete=callback_query.message.id,
-            new_message_type="video",
-            video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
-            force_new_message=False # Try to edit the existing message
-        )
+            video = None
+            if is_saved:
+                if action == "next":
+                    video = get_next_saved_video_chronological(user_id, current_uuid, category)
+                elif action == "prev":
+                    video = get_previous_saved_video_chronological(user_id, current_uuid, category)
 
-        if sent_success:
-            save_history(user_id, video['uuid'], category)
-            logger.info(f"User {user_id} navigated to {action} video {video['uuid']} in category {category}.")
-            await callback_query.answer()
-        else:
-            logger.error(f"User {user_id} failed to send {action} video: {sent_message_or_error}. Clearing active video message.")
-            await callback_query.answer(f"❌ Failed to load {action} video. Please try again. 😥", show_alert=True)
-            clear_active_video_message(user_id)
-    except Exception as e:
-        logger.error(f"User {user_id} error in navigate_video ({action}): {e}", exc_info=True)
-        await callback_query.answer(
-            "An unexpected error occurred. Try again. 🤷‍♀️",
-            show_alert=True
-        )
+                if not video:
+                    await callback_query.answer("No more saved videos in this category. Looping to the beginning/end. ❤️", show_alert=True)
+                    return
+
+            else: # Not a saved video, use regular chronological navigation based on sequence_number
+                if category not in get_categories():
+                    logger.warning(f"User {user_id} used invalid category '{category}' for navigation (non-saved).")
+                    await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
+                    return
+
+                if action == "next":
+                    video = get_next_video_chronological(current_uuid, category)
+                elif action == "prev":
+                    video = get_previous_video_chronological(current_uuid, category)
+
+                if not video: # This case should ideally not be hit with looping logic
+                    await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
+                    return
+
+            # Call send_and_replace_message. It will handle broken videos and recursive retries.
+            sent_success, sent_message_or_error = await send_and_replace_message(
+                client,
+                chat_id,
+                message_id_to_edit_or_delete=callback_query.message.id,
+                new_message_type="video",
+                video_data=video,
+                reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
+                force_new_message=False # Try to edit the existing message
+            )
+
+            if sent_success:
+                save_history(user_id, video['uuid'], category)
+                logger.info(f"User {user_id} navigated to {action} video {video['uuid']} in category {category}.")
+                await callback_query.answer()
+            else:
+                logger.error(f"User {user_id} failed to send {action} video: {sent_message_or_error}. Clearing active video message.")
+                await callback_query.answer(f"❌ Failed to load {action} video. Please try again. 😥", show_alert=True)
+                clear_active_video_message(user_id)
+        except Exception as e:
+            logger.error(f"User {user_id} error in navigate_video ({action}): {e}", exc_info=True)
+            await callback_query.answer(
+                "An unexpected error occurred. Try again. 🤷‍♀️",
+                show_alert=True
+            )
+    finally:
+        # Ensure the lock is always released
+        if user_id in processing_navigation_lock:
+            processing_navigation_lock.remove(user_id)
 
 @app.on_callback_query(filters.regex(r"^change_cat$"))
 async def change_category(client: Client, callback_query: CallbackQuery):
