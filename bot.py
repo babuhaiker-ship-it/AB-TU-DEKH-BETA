@@ -36,7 +36,7 @@ class BotConfig:
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
-    ADMIN_IDS = [6612030110]
+    ADMIN_IDS = [6612030110] # First ID is the OWNER
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
@@ -69,6 +69,7 @@ history_collection = db['history']
 categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
+video_batches_collection = db['video_batches'] # New collection for batch videos
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -82,6 +83,7 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
+video_batches_collection.create_index([("batch_id", ASCENDING)], unique=True)
 
 # --- Session Management with MongoDB ---
 def get_session_string():
@@ -123,14 +125,11 @@ else:
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
 
-# --- Admin State for Shortener Setup ---
+# --- Admin State Management ---
 admin_shortener_setup_state = defaultdict(dict)
-
-# --- Admin State for Delete Video ---
 admin_delete_video_state = defaultdict(bool)
-
-# --- Admin State for Category Rename ---
 admin_rename_category_state = defaultdict(dict)
+admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
 
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
@@ -534,6 +533,26 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
             return video, current_video_index + 1, total_videos
         return None, 0, 0
 
+def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dict | None, int, int]:
+    """
+    Retrieves a video and its position from a specific batch.
+    Returns (video_data, current_position, total_videos).
+    """
+    batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
+    if not batch_doc:
+        return None, 0, 0
+
+    video_uuids = batch_doc.get('video_uuids', [])
+    total_videos = len(video_uuids)
+
+    if not (0 <= current_index < total_videos):
+        return None, 0, 0
+
+    video_uuid = video_uuids[current_index]
+    video = get_video_by_uuid(video_uuid)
+
+    return video, current_index + 1, total_videos
+
 def get_next_video_chronological(current_uuid: str, category: str) -> dict | None:
     """
     Retrieves the video immediately after the current video in the same category,
@@ -831,7 +850,19 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
         logger.error(f"Failed to delete broken video {video_uuid} from DB/channel: {e}", exc_info=True)
         return False
 
-async def send_and_replace_message(client: Client, chat_id: int, message_id_to_edit_or_delete: int, new_message_type: str, video_data: dict = None, reply_markup: InlineKeyboardMarkup = None, text_content: str = None, force_new_message: bool = False) -> tuple[bool, Message | str]:
+async def send_and_replace_message(
+    client: Client,
+    chat_id: int,
+    message_id_to_edit_or_delete: int,
+    new_message_type: str,
+    video_data: dict = None,
+    reply_markup: InlineKeyboardMarkup = None,
+    text_content: str = None,
+    force_new_message: bool = False,
+    is_batch: bool = False,
+    batch_id: str = None,
+    batch_index: int = -1
+) -> tuple[bool, Message | str]:
     """
     [MODIFIED] Prefers editing media/text over sending new messages for a smoother experience.
     It attempts to edit an existing message. If that fails, or if forced, it deletes the old one and sends a new one.
@@ -844,21 +875,24 @@ async def send_and_replace_message(client: Client, chat_id: int, message_id_to_e
     # --- Prepare Caption ---
     caption_text = ""
     if new_message_type == "video" and video_data:
-        is_saved_from_markup = False
-        if reply_markup:
-            for row in reply_markup.inline_keyboard:
-                for button in row:
-                    if button.callback_data and '|' in button.callback_data:
-                        parts = button.callback_data.split('|')
-                        if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
-                            is_saved_from_markup = bool(int(parts[3]))
-                            break
-                if is_saved_from_markup:
-                    break
-
-        _, current_position, total_videos = get_video_and_position(
-            video_data['uuid'], video_data.get('category'), is_saved_from_markup, chat_id
-        )
+        current_position, total_videos = 0, 0
+        if is_batch:
+            _, current_position, total_videos = get_video_and_position_batch(batch_id, batch_index)
+        else:
+            is_saved_from_markup = False
+            if reply_markup:
+                for row in reply_markup.inline_keyboard:
+                    for button in row:
+                        if button.callback_data and '|' in button.callback_data:
+                            parts = button.callback_data.split('|')
+                            if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
+                                is_saved_from_markup = bool(int(parts[3]))
+                                break
+                    if is_saved_from_markup:
+                        break
+            _, current_position, total_videos = get_video_and_position(
+                video_data['uuid'], video_data.get('category'), is_saved_from_markup, chat_id
+            )
 
         custom_caption = video_data.get('custom_caption')
         category_caption = f"Category: {html.escape(video_data['category'])}" if video_data.get('category') else ""
@@ -1062,33 +1096,46 @@ def category_keyboard() -> InlineKeyboardMarkup:
     # Removed "🔖 Saved Videos" from this keyboard as it's now a main menu button
     return InlineKeyboardMarkup(buttons)
 
-def video_nav_keyboard(video_uuid: str, category: str, user_id: int, is_saved: bool = False) -> InlineKeyboardMarkup:
+def video_nav_keyboard(
+    video_uuid: str,
+    category: str,
+    user_id: int,
+    is_saved: bool = False,
+    is_batch: bool = False,
+    batch_id: str = None,
+    batch_index: int = -1
+) -> InlineKeyboardMarkup:
     """
-    Keyboard for navigating videos, with button arrangements based on whether it's a saved video.
-    The 'Download' button is now always shown.
+    Keyboard for navigating videos. Handles regular, saved, and batch video menus.
     """
     buttons = []
 
-    buttons.append([
-        # Changed: Encode category name for callback data
-        InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
-        InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
-    ])
+    # --- Navigation Row (Previous/Next) ---
+    if is_batch:
+        buttons.append([
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_batch|{batch_id}|{batch_index}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
+        ])
 
-    row_2_buttons = [
-        InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"),
-        InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
-        InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")
-    ]
+    # --- Action Row (Change Category/Share/Download) ---
+    row_2_buttons = []
+    if not is_batch: # "Change Category" is not shown for batch menus
+        row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
+    row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
+    row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
 
+    # --- Bookmark/Remove Row ---
     row_3_buttons = []
     if is_saved:
         row_3_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
     row_3_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
-
-    if row_3_buttons:
-        buttons.append(row_3_buttons)
+    buttons.append(row_3_buttons)
 
     return InlineKeyboardMarkup(buttons)
 
@@ -1271,171 +1318,137 @@ async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     username_safe = html.escape(message.from_user.username) if message.from_user.username else ""
     first_name_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
-    max_retries = 3
 
-    for attempt in range(max_retries):
+    try:
+        if not await check_membership(client, user_id):
+            await send_force_subscribe_message(client, user_id)
+            return
+
+        if await is_rate_limited(user_id):
+            raise FloodWait(10)
+
+        user = users_collection.find_one({'user_id': user_id})
+        is_new_user = not user
+
+        if is_new_user:
+            users_collection.insert_one({
+                'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
+                'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
+                'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
+                'last_premium_check_status': False, 'last_viewed_per_category': {},
+            })
+            add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
+            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
+
+        create_tracked_task(check_premium_status_and_notify(client, user_id))
+
+        args = message.text.split()
+        deep_link_type, deep_link_data = None, None
+        referrer_id_from_video_link = None
+
+        if len(args) > 1:
+            deep_link_arg = args[1]
+            if deep_link_arg.startswith('token_'):
+                deep_link_type, deep_link_data = 'token_refresh', deep_link_arg[6:]
+            elif deep_link_arg.startswith('video_'):
+                deep_link_type, deep_link_data = 'video_share', deep_link_arg.split('_')[1]
+                if len(deep_link_arg.split('_')) == 3:
+                    try: referrer_id_from_video_link = int(deep_link_arg.split('_')[2])
+                    except ValueError: logger.warning(f"Invalid referrer ID in video deep link: {deep_link_arg}")
+            elif deep_link_arg.startswith('ref_'):
+                deep_link_type, deep_link_data = 'referral', deep_link_arg
+            elif deep_link_arg.startswith('saved_video_'):
+                deep_link_type, deep_link_data = 'view_saved_video', deep_link_arg[12:]
+            elif deep_link_arg.startswith('batch_'):
+                deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
+
+        # --- 1. Handle Welcome Message ---
+        if is_new_user:
+            if deep_link_type in ['video_share', 'view_saved_video', 'batch']:
+                welcome_message = f"👋 Congratulations, {first_name_safe}! 🎉\n\nYou've received {config.NEW_USER_TOKENS} free token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨"
+            else:
+                welcome_message = f"👋 Welcome, {first_name_safe}! 🎉\n\nYou've received <b>{config.NEW_USER_TOKENS} free token</b> to get started. 🌶️\n\nTo watch exclusive content, just tap the '🎞️ Get Video' button below. Enjoy your stay!"
+            await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
+
+            # Handle referral for new user
+            if deep_link_type == 'referral':
+                referrer_id = handle_referral(user_id, deep_link_data)
+                if referrer_id: await client.send_message(referrer_id, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined! You've received {config.REFERRAL_BONUS} token. 🤩")
+            elif deep_link_type == 'video_share' and referrer_id_from_video_link:
+                handle_referral(user_id, deep_link_arg)
+                await client.send_message(referrer_id_from_video_link, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined via your shared video! You've received {config.REFERRAL_BONUS} token. 🤩")
+
+        elif not deep_link_type:
+            await message.reply(f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in.", reply_markup=await get_main_keyboard(user_id))
+
+        # --- 2. Handle Deep Link Action ---
+        loading_msg = None
+        if is_new_user and deep_link_type in ['video_share', 'view_saved_video', 'batch']:
+            loading_msg = await message.reply("Loading your requested video, please wait...")
+
         try:
-            if not await check_membership(client, user_id):
-                await send_force_subscribe_message(client, user_id)
-                return
-
-            if await is_rate_limited(user_id):
-                raise FloodWait(10)
-
-            user = users_collection.find_one({'user_id': user_id})
-            args = message.text.split()
-
-            is_new_user = False
-            if not user:
-                is_new_user = True
-                users_collection.insert_one({
-                    'user_id': user_id,
-                    'username': username_safe,
-                    'first_name': first_name_safe,
-                    'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-                    'joined_date': datetime.utcnow(),
-                    'referral_count': 0,
-                    'bookmarked_videos': [],
-                    'last_premium_check_status': False,
-                    'last_viewed_per_category': {},
-                })
-                add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
-                logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
-
-            create_tracked_task(check_premium_status_and_notify(client, user_id))
-
-            deep_link_type = None
-            video_uuid_from_link = None
-            referrer_id_from_video_link = None
-            deep_link_data = None # Initialize deep_link_data
-
-            if len(args) > 1:
-                deep_link_arg = args[1]
-                if deep_link_arg.startswith('token_'):
-                    deep_link_type = 'token_refresh'
-                    deep_link_data = deep_link_arg[6:]
-                elif deep_link_arg.startswith('video_'):
-                    deep_link_type = 'video_share'
-                    parts = deep_link_arg.split('_')
-                    if len(parts) >= 2:
-                        video_uuid_from_link = parts[1]
-                    if len(parts) == 3:
-                        try:
-                            referrer_id_from_video_link = int(parts[2])
-                        except ValueError:
-                            logger.warning(f"Invalid referrer ID in video deep link for user {user_id}: {deep_link_arg}")
-                elif deep_link_arg.startswith('ref_'):
-                    deep_link_type = 'referral'
-                    deep_link_data = deep_link_arg
-                elif deep_link_arg.startswith('saved_video_'):
-                    deep_link_type = 'view_saved_video'
-                    video_uuid_from_link = deep_link_arg[12:]
-
-            if is_new_user:
-                welcome_message = (
-                    f"👋 Welcome, {first_name_safe}! 🎉\n\n"
-                    f"You've received <b>{config.NEW_USER_TOKENS} free token</b> to get started. 🌶️\n\n"
-                    "To watch exclusive content, just tap the '🎞️ Get Video' button below. Enjoy your stay!"
-                )
-                if deep_link_type == 'referral':
-                    referrer_id = handle_referral(user_id, deep_link_data)
-                    if referrer_id:
-                        await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
-                        await client.send_message(referrer_id, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined through your link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
-                elif deep_link_type == 'video_share' and referrer_id_from_video_link and referrer_id_from_video_link != user_id:
-                    referrer_user_obj = users_collection.find_one({'user_id': referrer_id_from_video_link})
-                    if referrer_user_obj:
-                        await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
-                        await client.send_message(referrer_id_from_video_link, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined through your shared video link! You've received {config.REFERRAL_BONUS} token. Awesome! 🤩")
-                    else:
-                        logger.warning(f"Referrer {referrer_id_from_video_link} not found for new user {user_id} via video share. Still sending new user welcome.")
-                        await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
-                else:
-                    await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
-            elif not deep_link_type:
-                await message.reply(
-                    f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in. If you need anything, just use /help. ✨",
-                    reply_markup=await get_main_keyboard(user_id)
-                )
-
             if deep_link_type == 'token_refresh':
                 success, msg = await handle_token_refresh(user_id, deep_link_data)
                 await message.reply(msg)
-                if success:
-                    await message.reply(
-                        "🎉 <b>Token Activated!</b>\nClick '🎞️ Get Video' to start watching.",
-                        reply_markup=await get_main_keyboard(user_id)
-                    )
-            elif deep_link_type == 'video_share' or deep_link_type == 'view_saved_video':
-                logger.info(f"User {user_id} attempting to view shared/saved video {video_uuid_from_link}")
-
-                try:
-                    uuid.UUID(video_uuid_from_link)
+            elif deep_link_type in ['video_share', 'view_saved_video']:
+                video_uuid = deep_link_data
+                try: uuid.UUID(video_uuid)
                 except ValueError:
-                    logger.warning(f"User {user_id} attempted to view shared/saved video with invalid UUID format: {video_uuid_from_link}.")
-                    await message.reply("Invalid video link format. 🐛", reply_markup=await get_main_keyboard(user_id))
-                    break
+                    await message.reply("Invalid video link format. 🐛")
+                    return
 
-                video_found_in_db = media_collection.find_one({'uuid': video_uuid_from_link})
-                if not video_found_in_db:
-                    logger.warning(f"User {user_id} attempted to view non-existent shared/saved video UUID {video_uuid_from_link}.")
-                    await message.reply("Invalid video link. 😔", reply_markup=await get_main_keyboard(user_id))
-                    break
-
-                if is_new_user and referrer_id_from_video_link:
-                    handle_referral(user_id, deep_link_arg)
-
-                wait_msg = await message.reply("Just a moment, checking your access...")
                 if not user_has_token(user_id):
-                    await wait_msg.delete()
-                    await message.reply("You need a token to watch this video. Please get a token first! 🧐", reply_markup=await get_main_keyboard(user_id))
+                    await message.reply("You need a token to watch this video. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
                     await send_token_earning_options(client, message)
-                    break
-                else:
-                    await wait_msg.delete()
-                    success, result_or_msg = await handle_shared_video(client, user_id, video_uuid_from_link)
-                    if not success:
-                        await message.reply(result_or_msg, reply_markup=await get_main_keyboard(user_id))
-                        break
+                    return
 
-                    video = result_or_msg
+                success, result = await handle_shared_video(client, user_id, video_uuid)
+                if not success:
+                    await message.reply(result)
+                    return
 
-                    message_id_to_edit_or_delete = message.id
+                video = result
+                is_saved = (deep_link_type == 'view_saved_video')
+                sent_success, _ = await send_and_replace_message(
+                    client, message.chat.id, message.id, "video", video_data=video,
+                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved),
+                    force_new_message=True
+                )
+                if sent_success: save_history(user_id, video['uuid'], video['category'])
 
-                    is_saved_video_link = (deep_link_type == 'view_saved_video')
+            elif deep_link_type == 'batch':
+                batch_id = deep_link_data
+                batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
+                if not batch_doc or not batch_doc.get('video_uuids'):
+                    await message.reply("This batch link is invalid or has expired. 😔")
+                    return
 
-                    sent_success, sent_message_or_error = await send_and_replace_message(
-                        client,
-                        message.chat.id,
-                        message_id_to_edit_or_delete=message_id_to_edit_or_delete,
-                        new_message_type="video",
-                        video_data=video,
-                        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved_video_link),
-                        force_new_message=True # Always force new message for start deep links
-                    )
+                if not user_has_token(user_id):
+                    await message.reply("You need a token to watch videos from this link. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
+                    await send_token_earning_options(client, message)
+                    return
 
-                    if sent_success:
-                        save_history(user_id, video['uuid'], video['category'])
-                        logger.info(f"User {user_id} sent shared/saved video {video_uuid_from_link} as new menu.")
-                    else:
-                        await message.reply(sent_message_or_error)
-                break
+                first_video_uuid = batch_doc['video_uuids'][0]
+                video = get_video_by_uuid(first_video_uuid)
+                if not video:
+                    await message.reply("The first video in this batch is unavailable. 😔")
+                    return
 
-            break
+                await send_and_replace_message(
+                    client, message.chat.id, message.id, "video", video_data=video,
+                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=batch_id, batch_index=0),
+                    force_new_message=True, is_batch=True, batch_id=batch_id, batch_index=0
+                )
+                # No history saving for batch videos
 
-        except FloodWait as e:
-            wait_time = e.value
-            logger.warning(f"User {user_id} hit FloodWait: Waiting for {wait_time} seconds (attempt {attempt + 1}/{max_retries}).")
-            await asyncio.sleep(wait_time + 1)
-            if attempt < max_retries - 1:
-                continue
-            else:
-                logger.error(f"User {user_id} failed to process /start after {max_retries} retries due to FloodWait.")
-                await handle_error(client, message, e)
-                break
-        except Exception as e:
-            logger.error(f"User {user_id} encountered an unexpected error in start command: {e}", exc_info=True)
-            await handle_error(client, message, e)
+        finally:
+            if loading_msg: await loading_msg.delete()
+
+    except FloodWait as e:
+        await handle_error(client, message, e)
+    except Exception as e:
+        logger.error(f"User {user_id} encountered an unexpected error in start command: {e}", exc_info=True)
+        await handle_error(client, message, e)
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client: Client, message: Message):
@@ -1954,6 +1967,61 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             )
     finally:
         # Ensure the lock is always released
+        if user_id in processing_navigation_lock:
+            processing_navigation_lock.remove(user_id)
+
+@app.on_callback_query(filters.regex(r"^(next_batch|prev_batch)\|(.+)\|(\d+)$"))
+async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
+    """Handles 'Next' and 'Previous' for batch video menus."""
+    user_id = callback_query.from_user.id
+    if user_id in processing_navigation_lock:
+        await callback_query.answer("don't spam again", show_alert=True)
+        return
+    processing_navigation_lock.add(user_id)
+
+    try:
+        chat_id = callback_query.message.chat.id
+        action, batch_id, current_index_str = callback_query.data.split('|')
+        current_index = int(current_index_str)
+
+        logger.info(f"User {user_id} requested {action} in batch '{batch_id}'.")
+
+        if not await check_membership(client, user_id):
+            await send_force_subscribe_message(client, user_id)
+            return
+
+        batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
+        if not batch_doc or not batch_doc.get('video_uuids'):
+            await callback_query.answer("This batch is no longer available.", show_alert=True)
+            return
+
+        video_uuids = batch_doc['video_uuids']
+        total_videos = len(video_uuids)
+        if action == "next_batch":
+            new_index = (current_index + 1) % total_videos
+        else: # prev_batch
+            new_index = (current_index - 1 + total_videos) % total_videos
+
+        next_video_uuid = video_uuids[new_index]
+        video = get_video_by_uuid(next_video_uuid)
+
+        if not video:
+            await callback_query.answer("The next video in this batch is unavailable.", show_alert=True)
+            # In a more robust system, you might skip to the next available one.
+            return
+
+        await send_and_replace_message(
+            client, chat_id, callback_query.message.id, "video", video_data=video,
+            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=batch_id, batch_index=new_index),
+            force_new_message=False, is_batch=True, batch_id=batch_id, batch_index=new_index
+        )
+        # DO NOT save history for batch videos
+        await callback_query.answer()
+
+    except Exception as e:
+        logger.error(f"Error in navigate_batch_video for user {user_id}: {e}", exc_info=True)
+        await callback_query.answer("An error occurred.", show_alert=True)
+    finally:
         if user_id in processing_navigation_lock:
             processing_navigation_lock.remove(user_id)
 
@@ -3048,132 +3116,94 @@ async def done_cmd(client: Client, message: Message):
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
 @app.on_message(filters.video & filters.private & admin_only)
-async def handle_video_batch_add_or_delete(client: Client, message: Message):
+async def handle_video_for_admin_modes(client: Client, message: Message):
     """
-    [MODIFIED] Handles incoming video messages for either batch adding mode or delete video mode.
-    Prioritizes delete video mode if active. Implements robust FileShareBot logic for adding.
+    Handles incoming videos for various admin modes: delete, batch add, batch link creation.
     """
     user_id = message.from_user.id
 
-    # --- Handle Delete Video Mode ---
-    if user_id in admin_delete_video_state and admin_delete_video_state[user_id]:
+    # --- Priority 1: Delete Video Mode ---
+    if admin_delete_video_state.get(user_id):
         logger.info(f"Admin {user_id} sent a video for deletion.")
         try:
-            if not message.video:
-                await message.reply_text("❌ Please send a video file to delete. 🎥")
-                return
-
             file_unique_id = message.video.file_unique_id
             video_to_delete = media_collection.find_one({"file_unique_id": file_unique_id})
-
             if not video_to_delete:
-                await message.reply_text("❌ Video not found in the database. Please ensure you sent the original video file. 🧐")
+                await message.reply_text("❌ Video not found in the database.")
                 return
-
-            video_uuid = video_to_delete['uuid']
-            message_id_in_channel = video_to_delete.get('message_id')
-            category_of_deleted_video = video_to_delete.get('category')
-            sequence_number_of_deleted_video = video_to_delete.get('sequence_number')
-
             success = await delete_broken_video_from_db_and_channel(
-                client, video_uuid, category_of_deleted_video, sequence_number_of_deleted_video, message_id_in_channel
+                client, video_to_delete['uuid'], video_to_delete.get('category'),
+                video_to_delete.get('sequence_number'), video_to_delete.get('message_id')
             )
-
             if success:
-                await message.reply_text(f"✅ Video (UUID: <code>{video_uuid}</code>) and its data have been deleted from the database. Attempted to delete from channel. 🗑️")
+                await message.reply_text(f"✅ Video (UUID: <code>{video_to_delete['uuid']}</code>) deleted.")
             else:
-                await message.reply_text(f"❌ Failed to delete video (UUID: <code>{video_uuid}</code>). Check logs for details. 🐛")
-
+                await message.reply_text(f"❌ Failed to delete video (UUID: <code>{video_to_delete['uuid']}</code>).")
         except Exception as e:
             logger.error(f"Admin {user_id} error deleting video: {e}", exc_info=True)
-            await message.reply("❌ An error occurred while deleting the video. Please try again. 🐛")
+            await message.reply("❌ An error occurred while deleting the video.")
         finally:
             del admin_delete_video_state[user_id]
         return
 
-    # --- Handle Batch Add Mode ---
-    if user_id not in batch_add_state or not batch_add_state[user_id].get('batch_mode'):
-        logger.warning(f"Admin {user_id} sent video outside of batch add mode, ignoring.")
+    # --- Priority 2: Batch Video Link Mode ---
+    if user_id in admin_batch_link_state:
+        logger.info(f"Admin {user_id} sent a video for batch link creation.")
+        file_unique_id = message.video.file_unique_id
+        video_doc = media_collection.find_one({"file_unique_id": file_unique_id}, {"uuid": 1})
+        if video_doc:
+            admin_batch_link_state[user_id].append(video_doc['uuid'])
+            await message.reply(f"✅ Video added to batch. Total: {len(admin_batch_link_state[user_id])}.")
+        else:
+            await message.reply("⚠️ This video is not in the database. Please add it first using /batchadd.")
         return
 
-    logger.info(f"Admin {user_id} sent a video for batch adding.")
-    try:
-        category = batch_add_state[user_id].get('current_category')
-        if not category:
-            await message.reply_text("⚠️ Please set a category first using /category. 🗂️")
-            return
-
-        if not message.video:
-            await message.reply_text("❌ Please send a video file. 🎥")
-            return
-
-        # --- Robust Saving Logic ---
-        original_file_id = message.video.file_id
-        file_unique_id = message.video.file_unique_id
-        file_size = message.video.file_size
-        custom_caption = message.caption
-
-        if media_collection.find_one({"file_unique_id": file_unique_id}):
-            await message.reply_text("⚠️ This video has already been added. Skipping.⏩")
-            return
-
-        # 1. Send the video to the database channel to get a permanent, bot-owned file_id
+    # --- Priority 3: Batch Add Mode ---
+    if batch_add_state.get(user_id, {}).get('batch_mode'):
+        logger.info(f"Admin {user_id} sent a video for batch adding.")
         try:
+            category = batch_add_state[user_id]['current_category']
+            if not category:
+                await message.reply_text("⚠️ Please set a category first using /category.")
+                return
+
+            file_unique_id = message.video.file_unique_id
+            if media_collection.find_one({"file_unique_id": file_unique_id}):
+                await message.reply_text("⚠️ This video has already been added. Skipping.")
+                return
+
             sent_video_message = await client.send_video(
-                chat_id=config.VIDEO_CHANNEL_ID,
-                video=original_file_id,
+                chat_id=config.VIDEO_CHANNEL_ID, video=message.video.file_id,
                 caption=f"Added by admin {user_id} for category {category}"
             )
             if not sent_video_message or not sent_video_message.video:
                 raise Exception("send_video did not return a valid video message.")
 
-            # The message_id of the new, permanent copy in the channel
-            message_id_in_channel = sent_video_message.id
-            # The new, permanent, bot-owned file_id
-            permanent_file_id = sent_video_message.video.file_id
+            video_uuid = str(uuid.uuid4())
+            next_sequence_number = batch_add_state[user_id]['next_sequence']
+            video_data = {
+                "uuid": video_uuid, "file_id": sent_video_message.video.file_id,
+                "file_unique_id": file_unique_id, "category": category,
+                "size_bytes": message.video.file_size, "timestamp": get_current_time(),
+                "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
+                "banned": False, "custom_caption": message.caption
+            }
+            media_collection.insert_one(video_data)
+            batch_add_state[user_id]['next_sequence'] += 1
+            batch_add_state[user_id]['count'] += 1
 
-        except Exception as send_e:
-            logger.error(f"Failed to send video {file_unique_id} to channel {config.VIDEO_CHANNEL_ID}: {send_e}", exc_info=True)
-            await message.reply_text("❌ Failed to save video to storage channel. Please check bot's permissions (must be admin). 🐛")
-            return
+            await message.reply_text(
+                f"✅ File Added to <b>{html.escape(category)}</b>!\n"
+                f"📊 Size: {format_size(message.video.file_size)}\n"
+                f"🔢 Sequence: {next_sequence_number}\n"
+                f"Videos in this batch: <b>{batch_add_state[user_id]['count']}</b>"
+            )
+        except Exception as e:
+            logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
+            await message.reply("❌ Failed to add video. Please try again.")
+        return
 
-        # 2. Prepare data for MongoDB, using the new permanent file_id
-        video_uuid = str(uuid.uuid4())
-        next_sequence_number = batch_add_state[user_id]['next_sequence']
-
-        video_data = {
-            "uuid": video_uuid,
-            "file_id": permanent_file_id,  # Use the new, stable file_id
-            "file_unique_id": file_unique_id,
-            "category": category,
-            "size_bytes": file_size,
-            "timestamp": get_current_time(),
-            "sequence_number": next_sequence_number,
-            "message_id": message_id_in_channel, # The permanent channel reference
-            "banned": False,
-            "custom_caption": custom_caption
-        }
-
-        # 3. Save to database
-        media_collection.insert_one(video_data)
-        batch_add_state[user_id]['next_sequence'] += 1
-        batch_add_state[user_id]['count'] += 1
-
-        logger.info(f"Video {video_uuid} added to '{category}' by admin {user_id}. New file_id and channel message_id {message_id_in_channel} saved.")
-
-        admin_reply_caption = (
-            f"✅ File <code>{html.escape(message.video.file_name or 'unnamed_video')}</code> Added to <b>{html.escape(category)}</b>! 🎉\n"
-            f"📝 Custom Caption: <i>{html.escape(custom_caption) if custom_caption else 'N/A'}</i>\n"
-            f"📁 Category: {html.escape(category)}\n"
-            f"📊 Size: {format_size(file_size)}\n"
-            f"🔢 Sequence: {next_sequence_number}\n"
-            f"Videos added in this batch: <b>{batch_add_state[user_id]['count']}</b> 🔢"
-        )
-        await message.reply_text(admin_reply_caption)
-
-    except Exception as e:
-        logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
-        await message.reply("❌ Failed to add video. Please try again. 🐛")
+    logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
 
 
 @app.on_message(filters.command("category") & filters.private & admin_only)
@@ -3308,7 +3338,7 @@ async def add_admin_cmd(client: Client, message: Message):
             await message.reply("This user is already an admin.")
             return
         config.ADMIN_IDS.append(user_id_to_add)
-        await message.reply(f"✅ User {user_id_to_add} has been promoted to admin.")
+        await message.reply(f"✅ User {user_id_to_add} has been promoted to admin for this session.")
         logger.info(f"Owner {message.from_user.id} added new admin: {user_id_to_add}")
     except (ValueError, IndexError):
         await message.reply("Usage: `/addadmin <user_id>`")
@@ -3348,7 +3378,7 @@ async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
         admin_id_to_remove = int(callback_query.data.split("_")[2])
         if admin_id_to_remove in config.ADMIN_IDS:
             config.ADMIN_IDS.remove(admin_id_to_remove)
-            await callback_query.message.edit_text(f"✅ Admin {admin_id_to_remove} has been removed.")
+            await callback_query.message.edit_text(f"✅ Admin {admin_id_to_remove} has been removed for this session.")
             logger.info(f"Owner {callback_query.from_user.id} removed admin: {admin_id_to_remove}")
         else:
             await callback_query.message.edit_text("User is no longer an admin.")
@@ -3376,6 +3406,43 @@ async def deletevideo_cmd(client: Client, message: Message):
     logger.info(f"Admin {user_id} initiated /deletevideo command.")
     admin_delete_video_state[user_id] = True
     await message.reply("Send the <b>video file from the database</b> to delete it. This must be the original video file, not a forwarded one. 🎥")
+
+@app.on_message(filters.command("batchvideoadd") & filters.private & admin_only)
+async def batch_video_add_cmd(client: Client, message: Message):
+    """Admin command to create a shareable link for a batch of videos."""
+    user_id = message.from_user.id
+    admin_batch_link_state[user_id] = [] # Reset state
+    await message.reply(
+        "You are now in <b>Batch Video Link Creation Mode</b>.\n\n"
+        "1. Forward videos from your database channel to me.\n"
+        "2. When you are finished, send /createbatchlink to generate the shareable link."
+    )
+
+@app.on_message(filters.command("createbatchlink") & filters.private & admin_only)
+async def create_batch_link_cmd(client: Client, message: Message):
+    """Admin command to finalize a batch video link."""
+    user_id = message.from_user.id
+    if user_id not in admin_batch_link_state or not admin_batch_link_state[user_id]:
+        await message.reply("You haven't added any videos to the batch. Forward some videos first, then use this command.")
+        return
+
+    video_uuids = admin_batch_link_state[user_id]
+    batch_id = str(uuid.uuid4())
+    
+    video_batches_collection.insert_one({
+        "batch_id": batch_id,
+        "video_uuids": video_uuids,
+        "created_by": user_id,
+        "created_at": datetime.utcnow()
+    })
+    
+    share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=batch_{batch_id}"
+    
+    await message.reply(
+        f"✅ Batch link created successfully for <b>{len(video_uuids)}</b> videos!\n\n"
+        f"Share this link:\n`{share_link}`"
+    )
+    del admin_batch_link_state[user_id] # Clear state
 
 @app.on_message(filters.command("categoryrename") & filters.private & admin_only)
 async def categoryrename_cmd(client: Client, message: Message):
