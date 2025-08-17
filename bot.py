@@ -3,7 +3,7 @@ import asyncio
 import uuid
 import base64
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
@@ -245,7 +245,7 @@ def b64_to_str(b64: str) -> str:
 
 def get_current_time() -> int:
     """Returns the current UTC timestamp as an integer."""
-    return int(datetime.utcnow().timestamp())
+    return int(datetime.now(timezone.utc).timestamp())
 
 async def get_shortener_config_and_shorten_url(long_url: str) -> str:
     """
@@ -309,7 +309,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
     Adds a new token for a user with a specified duration.
     If is_admin_granted is True, this token signifies premium access.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=duration_seconds)
     token = {
         'token_id': str(uuid.uuid4()),
@@ -331,7 +331,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
 
 def is_premium_user(user_id: int) -> bool:
     """Checks if a user is a premium user (has an active admin-granted token)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     doc = tokens_collection.find_one({'user_id': user_id})
     if not doc or 'tokens' not in doc:
         return False
@@ -343,7 +343,7 @@ def is_premium_user(user_id: int) -> bool:
 
 def user_has_token(user_id: int) -> bool:
     """Checks if a user has any valid tokens (admin-granted or not) for general access."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     doc = tokens_collection.find_one({'user_id': user_id})
     if not doc or 'tokens' not in doc:
         return False
@@ -452,7 +452,7 @@ def add_category(name: str) -> tuple[bool, str]:
 
         categories_collection.insert_one({
             'name': name,
-            'created_at': datetime.utcnow()
+            'created_at': datetime.now(timezone.utc)
         })
         logger.info(f"Category '{name}' added")
         return True, f"Category '{html.escape(name)}' added successfully."
@@ -708,7 +708,7 @@ def save_history(user_id: int, video_uuid: str, category: str):
     Saves a video viewing entry to a user's general history (limited to 100 entries)
     AND updates the last viewed video for the specific category.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
         history_collection.update_one(
@@ -736,7 +736,7 @@ def set_active_video_message(user_id: int, message_id: int, chat_id: int):
     active_video_message[user_id] = {
         'message_id': message_id,
         'chat_id': chat_id,
-        'timestamp': datetime.utcnow()
+        'timestamp': datetime.now(timezone.utc)
     }
     logger.info(f"Active video message set for user {user_id}: message_id={message_id}, chat_id={chat_id}")
 
@@ -1276,7 +1276,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
 
         added_token = add_token(user_id, config.REFRESH_BONUS * 86400, is_admin_granted=False)
         if added_token:
-            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
+            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
             logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
             return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts 24 hours. Enjoy! 🍿"
         else:
@@ -1297,17 +1297,22 @@ async def is_rate_limited(user_id: int) -> bool:
     if is_admin(user_id):
         return False
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
 
     try:
+        # Step 1: Atomically remove old timestamps.
+        # Upsert is used to ensure the document and array exist for the next step.
+        tokens_collection.update_one(
+            {'user_id': user_id},
+            {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
+            upsert=True
+        )
+
+        # Step 2: Atomically add the new timestamp and retrieve the updated document.
         result = tokens_collection.find_one_and_update(
             {'user_id': user_id},
-            {
-                '$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}},
-                '$push': {'rate_limits': {'timestamp': now}}
-            },
-            upsert=True,
+            {'$push': {'rate_limits': {'timestamp': now}}},
             return_document=ReturnDocument.AFTER
         )
 
@@ -1352,7 +1357,7 @@ async def start_cmd(client: Client, message: Message):
             await send_force_subscribe_message(client, user_id)
             return
 
-        # --- MODIFIED: Handle user registration and token grant immediately after membership check ---
+        # --- CORRECTED LOGIC: Handle user registration and token grant immediately after membership check ---
         user = users_collection.find_one({'user_id': user_id})
         is_new_user = not user
 
@@ -1360,12 +1365,12 @@ async def start_cmd(client: Client, message: Message):
             users_collection.insert_one({
                 'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-                'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
+                'joined_date': datetime.now(timezone.utc), 'referral_count': 0, 'bookmarked_videos': [],
                 'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
-        # --- END MODIFICATION ---
+        # --- END CORRECTION ---
 
         if await is_rate_limited(user_id):
             raise FloodWait(10)
@@ -1570,7 +1575,7 @@ async def profile_cmd(client: Client, message: Message):
                 'username': html.escape(message.from_user.username) if message.from_user.username else "",
                 'first_name': html.escape(message.from_user.first_name) if message.from_user.first_name else "User",
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-                'joined_date': datetime.utcnow(),
+                'joined_date': datetime.now(timezone.utc),
                 'referral_count': 0,
                 'bookmarked_videos': [],
                 'last_premium_check_status': False,
@@ -1586,7 +1591,7 @@ async def profile_cmd(client: Client, message: Message):
 
         tokens_count = 0
         if tokens_doc and 'tokens' in tokens_doc:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
 
         referral_count = user.get('referral_count', 0)
@@ -1704,7 +1709,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     current_active_tracked_message = active_video_message.get(user_id)
     if current_active_tracked_message and \
        current_active_tracked_message.get('message_id') == callback_query.message.id and \
-       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+       datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
         logger.warning(f"User {user_id} tried to select category but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -1822,7 +1827,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
     current_active_tracked_message = active_video_message.get(user_id)
     if current_active_tracked_message and \
        current_active_tracked_message.get('message_id') == callback_query.message.id and \
-       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+       datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
         logger.warning(f"User {user_id} tried to select saved category but menu expired.")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -1944,7 +1949,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             current_active_tracked_message = active_video_message.get(user_id)
             if current_active_tracked_message and \
                current_active_tracked_message.get('message_id') == callback_query.message.id and \
-               datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+               datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
                 logger.warning(f"User {user_id} tried to navigate but menu expired.")
                 await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -2093,7 +2098,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         current_active_tracked_message = active_video_message.get(user_id)
         if current_active_tracked_message and \
            current_active_tracked_message.get('message_id') == callback_query.message.id and \
-           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+           datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
             logger.warning(f"User {user_id} tried to change category but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -2496,7 +2501,7 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
             return
 
         # Add the video with timestamp for ordering and its category for filtering
-        bookmarked_videos.append({'uuid': video_uuid, 'bookmarked_at': datetime.utcnow(), 'category': video_data.get('category')})
+        bookmarked_videos.append({'uuid': video_uuid, 'bookmarked_at': datetime.now(timezone.utc), 'category': video_data.get('category')})
 
         users_collection.update_one(
             {'user_id': user_id},
@@ -2580,7 +2585,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
         current_active_tracked_message = active_video_message.get(user_id)
         if current_active_tracked_message and \
            current_active_tracked_message.get('message_id') == callback_query.message.id and \
-           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+           datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
             logger.warning(f"User {user_id} tried to remove saved video but menu expired.")
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -2708,7 +2713,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     current_active_tracked_message = active_video_message.get(user_id)
     if current_active_tracked_message and \
        current_active_tracked_message.get('message_id') == callback_query.message.id and \
-       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+       datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
         logger.warning(f"User {user_id} tried to view saved video but menu expired.")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -3513,7 +3518,7 @@ async def create_batch_link_cmd(client: Client, message: Message):
         "batch_id": batch_id,
         "video_uuids": video_uuids,
         "created_by": user_id,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     })
     
     share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=batch_{batch_id}"
@@ -3727,7 +3732,7 @@ async def cleanup_expired_data():
     """Periodically cleans up expired tokens and handles bookmark truncation for non-premium users."""
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
             tokens_collection.update_many(
                 {},
@@ -3775,7 +3780,7 @@ async def cleanup_expired_menus():
     """
     while True:
         logger.info("Starting expired menu cleanup task.")
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired_threshold = now - timedelta(minutes=config.MENU_EXPIRY_MINUTES)
 
         users_to_clear = []
@@ -3827,7 +3832,7 @@ async def cleanup_used_refresh_tokens():
     """Periodically cleans up old used refresh token entries."""
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             delete_threshold = now - timedelta(seconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
             result = refresh_tokens_used_collection.delete_many({'used_at': {'$lt': delete_threshold}})
             logger.info(f"Cleaned up {result.deleted_count} old used refresh token entries. (Used refresh tokens are kept for {config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2} seconds after use to prevent reuse.)")
