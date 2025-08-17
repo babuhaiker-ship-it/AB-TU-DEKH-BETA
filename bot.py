@@ -214,19 +214,25 @@ async def check_membership(client: Client, user_id: int) -> bool:
 
     return is_member_of_all
 
-async def send_force_subscribe_message(client: Client, chat_id: int):
+async def send_force_subscribe_message(client: Client, chat_id: int, custom_text: str = None):
     """Sends a message prompting the user to join the force subscribe channels."""
     logger.info(f"Sending force subscribe message to user {chat_id}.")
-    # MODIFIED: Changed button text for force sub channels
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("Spicy Nyraa 🥵🔥", url=config.FORCE_SUB_CHANNEL_LINK)],
         [InlineKeyboardButton("Spicy Posting 🌶️", url=config.FORCE_SUB_CHANNEL_LINK_2)],
         [InlineKeyboardButton("🔄 Try Again", callback_data="check_join_status")]
     ])
+
+    text_to_send = custom_text
+    if not text_to_send:
+        text_to_send = (
+            "<b>⚠️ You must join our channels to use this bot.</b>\n\n"
+            "Please join the channels below and then try again. Once you join, click the '🔄 Try Again' button or send /start again."
+        )
+
     await client.send_message(
         chat_id,
-        "<b>⚠️ You must join our channels to use this bot.</b>\n\n"
-        "Please join the channels below and then try again. Once you join, click the '🔄 Try Again' button or send /start again.",
+        text_to_send,
         reply_markup=reply_markup
     )
 
@@ -1340,28 +1346,41 @@ async def handle_error(client: Client, message: Message, error: Exception):
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
-    username_safe = html.escape(message.from_user.username) if message.from_user.username else ""
     first_name_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
 
     try:
         args = message.text.split()
         deep_link_arg = args[1] if len(args) > 1 else None
 
-        if not await check_membership(client, user_id):
+        user = users_collection.find_one({'user_id': user_id})
+        is_new_user = not user
+        has_joined = await check_membership(client, user_id)
+
+        # Case: User has NOT joined channels (applies to both new and existing users)
+        if not has_joined:
             if deep_link_arg:
                 users_collection.update_one(
                     {'user_id': user_id},
                     {'$set': {'pending_command': deep_link_arg}},
                     upsert=True
                 )
-            await send_force_subscribe_message(client, user_id)
-            return
 
-        # --- CORRECTED FLOW: Registration and token grant happens *after* successful membership check ---
-        user = users_collection.find_one({'user_id': user_id})
-        is_new_user = not user
+            custom_text_for_new_user = None
+            if is_new_user:
+                custom_text_for_new_user = (
+                    f"🎉 Congratulations {first_name_safe}!\n"
+                    f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
+                    f"⚡ To continue, please join our channels below and then tap '🔄 Try Again' to start your journey 🚀"
+                )
+            
+            await send_force_subscribe_message(client, user_id, custom_text=custom_text_for_new_user)
+            return # Stop execution here
 
+        # From here on, we know the user has joined the channels.
+
+        # Case: New user who HAS joined
         if is_new_user:
+            username_safe = html.escape(message.from_user.username) if message.from_user.username else ""
             users_collection.insert_one({
                 'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
@@ -1370,8 +1389,16 @@ async def start_cmd(client: Client, message: Message):
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
-        # --- END CORRECTION ---
 
+            # Send the specific welcome message for new, joined users
+            welcome_message = (
+                f"🎉 Congratulations {first_name_safe}!\n"
+                f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
+                f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀"
+            )
+            await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
+
+        # Now, handle rate limiting, premium checks, and deep links for ALL joined users (new and existing)
         if await is_rate_limited(user_id):
             raise FloodWait(10)
 
@@ -1395,16 +1422,8 @@ async def start_cmd(client: Client, message: Message):
             elif deep_link_arg.startswith('batch_'):
                 deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
 
-        # --- 1. Handle Welcome Message ---
+        # Handle referral for new users (this should only run once)
         if is_new_user:
-            welcome_message = (
-                f"🎉 Congratulations dear {first_name_safe}! 🎉\n\n"
-                f"You got <b>{config.NEW_USER_TOKENS} free token</b> to start your journey. 🚀\n\n"
-                "Tap the '🎞️ Get Video' button below and begin exploring!"
-            )
-            await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
-
-            # Handle referral for new user
             if deep_link_type == 'referral':
                 referrer_id = handle_referral(user_id, deep_link_data)
                 if referrer_id: await client.send_message(referrer_id, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined! You've received {config.REFERRAL_BONUS} token. 🤩")
@@ -1412,10 +1431,11 @@ async def start_cmd(client: Client, message: Message):
                 handle_referral(user_id, deep_link_arg)
                 await client.send_message(referrer_id_from_video_link, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined via your shared video! You've received {config.REFERRAL_BONUS} token. 🤩")
 
-        elif not deep_link_type:
+        # Case: Existing user who has joined, with no deep link
+        if not is_new_user and not deep_link_type:
             await message.reply(f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in.", reply_markup=await get_main_keyboard(user_id))
 
-        # --- 2. Handle Deep Link Action ---
+        # Handle deep link actions for all joined users
         loading_msg = None
         if is_new_user and deep_link_type in ['video_share', 'view_saved_video', 'batch']:
             loading_msg = await message.reply("Loading your requested video, please wait...")
