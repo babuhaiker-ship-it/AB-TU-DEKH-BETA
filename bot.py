@@ -36,7 +36,7 @@ class BotConfig:
     MONGO_DB_NAME = 'spicybot'
     VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
-    OWNER_AND_ADMINS = [6612030110] # First ID is the OWNER
+    OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
@@ -138,6 +138,37 @@ active_video_message = {}
 # --- Navigation Spam Control ---
 processing_navigation_lock = set()
 
+# --- Dynamic Admin Management ---
+BOT_ADMINS = set()
+
+async def load_admins_from_db():
+    """Loads admin list from DB and ensures owner is always included."""
+    global BOT_ADMINS
+    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    db_admins = settings_doc.get('admins', []) if settings_doc else []
+    BOT_ADMINS = set(db_admins)
+    BOT_ADMINS.add(config.OWNER_ID) # Ensure owner is always an admin
+    logger.info(f"Loaded admins from DB. Current admins: {BOT_ADMINS}")
+
+def is_admin(user_id: int) -> bool:
+    """Checks if the given user ID belongs to an administrator."""
+    return user_id in BOT_ADMINS
+
+def is_owner(user_id: int) -> bool:
+    """Checks if the user is the bot owner."""
+    return user_id == config.OWNER_ID
+
+# MODIFIED: Custom filter for admin commands to allow dynamic admin list
+async def admin_filter(_, __, message: Message):
+    return is_admin(message.from_user.id)
+
+admin_only = filters.create(admin_filter)
+
+async def owner_filter(_, __, message: Message):
+    return is_owner(message.from_user.id)
+
+owner_only = filters.create(owner_filter)
+
 
 def create_tracked_task(coro):
     """
@@ -149,21 +180,6 @@ def create_tracked_task(coro):
     task.add_done_callback(active_tasks.discard)
     logger.debug(f"Task {task.get_name()} created and tracked. Total active tasks: {len(active_tasks)}")
     return task
-
-# --- Admin Check Utility ---
-def is_admin(user_id: int) -> bool:
-    """Checks if the given user ID belongs to an administrator."""
-    return user_id in config.OWNER_AND_ADMINS
-
-def is_owner(user_id: int) -> bool:
-    """Checks if the user is the bot owner (first admin ID)."""
-    return user_id == config.OWNER_AND_ADMINS[0]
-
-# MODIFIED: Custom filter for admin commands to allow dynamic admin list
-async def admin_filter(_, __, message: Message):
-    return is_admin(message.from_user.id)
-
-admin_only = filters.create(admin_filter)
 
 # --- Force Subscribe Check ---
 async def check_membership(client: Client, user_id: int) -> bool:
@@ -1127,9 +1143,9 @@ def video_nav_keyboard(
     row_2_buttons = []
     if is_saved:
         row_2_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
-    elif not is_batch:
+    elif not is_batch: # "Change Category" is not shown for batch menus
         row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
-    
+
     row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
     row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
@@ -1556,21 +1572,6 @@ async def get_video(client: Client, message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     logger.info(f"User {user_id} requested Get Video.")
-
-    # MODIFIED: Check if a menu is already open
-    if user_id in active_video_message:
-        menu_info = active_video_message[user_id]
-        try:
-            # Verify the message still exists to avoid errors
-            await client.get_messages(menu_info['chat_id'], menu_info['message_id'])
-            await message.reply_text(
-                "A menu is already open. Please use the one below. 👇",
-                reply_to_message_id=menu_info['message_id']
-            )
-            return
-        except Exception:
-            # If getting the message fails, it's probably deleted. Clear state and proceed.
-            clear_active_video_message(user_id)
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -2090,24 +2091,6 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^back_to_saved_cats$"))
-async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the 'Back' button in the saved video menu."""
-    user_id = callback_query.from_user.id
-    chat_id = callback_query.message.chat.id
-    logger.info(f"User {user_id} requested to go back to saved categories.")
-
-    await send_and_replace_message(
-        client,
-        chat_id,
-        message_id_to_edit_or_delete=callback_query.message.id,
-        new_message_type="text",
-        text_content="🗂️ <b>Select a Category from your Saved Videos:</b>",
-        reply_markup=saved_category_keyboard(user_id),
-        force_new_message=True
-    )
-    await callback_query.answer()
-
 @app.on_message(filters.regex("^👤 Profile$") & filters.private)
 async def profile_btn(client: Client, message: Message):
     """Handles 'Profile' button click."""
@@ -2488,7 +2471,7 @@ async def saved_videos_btn(client: Client, message: Message):
         return
 
     if not user_has_token(user_id):
-        await message.reply("You need a token to view your saved videos. Please get a token first! 🧐")
+        logger.info(f"User {user_id} has no tokens, prompting earning options for saved videos.")
         await send_token_earning_options(client, message)
         return
 
@@ -2802,8 +2785,37 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     await callback_query.message.edit_text("Operation cancelled. Your saved videos are safe! ✅")
     await callback_query.answer("Operation cancelled.")
 
+@app.on_callback_query(filters.regex(r"^back_to_saved_cats$"))
+async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Back' button from a saved video to the saved categories menu."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} clicked 'Back' to saved categories menu.")
+
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    try:
+        await client.delete_messages(chat_id, callback_query.message.id)
+        clear_active_video_message(user_id)
+    except Exception as e:
+        logger.warning(f"Could not delete message on 'Back' to saved cats: {e}")
+
+    saved_cats_keyboard = saved_category_keyboard(user_id)
+    if saved_cats_keyboard.inline_keyboard[0][0].callback_data in ["no_saved_videos", "no_valid_saved_videos"]:
+        await client.send_message(chat_id, "You have no more saved videos. ❤️")
+        return
+
+    sent_message = await client.send_message(
+        chat_id,
+        "🗂️ <b>Select a Category from your Saved Videos:</b>",
+        reply_markup=saved_cats_keyboard
+    )
+    set_active_video_message(user_id, sent_message.id, chat_id)
+    await callback_query.answer()
+
 # --- Admin Commands ---
-# MODIFIED: Replaced filters.user with the custom admin_only filter
 @app.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
     """Admin command to broadcast a replied message to all users."""
@@ -2811,8 +2823,8 @@ async def broadcast_cmd(client: Client, message: Message):
     replied_message = message.reply_to_message
     logger.info(f"Admin {user_id} initiated broadcast.")
     try:
-        users = list(users_collection.find({}, {'user_id': 1}))
-        total_users = len(users)
+        users_cursor = users_collection.find({}, {'user_id': 1})
+        total_users = users_collection.count_documents({})
         broadcast_msg = await message.reply(f"📣 <b>Broadcasting</b> to <b>{total_users}</b> users... Please wait! 🚀")
         logger.info(f"Admin {user_id} initiating broadcast to {total_users} users.")
 
@@ -2820,7 +2832,7 @@ async def broadcast_cmd(client: Client, message: Message):
         blocked = 0
         failed = 0
 
-        for user in users:
+        for user in users_cursor:
             try:
                 await replied_message.copy(user['user_id'])
                 success += 1
@@ -3345,32 +3357,29 @@ async def stats_cmd(client: Client, message: Message):
 
 # --- New Admin Commands ---
 
-@app.on_message(filters.command("addadmin") & filters.private)
+@app.on_message(filters.command("addadmin") & filters.private & owner_only)
 async def add_admin_cmd(client: Client, message: Message):
     """Owner command to add a new admin."""
-    if not is_owner(message.from_user.id):
-        return
-    owner_add_admin_state[message.from_user.id]['step'] = 'await_admin_id'
-    await message.reply("Please send the User ID of the new admin.")
+    owner_add_admin_state[message.from_user.id] = {'step': 'await_user_id'}
+    await message.reply("Please send the <b>User ID</b> of the user you want to add as an admin. 📝")
 
-@app.on_message(filters.command("removeadmin") & filters.private)
+@app.on_message(filters.command("removeadmin") & filters.private & owner_only)
 async def remove_admin_cmd(client: Client, message: Message):
     """Owner command to remove an admin."""
-    if not is_owner(message.from_user.id):
-        return
-    
     buttons = []
     # List all admins except the owner for removal
-    for admin_id in config.OWNER_AND_ADMINS[1:]:
+    admins_to_list = [admin_id for admin_id in BOT_ADMINS if admin_id != config.OWNER_ID]
+
+    if not admins_to_list:
+        await message.reply("No other admins to remove.")
+        return
+
+    for admin_id in admins_to_list:
         try:
             user = await client.get_users(admin_id)
             buttons.append([InlineKeyboardButton(f"{user.first_name} ({user.id})", callback_data=f"rem_admin_{admin_id}")])
         except Exception:
             buttons.append([InlineKeyboardButton(f"ID: {admin_id}", callback_data=f"rem_admin_{admin_id}")])
-
-    if not buttons:
-        await message.reply("No other admins to remove.")
-        return
 
     await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -3383,9 +3392,15 @@ async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
 
     try:
         admin_id_to_remove = int(callback_query.data.split("_")[2])
-        if admin_id_to_remove in config.OWNER_AND_ADMINS:
-            config.OWNER_AND_ADMINS.remove(admin_id_to_remove)
-            await callback_query.message.edit_text(f"✅ Admin {admin_id_to_remove} has been removed for this session.")
+        if admin_id_to_remove in BOT_ADMINS:
+            BOT_ADMINS.remove(admin_id_to_remove)
+            # Persist change to DB
+            settings_collection.update_one(
+                {'_id': 'bot_settings'},
+                {'$pull': {'admins': admin_id_to_remove}},
+                upsert=True
+            )
+            await callback_query.message.edit_text(f"✅ Admin {admin_id_to_remove} has been removed.")
             logger.info(f"Owner {callback_query.from_user.id} removed admin: {admin_id_to_remove}")
         else:
             await callback_query.message.edit_text("User is no longer an admin.")
@@ -3459,148 +3474,163 @@ async def categoryrename_cmd(client: Client, message: Message):
     admin_rename_category_state[user_id] = {'step': 'await_old_name'}
     await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
 
-@app.on_message(filters.text & filters.private & admin_only)
-async def handle_admin_text_input(client: Client, message: Message):
-    """Handles admin's text input for various multi-step commands."""
+@app.on_message(filters.text & filters.private)
+async def handle_text_input(client: Client, message: Message):
+    """Handles text input for various multi-step commands for owner and admins."""
     user_id = message.from_user.id
 
-    if is_owner(user_id) and user_id in owner_add_admin_state and owner_add_admin_state[user_id].get('step') == 'await_admin_id':
-        try:
-            new_admin_id = int(message.text.strip())
-            if new_admin_id in config.OWNER_AND_ADMINS:
-                await message.reply("This user is already an admin.")
-            else:
-                config.OWNER_AND_ADMINS.append(new_admin_id)
-                await message.reply(f"✅ User {new_admin_id} has been promoted to admin for this session.")
-                logger.info(f"Owner {user_id} added new admin: {new_admin_id}")
-        except ValueError:
-            await message.reply("Invalid User ID. Please send a valid integer ID.")
-        finally:
-            del owner_add_admin_state[user_id]
-        return
+    # --- Owner-only state handling ---
+    if is_owner(user_id):
+        if user_id in owner_add_admin_state and owner_add_admin_state[user_id].get('step') == 'await_user_id':
+            try:
+                user_id_to_add = int(message.text.strip())
+                if user_id_to_add in BOT_ADMINS:
+                    await message.reply("This user is already an admin.")
+                    return
+                
+                BOT_ADMINS.add(user_id_to_add)
+                # Persist change to DB
+                settings_collection.update_one(
+                    {'_id': 'bot_settings'},
+                    {'$addToSet': {'admins': user_id_to_add}},
+                    upsert=True
+                )
+                await message.reply(f"✅ User {user_id_to_add} has been promoted to admin.")
+                logger.info(f"Owner {user_id} added new admin: {user_id_to_add}")
 
-    if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
-        template_url = message.text.strip()
-
-        if not template_url.startswith("http://") and not template_url.startswith("https://"):
-            await message.reply("Invalid URL. Please send a valid URL starting with `http://` or `https://`.")
-            logger.warning(f"Admin {user_id} provided invalid template URL format for shortener: {template_url}")
+            except ValueError:
+                await message.reply("Invalid User ID. Please send a valid integer ID.")
+            except Exception as e:
+                await message.reply(f"An error occurred: {e}")
+                logger.error(f"Error in /addadmin flow: {e}")
+            finally:
+                del owner_add_admin_state[user_id]
             return
 
-        if '{long_url}' not in template_url:
-            await message.reply(
-                "❌ Error: The template URL must contain `{long_url}` as a placeholder for the URL to be shortened.\n\n"
-                "Please send the correct template URL. 📝"
-            )
-            logger.warning(f"Admin {user_id} provided template URL without {{long_url}} placeholder for shortener: {template_url}")
-            return
+    # --- Admin-only state handling ---
+    if is_admin(user_id):
+        if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
+            template_url = message.text.strip()
 
-        if 'api=' not in template_url:
-            await message.reply(
-                "❌ Error: The template URL must contain an 'api=' parameter with your API key.\n\n"
-                "Example: `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n"
-                "Please send the correct template URL. 📝"
-            )
-            logger.warning(f"Admin {user_id} provided template URL without 'api=' parameter for shortener: {template_url}")
-            return
-
-        try:
-            settings_collection.update_one(
-                {'_id': 'shortener_config'},
-                {'$set': {'template_url': template_url}},
-                upsert=True
-            )
-            del admin_shortener_setup_state[user_id]
-            await message.reply("✅ Shortener API Template URL Set Successfully!")
-            logger.info(f"Admin {user_id} successfully set shortener template URL: {template_url}")
-        except Exception as e:
-            logger.error(f"Error saving shortener template URL for admin {user_id}: {e}", exc_info=True)
-            await message.reply("❌ Failed to save shortener configuration. Please try again. 🐛")
-            del admin_shortener_setup_state[user_id]
-        return
-
-    if user_id in admin_rename_category_state:
-        current_step = admin_rename_category_state[user_id].get('step')
-
-        if current_step == 'await_old_name':
-            old_name = message.text.strip()
-            valid, error = validate_category_name(old_name)
-            if not valid:
-                await message.reply(f"❌ Invalid old category name: {error}. Please try again. 📝")
-                logger.warning(f"Admin {user_id} provided invalid old category name for rename: {old_name}")
+            if not template_url.startswith("http://") and not template_url.startswith("https://"):
+                await message.reply("Invalid URL. Please send a valid URL starting with `http://` or `https://`.")
+                logger.warning(f"Admin {user_id} provided invalid template URL format for shortener: {template_url}")
                 return
 
-            if not categories_collection.find_one({'name': old_name}):
-                await message.reply(f"❌ Category '<b>{html.escape(old_name)}</b>' does not exist. Please send an existing category name. 🧐")
-                logger.warning(f"Admin {user_id} tried to rename non-existent category: {old_name}")
+            if '{long_url}' not in template_url:
+                await message.reply(
+                    "❌ Error: The template URL must contain `{long_url}` as a placeholder for the URL to be shortened.\n\n"
+                    "Please send the correct template URL. 📝"
+                )
+                logger.warning(f"Admin {user_id} provided template URL without {{long_url}} placeholder for shortener: {template_url}")
                 return
 
-            admin_rename_category_state[user_id]['old_name'] = old_name
-            admin_rename_category_state[user_id]['step'] = 'await_new_name'
-            await message.reply(f"Okay, the current category is '<b>{html.escape(old_name)}</b>'. Now send the <b>new name</b> for this category. 📝")
-            logger.info(f"Admin {user_id} set old category name to '{old_name}'. Awaiting new name.")
-            return
-
-        elif current_step == 'await_new_name':
-            new_name = message.text.strip()
-            old_name = admin_rename_category_state[user_id].get('old_name')
-
-            valid, error = validate_category_name(new_name)
-            if not valid:
-                await message.reply(f"❌ Invalid new category name: {error}. Please try again. 📝")
-                logger.warning(f"Admin {user_id} provided invalid new category name for rename: {new_name}")
-                return
-
-            if categories_collection.find_one({'name': new_name}):
-                await message.reply(f"❌ Category '<b>{html.escape(new_name)}</b>' already exists. Please choose a different new name. 🧐")
-                logger.warning(f"Admin {user_id} tried to rename to an existing category: {new_name}")
+            if 'api=' not in template_url:
+                await message.reply(
+                    "❌ Error: The template URL must contain an 'api=' parameter with your API key.\n\n"
+                    "Example: `https://get2short.com/st?api=YOUR_API_KEY&url={long_url}`\n"
+                    "Please send the correct template URL. 📝"
+                )
+                logger.warning(f"Admin {user_id} provided template URL without 'api=' parameter for shortener: {template_url}")
                 return
 
             try:
-                categories_collection.update_one({'name': old_name}, {'$set': {'name': new_name}})
-                logger.info(f"Category '{old_name}' renamed to '{new_name}' in categories_collection.")
-
-                media_collection.update_many({'category': old_name}, {'$set': {'category': new_name}})
-                logger.info(f"Updated media_collection documents from '{old_name}' to '{new_name}'.")
-
-                users_collection.update_many(
-                    {'bookmarked_videos.category': old_name},
-                    {'$set': {'bookmarked_videos.$[elem].category': new_name}},
-                    array_filters=[{'elem.category': old_name}]
+                settings_collection.update_one(
+                    {'_id': 'shortener_config'},
+                    {'$set': {'template_url': template_url}},
+                    upsert=True
                 )
-                logger.info(f"Updated bookmarked_videos in users_collection from '{old_name}' to '{new_name}'.")
-
-                history_collection.update_many(
-                    {'history.category': old_name},
-                    {'$set': {'history.$[elem].category': new_name}},
-                    array_filters=[{'elem.category': old_name}]
-                )
-                logger.info(f"Updated history in history_collection from '{old_name}' to '{new_name}'.")
-
-                all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
-                for user_doc in all_users_with_last_viewed:
-                    user_id_to_update = user_doc['user_id']
-                    last_viewed_map = user_doc['last_viewed_per_category']
-                    if old_name in last_viewed_map:
-                        video_uuid_to_move = last_viewed_map.pop(old_name)
-                        last_viewed_map[new_name] = video_uuid_to_move
-                        users_collection.update_one(
-                            {'user_id': user_id_to_update},
-                            {'$set': {'last_viewed_per_category': last_viewed_map}}
-                        )
-                        logger.info(f"Updated last_viewed_per_category for user {user_id_to_update} from '{old_name}' to '{new_name}'.")
-
-                await message.reply(f"✅ Category '<b>{html.escape(old_name)}</b>' successfully renamed to '<b>{html.escape(new_name)}</b>'! 🎉")
-                logger.info(f"Admin {user_id} successfully renamed category from '{old_name}' to '{new_name}'.")
-
+                del admin_shortener_setup_state[user_id]
+                await message.reply("✅ Shortener API Template URL Set Successfully!")
+                logger.info(f"Admin {user_id} successfully set shortener template URL: {template_url}")
             except Exception as e:
-                logger.error(f"Error renaming category for admin {user_id}: {e}", exc_info=True)
-                await message.reply("❌ An error occurred while renaming the category. Please try again. 🐛")
-            finally:
-                del admin_rename_category_state[user_id]
+                logger.error(f"Error saving shortener template URL for admin {user_id}: {e}", exc_info=True)
+                await message.reply("❌ Failed to save shortener configuration. Please try again. 🐛")
+                del admin_shortener_setup_state[user_id]
             return
 
-    logger.debug(f"Admin {user_id} sent text message '{message.text}' not part of any active multi-step command. Ignoring.")
+        if user_id in admin_rename_category_state:
+            current_step = admin_rename_category_state[user_id].get('step')
+
+            if current_step == 'await_old_name':
+                old_name = message.text.strip()
+                valid, error = validate_category_name(old_name)
+                if not valid:
+                    await message.reply(f"❌ Invalid old category name: {error}. Please try again. 📝")
+                    logger.warning(f"Admin {user_id} provided invalid old category name for rename: {old_name}")
+                    return
+
+                if not categories_collection.find_one({'name': old_name}):
+                    await message.reply(f"❌ Category '<b>{html.escape(old_name)}</b>' does not exist. Please send an existing category name. 🧐")
+                    logger.warning(f"Admin {user_id} tried to rename non-existent category: {old_name}")
+                    return
+
+                admin_rename_category_state[user_id]['old_name'] = old_name
+                admin_rename_category_state[user_id]['step'] = 'await_new_name'
+                await message.reply(f"Okay, the current category is '<b>{html.escape(old_name)}</b>'. Now send the <b>new name</b> for this category. 📝")
+                logger.info(f"Admin {user_id} set old category name to '{old_name}'. Awaiting new name.")
+                return
+
+            elif current_step == 'await_new_name':
+                new_name = message.text.strip()
+                old_name = admin_rename_category_state[user_id].get('old_name')
+
+                valid, error = validate_category_name(new_name)
+                if not valid:
+                    await message.reply(f"❌ Invalid new category name: {error}. Please try again. 📝")
+                    logger.warning(f"Admin {user_id} provided invalid new category name for rename: {new_name}")
+                    return
+
+                if categories_collection.find_one({'name': new_name}):
+                    await message.reply(f"❌ Category '<b>{html.escape(new_name)}</b>' already exists. Please choose a different new name. 🧐")
+                    logger.warning(f"Admin {user_id} tried to rename to an existing category: {new_name}")
+                    return
+
+                try:
+                    categories_collection.update_one({'name': old_name}, {'$set': {'name': new_name}})
+                    logger.info(f"Category '{old_name}' renamed to '{new_name}' in categories_collection.")
+
+                    media_collection.update_many({'category': old_name}, {'$set': {'category': new_name}})
+                    logger.info(f"Updated media_collection documents from '{old_name}' to '{new_name}'.")
+
+                    users_collection.update_many(
+                        {'bookmarked_videos.category': old_name},
+                        {'$set': {'bookmarked_videos.$[elem].category': new_name}},
+                        array_filters=[{'elem.category': old_name}]
+                    )
+                    logger.info(f"Updated bookmarked_videos in users_collection from '{old_name}' to '{new_name}'.")
+
+                    history_collection.update_many(
+                        {'history.category': old_name},
+                        {'$set': {'history.$[elem].category': new_name}},
+                        array_filters=[{'elem.category': old_name}]
+                    )
+                    logger.info(f"Updated history in history_collection from '{old_name}' to '{new_name}'.")
+
+                    all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
+                    for user_doc in all_users_with_last_viewed:
+                        user_id_to_update = user_doc['user_id']
+                        last_viewed_map = user_doc['last_viewed_per_category']
+                        if old_name in last_viewed_map:
+                            video_uuid_to_move = last_viewed_map.pop(old_name)
+                            last_viewed_map[new_name] = video_uuid_to_move
+                            users_collection.update_one(
+                                {'user_id': user_id_to_update},
+                                {'$set': {'last_viewed_per_category': last_viewed_map}}
+                            )
+                            logger.info(f"Updated last_viewed_per_category for user {user_id_to_update} from '{old_name}' to '{new_name}'.")
+
+                    await message.reply(f"✅ Category '<b>{html.escape(old_name)}</b>' successfully renamed to '<b>{html.escape(new_name)}</b>'! 🎉")
+                    logger.info(f"Admin {user_id} successfully renamed category from '{old_name}' to '{new_name}'.")
+
+                except Exception as e:
+                    logger.error(f"Error renaming category for admin {user_id}: {e}", exc_info=True)
+                    await message.reply("❌ An error occurred while renaming the category. Please try again. 🐛")
+                finally:
+                    del admin_rename_category_state[user_id]
+                return
+
+    logger.debug(f"User {user_id} sent text message '{message.text}' not part of any active multi-step command. Ignoring.")
 
 
 # --- Auto-Delete & Protect Content Settings ---
@@ -3708,7 +3738,7 @@ async def cleanup_expired_menus():
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due0 to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
                     )
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
@@ -3806,6 +3836,7 @@ async def main_bot_logic():
     logger.info("Starting bot and scheduling background tasks...")
 
     await app.start()
+    await load_admins_from_db()
 
     # If this is the first run (in-memory session), export and save the session string
     if not SESSION_STRING:
@@ -3837,4 +3868,3 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
-```
