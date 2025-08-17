@@ -1352,9 +1352,7 @@ async def start_cmd(client: Client, message: Message):
             await send_force_subscribe_message(client, user_id)
             return
 
-        if await is_rate_limited(user_id):
-            raise FloodWait(10)
-
+        # --- MODIFIED: Handle user registration and token grant immediately after membership check ---
         user = users_collection.find_one({'user_id': user_id})
         is_new_user = not user
 
@@ -1367,6 +1365,10 @@ async def start_cmd(client: Client, message: Message):
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
+        # --- END MODIFICATION ---
+
+        if await is_rate_limited(user_id):
+            raise FloodWait(10)
 
         create_tracked_task(check_premium_status_and_notify(client, user_id))
 
@@ -1612,7 +1614,7 @@ async def profile_cmd(client: Client, message: Message):
             f"💡 Share this link with friends to earn free tokens! 🎁"
         )
 
-        await message.reply(profile_text)
+        await message.reply(profile_text, reply_markup=await get_main_keyboard(user_id))
         logger.info(f"User {user_id}: Profile sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send profile: {e}", exc_info=True)
@@ -2179,7 +2181,10 @@ async def refer_btn(client: Client, message: Message):
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
         # MODIFIED: Removed the referral keyboard
-        await message.reply(f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢")
+        await message.reply(
+            f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
+            reply_markup=await get_main_keyboard(user_id)
+        )
         logger.info(f"User {user_id}: Referral link sent successfully.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
