@@ -59,10 +59,6 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
-# --- Batch Add Constants ---
-BATCH_UPLOAD_LIMIT = 20
-BATCH_COOLDOWN_SECONDS = 60
-
 # --- MongoDB Setup ---
 client = MongoClient(config.MONGO_URI)
 db = client[config.MONGO_DB_NAME]
@@ -1092,7 +1088,11 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
         [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")]
     ]
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        buttons,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
 
 def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
     """Keyboard for token earning options."""
@@ -3286,14 +3286,8 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
                 f"Videos in this category batch: <b>{batch_add_state[user_id]['count']}</b>"
             )
 
-            # Check for cooldown
-            if batch_add_state[user_id]['videos_this_session'] > 0 and batch_add_state[user_id]['videos_this_session'] % BATCH_UPLOAD_LIMIT == 0:
-                await message.reply_text(
-                    f"✅ Batch of {BATCH_UPLOAD_LIMIT} videos added.\n"
-                    f"⏱️ Pausing for {BATCH_COOLDOWN_SECONDS} seconds to avoid rate limits..."
-                )
-                await asyncio.sleep(BATCH_COOLDOWN_SECONDS)
-                await message.reply_text("✅ Cooldown finished. You can continue sending videos.")
+            # Wait for 7 seconds to avoid flood limits
+            await asyncio.sleep(7)
 
         except Exception as e:
             logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
