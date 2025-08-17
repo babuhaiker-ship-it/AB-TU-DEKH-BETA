@@ -59,6 +59,10 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
+# --- Batch Add Constants ---
+BATCH_UPLOAD_LIMIT = 20
+BATCH_COOLDOWN_SECONDS = 60
+
 # --- MongoDB Setup ---
 client = MongoClient(config.MONGO_URI)
 db = client[config.MONGO_DB_NAME]
@@ -1352,33 +1356,9 @@ async def start_cmd(client: Client, message: Message):
         args = message.text.split()
         deep_link_arg = args[1] if len(args) > 1 else None
 
+        # --- Step 1: Handle new user registration and token grant immediately ---
         user = users_collection.find_one({'user_id': user_id})
         is_new_user = not user
-        has_joined = await check_membership(client, user_id)
-
-        # Case: User has NOT joined channels (applies to both new and existing users)
-        if not has_joined:
-            if deep_link_arg:
-                users_collection.update_one(
-                    {'user_id': user_id},
-                    {'$set': {'pending_command': deep_link_arg}},
-                    upsert=True
-                )
-
-            custom_text_for_new_user = None
-            if is_new_user:
-                custom_text_for_new_user = (
-                    f"🎉 Congratulations {first_name_safe}!\n"
-                    f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
-                    f"⚡ To continue, please join our channels below and then tap '🔄 Try Again' to start your journey 🚀"
-                )
-            
-            await send_force_subscribe_message(client, user_id, custom_text=custom_text_for_new_user)
-            return # Stop execution here
-
-        # From here on, we know the user has joined the channels.
-
-        # Case: New user who HAS joined
         if is_new_user:
             username_safe = html.escape(message.from_user.username) if message.from_user.username else ""
             users_collection.insert_one({
@@ -1390,113 +1370,102 @@ async def start_cmd(client: Client, message: Message):
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
 
-            # Send the specific welcome message for new, joined users
-            welcome_message = (
-                f"🎉 Congratulations {first_name_safe}!\n"
-                f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
-                f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀"
-            )
-            await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
+            # Handle referral for the newly created user
+            if deep_link_arg:
+                referrer_id = handle_referral(user_id, deep_link_arg)
+                if referrer_id:
+                    try:
+                        await client.send_message(
+                            referrer_id,
+                            f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined! You've received {config.REFERRAL_BONUS} token. 🤩"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to notify referrer {referrer_id}: {e}")
 
-        # Now, handle rate limiting, premium checks, and deep links for ALL joined users (new and existing)
+        # --- Step 2: Check channel membership for ALL users ---
+        has_joined = await check_membership(client, user_id)
+        if not has_joined:
+            if deep_link_arg:
+                # User doc now exists for new users, so this is just an update
+                users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
+
+            # Prepare custom force-sub message based on user state
+            custom_text = None
+            if is_new_user:
+                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received {config.NEW_USER_TOKENS} free token 🎁 to start your journey!\n\n"
+                part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
+                custom_text = part1 + part2
+
+            await send_force_subscribe_message(client, user_id, custom_text=custom_text)
+            return
+
+        # --- Step 3: User has joined. Handle the request. ---
         if await is_rate_limited(user_id):
             raise FloodWait(10)
-
         create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-        deep_link_type, deep_link_data = None, None
-        referrer_id_from_video_link = None
-
+        # Handle deep links first
         if deep_link_arg:
-            if deep_link_arg.startswith('token_'):
-                deep_link_type, deep_link_data = 'token_refresh', deep_link_arg[6:]
-            elif deep_link_arg.startswith('video_'):
-                deep_link_type, deep_link_data = 'video_share', deep_link_arg.split('_')[1]
-                if len(deep_link_arg.split('_')) == 3:
-                    try: referrer_id_from_video_link = int(deep_link_arg.split('_')[2])
-                    except ValueError: logger.warning(f"Invalid referrer ID in video deep link: {deep_link_arg}")
-            elif deep_link_arg.startswith('ref_'):
-                deep_link_type, deep_link_data = 'referral', deep_link_arg
-            elif deep_link_arg.startswith('saved_video_'):
-                deep_link_type, deep_link_data = 'view_saved_video', deep_link_arg[12:]
-            elif deep_link_arg.startswith('batch_'):
-                deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
+            loading_msg = await message.reply("Loading your request, please wait...")
+            try:
+                deep_link_type, deep_link_data = None, None
+                if deep_link_arg.startswith('token_'):
+                    deep_link_type, deep_link_data = 'token_refresh', deep_link_arg[6:]
+                elif deep_link_arg.startswith('video_'):
+                    deep_link_type, deep_link_data = 'video_share', deep_link_arg.split('_')[1]
+                elif deep_link_arg.startswith('ref_'): # Referral was already handled for new users
+                    pass
+                elif deep_link_arg.startswith('batch_'):
+                    deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
 
-        # Handle referral for new users (this should only run once)
-        if is_new_user:
-            if deep_link_type == 'referral':
-                referrer_id = handle_referral(user_id, deep_link_data)
-                if referrer_id: await client.send_message(referrer_id, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined! You've received {config.REFERRAL_BONUS} token. 🤩")
-            elif deep_link_type == 'video_share' and referrer_id_from_video_link:
-                handle_referral(user_id, deep_link_arg)
-                await client.send_message(referrer_id_from_video_link, f"🎉 <b>Referral Bonus!</b> Your friend, {first_name_safe}, joined via your shared video! You've received {config.REFERRAL_BONUS} token. 🤩")
-
-        # Case: Existing user who has joined, with no deep link
-        if not is_new_user and not deep_link_type:
+                if deep_link_type == 'token_refresh':
+                    success, msg = await handle_token_refresh(user_id, deep_link_data)
+                    await message.reply(msg)
+                elif deep_link_type == 'video_share':
+                    if not user_has_token(user_id):
+                        await message.reply("You need a token to watch this video. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
+                        await send_token_earning_options(client, message)
+                        return
+                    success, result = await handle_shared_video(client, user_id, deep_link_data)
+                    if not success:
+                        await message.reply(result)
+                    else:
+                        video = result
+                        await send_and_replace_message(
+                            client, message.chat.id, message.id, "video", video_data=video,
+                            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
+                            force_new_message=True
+                        )
+                        save_history(user_id, video['uuid'], video['category'])
+                elif deep_link_type == 'batch':
+                    if not user_has_token(user_id):
+                        await message.reply("You need a token to watch videos from this link. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
+                        await send_token_earning_options(client, message)
+                        return
+                    batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
+                    if not batch_doc or not batch_doc.get('video_uuids'):
+                        await message.reply("This batch link is invalid or has expired. 😔")
+                    else:
+                        video = get_video_by_uuid(batch_doc['video_uuids'][0])
+                        if not video:
+                            await message.reply("The first video in this batch is unavailable. 😔")
+                        else:
+                            await send_and_replace_message(
+                                client, message.chat.id, message.id, "video", video_data=video,
+                                reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
+                                force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
+                            )
+            finally:
+                if loading_msg: await loading_msg.delete()
+        elif is_new_user: # New user, already joined, no deep link
+            await message.reply(
+                f"🎉 Congratulations {first_name_safe}!\n"
+                f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
+                f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
+                reply_markup=await get_main_keyboard(user_id)
+            )
+        else: # Existing user, no deep link
             await message.reply(f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in.", reply_markup=await get_main_keyboard(user_id))
-
-        # Handle deep link actions for all joined users
-        loading_msg = None
-        if is_new_user and deep_link_type in ['video_share', 'view_saved_video', 'batch']:
-            loading_msg = await message.reply("Loading your requested video, please wait...")
-
-        try:
-            if deep_link_type == 'token_refresh':
-                success, msg = await handle_token_refresh(user_id, deep_link_data)
-                await message.reply(msg)
-            elif deep_link_type == 'video_share':
-                video_uuid = deep_link_data
-                try: uuid.UUID(video_uuid)
-                except ValueError:
-                    await message.reply("Invalid video link format. 🐛")
-                    return
-
-                if not user_has_token(user_id):
-                    await message.reply("You need a token to watch this video. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
-                    await send_token_earning_options(client, message)
-                    return
-
-                success, result = await handle_shared_video(client, user_id, video_uuid)
-                if not success:
-                    await message.reply(result)
-                    return
-
-                video = result
-                sent_success, _ = await send_and_replace_message(
-                    client, message.chat.id, message.id, "video", video_data=video,
-                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
-                    force_new_message=True
-                )
-                if sent_success:
-                    save_history(user_id, video['uuid'], video['category'])
-
-            elif deep_link_type == 'batch':
-                batch_id = deep_link_data
-                batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
-                if not batch_doc or not batch_doc.get('video_uuids'):
-                    await message.reply("This batch link is invalid or has expired. 😔")
-                    return
-
-                if not user_has_token(user_id):
-                    await message.reply("You need a token to watch videos from this link. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
-                    await send_token_earning_options(client, message)
-                    return
-
-                first_video_uuid = batch_doc['video_uuids'][0]
-                video = get_video_by_uuid(first_video_uuid)
-                if not video:
-                    await message.reply("The first video in this batch is unavailable. 😔")
-                    return
-
-                await send_and_replace_message(
-                    client, message.chat.id, message.id, "video", video_data=video,
-                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=batch_id, batch_index=0),
-                    force_new_message=True, is_batch=True, batch_id=batch_id, batch_index=0
-                )
-                # No history saving for batch videos
-
-        finally:
-            if loading_msg: await loading_msg.delete()
 
     except FloodWait as e:
         await handle_error(client, message, e)
@@ -1510,22 +1479,6 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
     user_id = callback_query.from_user.id
     if await check_membership(client, user_id):
         await callback_query.answer("✅ Thank you for joining! Processing your request...", show_alert=False)
-
-        # --- CORRECTED FLOW: Add new user registration logic here ---
-        user = users_collection.find_one({'user_id': user_id})
-        if not user:
-            # This is a new user who just completed the force-subscribe step.
-            username_safe = html.escape(callback_query.from_user.username) if callback_query.from_user.username else ""
-            first_name_safe = html.escape(callback_query.from_user.first_name) if callback_query.from_user.first_name else "there"
-            users_collection.insert_one({
-                'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
-                'last_name': html.escape(callback_query.from_user.last_name) if callback_query.from_user.last_name else None,
-                'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
-                'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None
-            })
-            add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
-            logger.info(f"New user {user_id} registered and tokenized via force-subscribe callback.")
-        # --- END CORRECTION ---
 
         user_doc = users_collection.find_one_and_update(
             {'user_id': user_id},
@@ -3151,7 +3104,8 @@ async def batchadd_cmd(client: Client, message: Message):
             'batch_mode': False,
             'current_category': None,
             'count': 0,
-            'next_sequence': 1 # Initialize next_sequence here, will be updated on category selection
+            'videos_this_session': 0,
+            'next_sequence': 1
         }
 
         buttons = []
@@ -3182,9 +3136,13 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
             return
 
         if user_id not in batch_add_state:
-            await callback_query.answer("❌ Error: Batch mode session expired or not active. Please use /batchadd again. 🚫", show_alert=True)
-            logger.warning(f"Admin {user_id} tried to select category but batch mode not initialized.")
-            return
+            # If state was lost, re-initialize it
+            batch_add_state[user_id] = {
+                'batch_mode': False, 'current_category': None, 'count': 0,
+                'videos_this_session': 0, 'next_sequence': 1
+            }
+            logger.info(f"Re-initialized batch add state for admin {user_id}.")
+
 
         if category_name not in get_categories():
             await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
@@ -3208,7 +3166,8 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
         batch_add_state[user_id]['batch_mode'] = True
         batch_add_state[user_id]['current_category'] = category_name
         batch_add_state[user_id]['count'] = 0
-        batch_add_state[user_id]['next_sequence'] = next_sequence_for_batch # Set the starting sequence for this batch
+        batch_add_state[user_id]['videos_this_session'] = 0 # Reset session count on new start
+        batch_add_state[user_id]['next_sequence'] = next_sequence_for_batch
 
         logger.info(f"Admin {user_id} starting batch add for category '{category_name}'. Next sequence will start from: {next_sequence_for_batch}")
 
@@ -3231,9 +3190,9 @@ async def done_cmd(client: Client, message: Message):
     logger.info(f"Admin {user_id} exited batch add mode.")
     try:
         if user_id in batch_add_state and batch_add_state[user_id].get('batch_mode'):
-            total_added = batch_add_state[user_id].get('count', 0)
+            total_added = batch_add_state[user_id].get('videos_this_session', 0)
             del batch_add_state[user_id]
-            await message.reply(f"Batch add mode disabled. Added <b>{total_added}</b> videos. 🎉")
+            await message.reply(f"Batch add mode disabled. Added <b>{total_added}</b> videos in this session. 🎉")
             logger.info(f"Admin {user_id}: Batch add mode disabled. Total videos added: {total_added}.")
         else:
             await message.reply("You are not currently in batch add mode. Use /batchadd to start. 🚀")
@@ -3318,13 +3277,24 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
             media_collection.insert_one(video_data)
             batch_add_state[user_id]['next_sequence'] += 1
             batch_add_state[user_id]['count'] += 1
+            batch_add_state[user_id]['videos_this_session'] += 1
 
             await message.reply_text(
                 f"✅ File Added to <b>{html.escape(category)}</b>!\n"
                 f"📊 Size: {format_size(message.video.file_size)}\n"
                 f"🔢 Sequence: {next_sequence_number}\n"
-                f"Videos in this batch: <b>{batch_add_state[user_id]['count']}</b>"
+                f"Videos in this category batch: <b>{batch_add_state[user_id]['count']}</b>"
             )
+
+            # Check for cooldown
+            if batch_add_state[user_id]['videos_this_session'] > 0 and batch_add_state[user_id]['videos_this_session'] % BATCH_UPLOAD_LIMIT == 0:
+                await message.reply_text(
+                    f"✅ Batch of {BATCH_UPLOAD_LIMIT} videos added.\n"
+                    f"⏱️ Pausing for {BATCH_COOLDOWN_SECONDS} seconds to avoid rate limits..."
+                )
+                await asyncio.sleep(BATCH_COOLDOWN_SECONDS)
+                await message.reply_text("✅ Cooldown finished. You can continue sending videos.")
+
         except Exception as e:
             logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
             await message.reply("❌ Failed to add video. Please try again.")
