@@ -1301,16 +1301,21 @@ async def is_rate_limited(user_id: int) -> bool:
     window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
 
     try:
-        result = tokens_collection.find_one_and_update(
+        # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
+        tokens_collection.update_one(
             {'user_id': user_id},
-            {
-                '$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}},
-                '$push': {'rate_limits': {'timestamp': now}}
-            },
-            upsert=True,
-            return_document=ReturnDocument.AFTER
+            {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
+            upsert=True
         )
 
+        # Step 2: Atomically add the new timestamp.
+        tokens_collection.update_one(
+            {'user_id': user_id},
+            {'$push': {'rate_limits': {'timestamp': now}}}
+        )
+
+        # Step 3: Retrieve the document to check the current count.
+        result = tokens_collection.find_one({'user_id': user_id})
         current_requests = len(result.get('rate_limits', [])) if result else 0
 
         if current_requests > RATE_LIMIT_MAX:
@@ -1352,7 +1357,7 @@ async def start_cmd(client: Client, message: Message):
             await send_force_subscribe_message(client, user_id)
             return
 
-        # --- MODIFIED: Handle user registration and token grant immediately after membership check ---
+        # --- CORRECTED FLOW: Registration and token grant happens *after* successful membership check ---
         user = users_collection.find_one({'user_id': user_id})
         is_new_user = not user
 
@@ -1365,7 +1370,7 @@ async def start_cmd(client: Client, message: Message):
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
-        # --- END MODIFICATION ---
+        # --- END CORRECTION ---
 
         if await is_rate_limited(user_id):
             raise FloodWait(10)
@@ -1485,13 +1490,29 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
     user_id = callback_query.from_user.id
     if await check_membership(client, user_id):
         await callback_query.answer("✅ Thank you for joining! Processing your request...", show_alert=False)
-        
+
+        # --- CORRECTED FLOW: Add new user registration logic here ---
+        user = users_collection.find_one({'user_id': user_id})
+        if not user:
+            # This is a new user who just completed the force-subscribe step.
+            username_safe = html.escape(callback_query.from_user.username) if callback_query.from_user.username else ""
+            first_name_safe = html.escape(callback_query.from_user.first_name) if callback_query.from_user.first_name else "there"
+            users_collection.insert_one({
+                'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
+                'last_name': html.escape(callback_query.from_user.last_name) if callback_query.from_user.last_name else None,
+                'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
+                'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None
+            })
+            add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
+            logger.info(f"New user {user_id} registered and tokenized via force-subscribe callback.")
+        # --- END CORRECTION ---
+
         user_doc = users_collection.find_one_and_update(
             {'user_id': user_id},
             {'$unset': {'pending_command': ""}},
             return_document=ReturnDocument.BEFORE
         )
-        
+
         pending_command = user_doc.get('pending_command') if user_doc else None
 
         try:
@@ -1499,13 +1520,11 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
         except Exception as e:
             logger.warning(f"Could not delete join message for user {user_id}: {e}")
 
-        if pending_command:
-            mock_message = callback_query.message
-            mock_message.text = f"/start {pending_command}"
-            mock_message.from_user = callback_query.from_user
-            create_tracked_task(start_cmd(client, mock_message))
-        else:
-            await client.send_message(user_id, "You can now use the bot!", reply_markup=await get_main_keyboard(user_id))
+        # Re-trigger the start command to handle deep links or show the welcome message
+        mock_message = callback_query.message
+        mock_message.text = f"/start {pending_command}" if pending_command else "/start"
+        mock_message.from_user = callback_query.from_user
+        create_tracked_task(start_cmd(client, mock_message))
     else:
         await callback_query.answer("⚠️ You still need to join all channels to proceed.", show_alert=True)
 
