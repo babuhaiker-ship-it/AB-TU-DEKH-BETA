@@ -1349,7 +1349,6 @@ async def start_cmd(client: Client, message: Message):
 
         if not await check_membership(client, user_id):
             if deep_link_arg:
-                # This upsert creates a partial user document, which is handled by the registration logic below.
                 users_collection.update_one(
                     {'user_id': user_id},
                     {'$set': {'pending_command': deep_link_arg}},
@@ -1358,31 +1357,20 @@ async def start_cmd(client: Client, message: Message):
             await send_force_subscribe_message(client, user_id)
             return
 
-        # --- NEW AND CORRECTED REGISTRATION LOGIC ---
+        # --- CORRECTED LOGIC: Handle user registration and token grant immediately after membership check ---
         user = users_collection.find_one({'user_id': user_id})
-        # A user is considered new if they don't have a 'joined_date', which marks a full registration.
-        is_new_user = not user or 'joined_date' not in user
+        is_new_user = not user
 
         if is_new_user:
-            # Use update_one with upsert=True to complete the registration for both new and partial users.
-            users_collection.update_one(
-                {'user_id': user_id},
-                {'$set': {
-                    'user_id': user_id,
-                    'username': username_safe,
-                    'first_name': first_name_safe,
-                    'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-                    'joined_date': datetime.now(timezone.utc),
-                    'referral_count': 0,
-                    'bookmarked_videos': [],
-                    'last_premium_check_status': False,
-                    'last_viewed_per_category': {}
-                }},
-                upsert=True
-            )
+            users_collection.insert_one({
+                'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
+                'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
+                'joined_date': datetime.now(timezone.utc), 'referral_count': 0, 'bookmarked_videos': [],
+                'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None
+            })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
-            logger.info(f"User {user_id} completed registration and received {config.NEW_USER_TOKENS} token.")
-        # --- END NEW AND CORRECTED REGISTRATION LOGIC ---
+            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
+        # --- END CORRECTION ---
 
         if await is_rate_limited(user_id):
             raise FloodWait(10)
@@ -1516,15 +1504,13 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
         except Exception as e:
             logger.warning(f"Could not delete join message for user {user_id}: {e}")
 
-        # Always call start_cmd to ensure consistent new user registration and deep link handling
-        mock_message = callback_query.message
-        mock_message.from_user = callback_query.from_user
         if pending_command:
+            mock_message = callback_query.message
             mock_message.text = f"/start {pending_command}"
+            mock_message.from_user = callback_query.from_user
+            create_tracked_task(start_cmd(client, mock_message))
         else:
-            mock_message.text = "/start"
-        
-        create_tracked_task(start_cmd(client, mock_message))
+            await client.send_message(user_id, "You can now use the bot!", reply_markup=await get_main_keyboard(user_id))
     else:
         await callback_query.answer("⚠️ You still need to join all channels to proceed.", show_alert=True)
 
