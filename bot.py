@@ -1120,15 +1120,21 @@ def video_nav_keyboard(
     is_saved: bool = False,
     is_batch: bool = False,
     batch_id: str = None,
-    batch_index: int = -1
+    batch_index: int = -1,
+    is_shared_link: bool = False
 ) -> InlineKeyboardMarkup:
     """
-    Keyboard for navigating videos. Handles regular, saved, and batch video menus.
+    Keyboard for navigating videos. Handles regular, saved, batch, and shared video menus.
     """
     buttons = []
 
     # --- Navigation Row (Previous/Next) ---
-    if is_batch:
+    if is_shared_link:
+        buttons.append([
+            InlineKeyboardButton("⬅️ Previous", callback_data="shared_nav"),
+            InlineKeyboardButton("➡️ Next", callback_data="shared_nav")
+        ])
+    elif is_batch:
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_batch|{batch_id}|{batch_index}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
@@ -1143,7 +1149,7 @@ def video_nav_keyboard(
     row_2_buttons = []
     if is_saved:
         row_2_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
-    elif not is_batch: # "Change Category" is not shown for batch menus
+    elif not is_batch and not is_shared_link:
         row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
 
     row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
@@ -1333,7 +1339,16 @@ async def start_cmd(client: Client, message: Message):
     first_name_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
 
     try:
+        args = message.text.split()
+        deep_link_arg = args[1] if len(args) > 1 else None
+
         if not await check_membership(client, user_id):
+            if deep_link_arg:
+                users_collection.update_one(
+                    {'user_id': user_id},
+                    {'$set': {'pending_command': deep_link_arg}},
+                    upsert=True
+                )
             await send_force_subscribe_message(client, user_id)
             return
 
@@ -1348,19 +1363,17 @@ async def start_cmd(client: Client, message: Message):
                 'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                 'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
-                'last_premium_check_status': False, 'last_viewed_per_category': {},
+                'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
 
         create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-        args = message.text.split()
         deep_link_type, deep_link_data = None, None
         referrer_id_from_video_link = None
 
-        if len(args) > 1:
-            deep_link_arg = args[1]
+        if deep_link_arg:
             if deep_link_arg.startswith('token_'):
                 deep_link_type, deep_link_data = 'token_refresh', deep_link_arg[6:]
             elif deep_link_arg.startswith('video_'):
@@ -1377,10 +1390,11 @@ async def start_cmd(client: Client, message: Message):
 
         # --- 1. Handle Welcome Message ---
         if is_new_user:
-            if deep_link_type in ['video_share', 'view_saved_video', 'batch']:
-                welcome_message = f"👋 Congratulations, {first_name_safe}! 🎉\n\nYou've received {config.NEW_USER_TOKENS} free token 🌶️. To watch spicy content, click on the '🎞️ Get Video' button. Need help? Tap /help. ✨"
-            else:
-                welcome_message = f"👋 Welcome, {first_name_safe}! 🎉\n\nYou've received <b>{config.NEW_USER_TOKENS} free token</b> to get started. 🌶️\n\nTo watch exclusive content, just tap the '🎞️ Get Video' button below. Enjoy your stay!"
+            welcome_message = (
+                f"🎉 Congratulations dear {first_name_safe}! 🎉\n\n"
+                f"You got <b>{config.NEW_USER_TOKENS} free token</b> to start your journey. 🚀\n\n"
+                "Tap the '🎞️ Get Video' button below and begin exploring!"
+            )
             await message.reply(welcome_message, reply_markup=await get_main_keyboard(user_id))
 
             # Handle referral for new user
@@ -1403,7 +1417,7 @@ async def start_cmd(client: Client, message: Message):
             if deep_link_type == 'token_refresh':
                 success, msg = await handle_token_refresh(user_id, deep_link_data)
                 await message.reply(msg)
-            elif deep_link_type in ['video_share', 'view_saved_video']:
+            elif deep_link_type == 'video_share':
                 video_uuid = deep_link_data
                 try: uuid.UUID(video_uuid)
                 except ValueError:
@@ -1421,13 +1435,13 @@ async def start_cmd(client: Client, message: Message):
                     return
 
                 video = result
-                is_saved = (deep_link_type == 'view_saved_video')
                 sent_success, _ = await send_and_replace_message(
                     client, message.chat.id, message.id, "video", video_data=video,
-                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=is_saved),
+                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
                     force_new_message=True
                 )
-                if sent_success: save_history(user_id, video['uuid'], video['category'])
+                if sent_success:
+                    save_history(user_id, video['uuid'], video['category'])
 
             elif deep_link_type == 'batch':
                 batch_id = deep_link_data
@@ -1462,6 +1476,44 @@ async def start_cmd(client: Client, message: Message):
     except Exception as e:
         logger.error(f"User {user_id} encountered an unexpected error in start command: {e}", exc_info=True)
         await handle_error(client, message, e)
+
+@app.on_callback_query(filters.regex(r"^check_join_status$"))
+async def check_join_status_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Try Again' button after a user is prompted to join channels."""
+    user_id = callback_query.from_user.id
+    if await check_membership(client, user_id):
+        await callback_query.answer("✅ Thank you for joining! Processing your request...", show_alert=False)
+        
+        user_doc = users_collection.find_one_and_update(
+            {'user_id': user_id},
+            {'$unset': {'pending_command': ""}},
+            return_document=ReturnDocument.BEFORE
+        )
+        
+        pending_command = user_doc.get('pending_command') if user_doc else None
+
+        try:
+            await callback_query.message.delete()
+        except Exception as e:
+            logger.warning(f"Could not delete join message for user {user_id}: {e}")
+
+        if pending_command:
+            mock_message = callback_query.message
+            mock_message.text = f"/start {pending_command}"
+            mock_message.from_user = callback_query.from_user
+            create_tracked_task(start_cmd(client, mock_message))
+        else:
+            await client.send_message(user_id, "You can now use the bot!", reply_markup=await get_main_keyboard(user_id))
+    else:
+        await callback_query.answer("⚠️ You still need to join all channels to proceed.", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^shared_nav$"))
+async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
+    """Handles navigation for single shared videos."""
+    await callback_query.answer(
+        "No more videos in this link. Click '🎞️ Get Video' to watch your favorite category.",
+        show_alert=True
+    )
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client: Client, message: Message):
@@ -1521,6 +1573,7 @@ async def profile_cmd(client: Client, message: Message):
                 'bookmarked_videos': [],
                 'last_premium_check_status': False,
                 'last_viewed_per_category': {},
+                'pending_command': None
             })
             user = users_collection.find_one({'user_id': user_id})
             if not user:
