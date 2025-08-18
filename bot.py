@@ -49,7 +49,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
     FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
-    MENU_EXPIRY_MINUTES = 60
+    MENU_EXPIRY_MINUTES = 1
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
 
 try:
@@ -85,8 +85,7 @@ media_collection.create_index([("size_bytes", ASCENDING)])
 media_collection.create_index([("category", ASCENDING), ("sequence_number", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
-refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True)
-refresh_tokens_used_collection.create_index([("used_at", ASCENDING)], expireAfterSeconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
+refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True) # Renamed to "used url link" conceptually
 video_batches_collection.create_index([("batch_id", ASCENDING)], unique=True)
 
 # --- Session Management with MongoDB ---
@@ -1095,14 +1094,17 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
-def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
-    """Keyboard for token earning options."""
-    return InlineKeyboardMarkup([
+def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False) -> InlineKeyboardMarkup:
+    """Generates the keyboard for token earning options with conditional buttons."""
+    buttons = [
         [InlineKeyboardButton("👆 Click Here To Refresh Token", url=ad_url)],
         [InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")],
         [InlineKeyboardButton("❓ How To Open Links?", url=config.TUTORIAL_LINK_2)],
         [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)],
-    ])
+    ]
+    if is_pending_content:
+        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
+    return InlineKeyboardMarkup(buttons)
 
 def category_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for selecting video categories, with 3 buttons per row."""
@@ -1251,7 +1253,6 @@ async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> 
     return True, video
 
 # --- Token Refresh ---
-# MODIFIED: Removed time-based expiry from token refresh links
 async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
     """Handles token refresh requests from users."""
     try:
@@ -1268,8 +1269,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             return False, "Oops, invalid link. Try again! 🧐"
 
         try:
-            # The second part is now a UUID, not a timestamp, so we ignore it
-            code_user_id_str, _ = decoded.split(':', 1)
+            code_user_id_str, timestamp_str = decoded.split(':', 1)
             code_user_id = int(code_user_id_str)
         except ValueError:
             logger.error(f"User {user_id} provided invalid token refresh code format: {ad_code}")
@@ -1277,9 +1277,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
 
         if code_user_id != user_id:
             logger.warning(f"User {user_id} attempted to use another user's token refresh link ({code_user_id}).")
-            return False, "This token refresh link is not for you! 😠"
-
-        # The time-based expiry check has been removed. We now rely on the one-time use check below.
+            return False, "This Token Is Not For You 😠\n\nor maybe you are using 2 telegram apps, if yes then please uninstall this one and try again."
 
         if refresh_tokens_used_collection.find_one({'ad_code': ad_code}):
             logger.warning(f"User {user_id} attempted to reuse token refresh link: {ad_code}")
@@ -1422,40 +1420,51 @@ async def start_cmd(client: Client, message: Message):
                 if deep_link_type == 'token_refresh':
                     success, msg = await handle_token_refresh(user_id, deep_link_data)
                     await message.reply(msg)
-                elif deep_link_type == 'video_share':
+                    # After successful token refresh, check for pending command
+                    user_doc = users_collection.find_one_and_update(
+                        {'user_id': user_id},
+                        {'$unset': {'pending_command': ""}},
+                        return_document=ReturnDocument.BEFORE
+                    )
+                    pending_command = user_doc.get('pending_command') if user_doc else None
+                    if pending_command:
+                        await message.reply("✅ Token received! Loading your content now...")
+                        mock_message = message
+                        mock_message.text = f"/start {pending_command}"
+                        create_tracked_task(start_cmd(client, mock_message))
+
+                elif deep_link_type in ['video_share', 'batch']:
                     if not user_has_token(user_id):
-                        await message.reply("You need a token to watch this video. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
-                        await send_token_earning_options(client, message)
+                        users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
+                        await send_token_earning_options(client, message, is_pending_content=True)
                         return
-                    success, result = await handle_shared_video(client, user_id, deep_link_data)
-                    if not success:
-                        await message.reply(result)
-                    else:
-                        video = result
-                        await send_and_replace_message(
-                            client, message.chat.id, message.id, "video", video_data=video,
-                            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
-                            force_new_message=True
-                        )
-                        save_history(user_id, video['uuid'], video['category'])
-                elif deep_link_type == 'batch':
-                    if not user_has_token(user_id):
-                        await message.reply("You need a token to watch videos from this link. Please get one first! 🧐", reply_markup=await get_main_keyboard(user_id))
-                        await send_token_earning_options(client, message)
-                        return
-                    batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
-                    if not batch_doc or not batch_doc.get('video_uuids'):
-                        await message.reply("This batch link is invalid or has expired. 😔")
-                    else:
-                        video = get_video_by_uuid(batch_doc['video_uuids'][0])
-                        if not video:
-                            await message.reply("The first video in this batch is unavailable. 😔")
+
+                    if deep_link_type == 'video_share':
+                        success, result = await handle_shared_video(client, user_id, deep_link_data)
+                        if not success:
+                            await message.reply(result)
                         else:
+                            video = result
                             await send_and_replace_message(
                                 client, message.chat.id, message.id, "video", video_data=video,
-                                reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
-                                force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
+                                reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
+                                force_new_message=True
                             )
+                            save_history(user_id, video['uuid'], video['category'])
+                    elif deep_link_type == 'batch':
+                        batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
+                        if not batch_doc or not batch_doc.get('video_uuids'):
+                            await message.reply("This batch link is invalid or has expired. 😔")
+                        else:
+                            video = get_video_by_uuid(batch_doc['video_uuids'][0])
+                            if not video:
+                                await message.reply("The first video in this batch is unavailable. 😔")
+                            else:
+                                await send_and_replace_message(
+                                    client, message.chat.id, message.id, "video", video_data=video,
+                                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
+                                    force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
+                                )
             finally:
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
@@ -1501,6 +1510,42 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
         create_tracked_task(start_cmd(client, mock_message))
     else:
         await callback_query.answer("⚠️ You still need to join all channels to proceed.", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^reload_pending_content$"))
+async def reload_pending_content_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Refresh' button to reload content after getting a token."""
+    user_id = callback_query.from_user.id
+    
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channels first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    if not user_has_token(user_id):
+        await callback_query.answer("You still haven't received a token. Please complete the task first.", show_alert=True)
+        return
+
+    user_doc = users_collection.find_one_and_update(
+        {'user_id': user_id},
+        {'$unset': {'pending_command': ""}},
+        return_document=ReturnDocument.BEFORE
+    )
+    pending_command = user_doc.get('pending_command') if user_doc else None
+
+    if not pending_command:
+        await callback_query.answer("Nothing to reload. You can browse using the menu.", show_alert=True)
+        return
+
+    await callback_query.answer("Loading your content...")
+    try:
+        await callback_query.message.delete()
+    except Exception as e:
+        logger.warning(f"Could not delete 'reload' message for user {user_id}: {e}")
+
+    mock_message = callback_query.message
+    mock_message.text = f"/start {pending_command}"
+    mock_message.from_user = callback_query.from_user
+    create_tracked_task(start_cmd(client, mock_message))
 
 @app.on_callback_query(filters.regex(r"^shared_nav$"))
 async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
@@ -2263,9 +2308,8 @@ async def refresh_token_btn(client: Client, message: Message):
             return
 
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
-        # MODIFIED: Use a non-expiring UUID for the refresh link
-        ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
-        long_url = f"https://telegram.dog/{client.me.username}?start=token_{ad_code}"
+        ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
         logger.info(f"User {user_id}: get_shortener_config_and_shorten_url call completed. Result: {ad_url}")
@@ -2283,7 +2327,7 @@ async def refresh_token_btn(client: Client, message: Message):
             f"💡 <b>Information</b>\nHere's how to get your token! 🚀\n\n"
             f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> 24 hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
             disable_web_page_preview = disable_preview,
-            reply_markup=token_earning_keyboard(ad_url)
+            reply_markup=generate_token_earning_keyboard(ad_url)
         )
         logger.info(f"User {user_id}: Refresh token message sent. Handler finished.")
     except Exception as e:
@@ -2296,8 +2340,7 @@ async def refresh_token_btn(client: Client, message: Message):
                 logger.warning(f"User {user_id}: Failed to delete 'Please wait...' message during error handling: {delete_e}")
         await handle_error(client, message, e)
 
-# MODIFIED: Added a "please wait" message
-async def send_token_earning_options(client: Client, message: Message):
+async def send_token_earning_options(client: Client, message: Message, is_pending_content: bool = False):
     """Sends messages to a user detailing how to earn tokens."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} is being sent token earning options.")
@@ -2317,21 +2360,23 @@ async def send_token_earning_options(client: Client, message: Message):
             if wait_msg: await wait_msg.delete()
             return
 
-        # MODIFIED: Use a non-expiring UUID for the refresh link
-        ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
-        long_url = f"https://telegram.dog/{client.me.username}?start=token_{ad_code}"
-
+        ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url)
 
-        disable_preview = False
-        if ad_url == long_url:
-            logger.warning(f"User {user_id} URL shortening failed for send_token_earning_options. Using long URL: {ad_url}")
-            disable_preview = True
+        text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
+        if is_pending_content:
+            text = (
+                "❌ <b>Token Required To View Content!</b>\n\n"
+                "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
+            )
 
+        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content)
+        
         await message.reply(
-            "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇",
-            reply_markup=token_earning_keyboard(ad_url),
-            disable_web_page_preview=disable_preview
+            text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
         )
         if wait_msg: await wait_msg.delete()
         logger.info(f"User {user_id}: Token earning options sent.")
@@ -3839,22 +3884,6 @@ async def cleanup_expired_menus():
         except Exception as e:
             logger.error(f"Error during sleep in cleanup_expired_menus: {e}", exc_info=True)
 
-async def cleanup_used_refresh_tokens():
-    """Periodically cleans up old used refresh token entries."""
-    while True:
-        try:
-            now = datetime.utcnow()
-            delete_threshold = now - timedelta(seconds=config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2)
-            result = refresh_tokens_used_collection.delete_many({'used_at': {'$lt': delete_threshold}})
-            logger.info(f"Cleaned up {result.deleted_count} old used refresh token entries. (Used refresh tokens are kept for {config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS * 2} seconds after use to prevent reuse.)")
-        except asyncio.CancelledError:
-            logger.info("cleanup_used_refresh_tokens task cancelled gracefully.")
-            break
-        except Exception as e:
-            logger.error(f"Error in cleanup_used_refresh_tokens task: {e}", exc_info=True)
-
-        await asyncio.sleep(config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS)
-
 async def verify_and_cleanup_media():
     """Periodically verifies if media files still exist in the channel and logs missing/inaccessible entries, but does NOT delete anything."""
     while True:
@@ -3925,7 +3954,6 @@ async def main_bot_logic():
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
-    create_tracked_task(cleanup_used_refresh_tokens())
 
     logger.info("Background tasks initiated. Bot is now fully operational.")
 
