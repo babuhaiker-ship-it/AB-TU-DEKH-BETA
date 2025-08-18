@@ -59,6 +59,10 @@ try:
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
+# --- Batch Add Constants ---
+BATCH_UPLOAD_LIMIT = 20
+BATCH_COOLDOWN_SECONDS = 60
+
 # --- MongoDB Setup ---
 client = MongoClient(config.MONGO_URI)
 db = client[config.MONGO_DB_NAME]
@@ -1088,11 +1092,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
         [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
         [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")]
     ]
-    return ReplyKeyboardMarkup(
-        buttons,
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def token_earning_keyboard(ad_url: str) -> InlineKeyboardMarkup:
     """Keyboard for token earning options."""
@@ -3201,6 +3201,29 @@ async def done_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
+async def send_video_with_retry(client: Client, chat_id: int, video_file_id: str, caption: str, retries: int = 3) -> Message | None:
+    """Sends a video with a retry mechanism for FloodWait errors."""
+    last_exception = None
+    for attempt in range(retries):
+        try:
+            sent_message = await client.send_video(
+                chat_id=chat_id,
+                video=video_file_id,
+                caption=caption
+            )
+            return sent_message
+        except FloodWait as fw:
+            last_exception = fw
+            logger.warning(f"FloodWait encountered on attempt {attempt + 1}/{retries}. Waiting for {fw.value + 1} seconds.")
+            await asyncio.sleep(fw.value + 1)
+        except Exception as e:
+            last_exception = e
+            logger.error(f"An unexpected error occurred on attempt {attempt + 1}/{retries}: {e}", exc_info=True)
+            await asyncio.sleep(5)
+
+    logger.error(f"Failed to send video after {retries} attempts. Last error: {last_exception}")
+    return None
+
 @app.on_message(filters.video & filters.private & admin_only)
 async def handle_video_for_admin_modes(client: Client, message: Message):
     """
@@ -3258,12 +3281,19 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
                 await message.reply_text("⚠️ This video has already been added. Skipping.")
                 return
 
-            sent_video_message = await client.send_video(
-                chat_id=config.VIDEO_CHANNEL_ID, video=message.video.file_id,
+            sent_video_message = await send_video_with_retry(
+                client=client,
+                chat_id=config.VIDEO_CHANNEL_ID,
+                video_file_id=message.video.file_id,
                 caption=f"Added by admin {user_id} for category {category}"
             )
+
             if not sent_video_message or not sent_video_message.video:
-                raise Exception("send_video did not return a valid video message.")
+                logger.error(f"Failed to send video from admin {user_id} to channel after multiple retries.")
+                await message.reply_text("❌ Failed to send this video to the channel after multiple retries. It has been skipped. Please try this specific video again later.")
+                return
+
+            await asyncio.sleep(2.0)
 
             video_uuid = str(uuid.uuid4())
             next_sequence_number = batch_add_state[user_id]['next_sequence']
@@ -3286,12 +3316,17 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
                 f"Videos in this category batch: <b>{batch_add_state[user_id]['count']}</b>"
             )
 
-            # Wait for 7 seconds to avoid flood limits
-            await asyncio.sleep(7)
+            if batch_add_state[user_id]['videos_this_session'] > 0 and batch_add_state[user_id]['videos_this_session'] % BATCH_UPLOAD_LIMIT == 0:
+                await message.reply_text(
+                    f"✅ Batch of {BATCH_UPLOAD_LIMIT} videos added.\n"
+                    f"⏱️ Pausing for {BATCH_COOLDOWN_SECONDS} seconds to avoid rate limits..."
+                )
+                await asyncio.sleep(BATCH_COOLDOWN_SECONDS)
+                await message.reply_text("✅ Cooldown finished. You can continue sending videos.")
 
         except Exception as e:
             logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
-            await message.reply("❌ Failed to add video. Please try again.")
+            await message.reply("❌ Failed to add video. Please try again. This item has been skipped.")
         return
 
     logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
