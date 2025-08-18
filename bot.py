@@ -1708,7 +1708,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         except Exception as e:
             logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
         clear_active_video_message(user_id)
-        await client.send_message(chat_id, "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start")
+        await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start")
         return
 
     if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
@@ -1824,7 +1824,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         except MessageIdInvalid:
             pass
         clear_active_video_message(user_id)
-        await client.send_message(chat_id, "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start")
+        await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start")
         return
 
     user_doc = users_collection.find_one({'user_id': user_id})
@@ -1948,7 +1948,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 except Exception as e:
                     logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
                 clear_active_video_message(user_id)
-                await client.send_message(chat_id, "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start")
+                await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start")
                 return
 
             # If the user clicks an old button, just answer and return. The active message logic will handle it.
@@ -2097,7 +2097,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
             except Exception as e:
                 logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
             clear_active_video_message(user_id)
-            await client.send_message(chat_id, "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start")
+            await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start")
             return
 
         if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
@@ -2266,7 +2266,6 @@ async def refresh_token_btn(client: Client, message: Message):
         # MODIFIED: Use a non-expiring UUID for the refresh link
         ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-        logger.info(f"User {user_id}: Base long token link (before shortening): {long_url}")
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
         logger.info(f"User {user_id}: get_shortener_config_and_shorten_url call completed. Result: {ad_url}")
@@ -2282,8 +2281,14 @@ async def refresh_token_btn(client: Client, message: Message):
         user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
         await message.reply_text(
             f"💡 <b>Information</b>\nHere's how to get your token! 🚀\n\n"
-            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> 24 hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
-            disable_web_page_preview = disable_preview,
+            f"Hey 💕 <b>{user_mention_safe}</b>,\n\n"
+            f"Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n"
+            f"<b>Token Timeout:</b> 24 hours ⏰\n\n"
+            f"<b>What is a token?</b>\n"
+            f"This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨\n\n"
+            f"<b>Base long token link (before shortening):</b>\n<code>{html.escape(long_url)}</code>\n\n"
+            f"<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
+            disable_web_page_preview=disable_preview,
             reply_markup=token_earning_keyboard(ad_url)
         )
         logger.info(f"User {user_id}: Refresh token message sent. Handler finished.")
@@ -2321,7 +2326,6 @@ async def send_token_earning_options(client: Client, message: Message):
         # MODIFIED: Use a non-expiring UUID for the refresh link
         ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-        logger.info(f"User {user_id}: Base long token link (before shortening): {long_url}")
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
 
@@ -2331,7 +2335,9 @@ async def send_token_earning_options(client: Client, message: Message):
             disable_preview = True
 
         await message.reply(
-            "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇",
+            "❌ <b>No Tokens Left!</b> 😔\n"
+            "Use any of these methods to gain tokens and continue watching spicy content! 👇\n\n"
+            f"<b>Base long token link (before shortening):</b>\n<code>{html.escape(long_url)}</code>",
             reply_markup=token_earning_keyboard(ad_url),
             disable_web_page_preview=disable_preview
         )
@@ -2586,7 +2592,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
             except Exception as e:
                 logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
             clear_active_video_message(user_id)
-            await client.send_message(chat_id, "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start")
+            await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start")
             return
 
         if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
@@ -2714,7 +2720,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         except Exception as e:
                 logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
         clear_active_video_message(user_id)
-        await client.send_message(chat_id, "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start")
+        await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start")
         return
 
     if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
@@ -3795,7 +3801,6 @@ async def cleanup_expired_menus():
         logger.info("Starting expired menu cleanup task.")
         now = datetime.utcnow()
         expired_threshold = now - timedelta(minutes=config.MENU_EXPIRY_MINUTES)
-        expiry_message_text = "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start"
 
         users_to_clear = []
         for user_id, menu_info in list(active_video_message.items()):
@@ -3809,20 +3814,20 @@ async def cleanup_expired_menus():
                     logger.info(f"Successfully deleted expired menu message {message_id} for user {user_id}.")
                     await app.send_message(
                         chat_id,
-                        expiry_message_text
+                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start"
                     )
                 except MessageIdInvalid:
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
                     await app.send_message(
                         chat_id,
-                        expiry_message_text
+                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start"
                     )
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
                     try:
                         await app.send_message(
                             chat_id,
-                            expiry_message_text
+                            "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you’re not seeing this button, simply type /start"
                         )
                     except Exception as send_e:
                         logger.error(f"Failed to send expiry notification to user {user_id}: {send_e}")
