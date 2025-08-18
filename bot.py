@@ -1551,7 +1551,7 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
     """Handles navigation for single shared videos."""
     await callback_query.answer(
-        "No more videos in this link. Click '🎞️ Get Video' to watch your favorite category.",
+        "No more videos in this link. Send /start and Click '🎞️ Get Video' to watch your favorite category.",
         show_alert=True
     )
 
