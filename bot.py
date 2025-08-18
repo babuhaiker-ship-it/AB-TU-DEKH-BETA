@@ -49,8 +49,8 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
     FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
-    MENU_EXPIRY_MINUTES = 1
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 15 minutes for refresh token links to be valid
+    MENU_EXPIRY_MINUTES = 60
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
 
 try:
     config = BotConfig()
@@ -1251,9 +1251,9 @@ async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> 
     return True, video
 
 # --- Token Refresh ---
-# MODIFIED: Reverted to old time-based token logic
+# MODIFIED: Removed time-based expiry from token refresh links
 async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
-    """Handles token refresh requests from users using time-based logic."""
+    """Handles token refresh requests from users."""
     try:
         if await is_rate_limited(user_id):
             return False, "⚠️ You're refreshing too quickly. Please wait a minute and try again. ⏳"
@@ -1268,36 +1268,33 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             return False, "Oops, invalid link. Try again! 🧐"
 
         try:
-            code_user_id, timestamp = map(int, decoded.split(':'))
+            # The second part is now a UUID, not a timestamp, so we ignore it
+            code_user_id_str, _ = decoded.split(':', 1)
+            code_user_id = int(code_user_id_str)
         except ValueError:
             logger.error(f"User {user_id} provided invalid token refresh code format: {ad_code}")
             return False, "Invalid token refresh link format. 🐛"
 
-        # Note: The old logic did not check if code_user_id matched the current user_id.
-        # This is less secure but matches the old bot's behavior.
+        if code_user_id != user_id:
+            logger.warning(f"User {user_id} attempted to use another user's token refresh link ({code_user_id}).")
+            return False, "This token refresh link is not for you! 😠"
 
-        if timestamp < get_current_time():
-            logger.warning(f"User {user_id} attempted to use expired token refresh link.")
-            # Mark as used even if expired to prevent replay attacks on misconfigured clocks
-            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
-            return False, "This token refresh link has expired. Please generate a new one. ⏰"
+        # The time-based expiry check has been removed. We now rely on the one-time use check below.
 
         if refresh_tokens_used_collection.find_one({'ad_code': ad_code}):
             logger.warning(f"User {user_id} attempted to reuse token refresh link: {ad_code}")
             return False, "This token refresh link has already been used. Please generate a new one. 🔄"
 
-        # The token is granted to the user who clicks the link, regardless of who generated it.
         added_token = add_token(user_id, config.REFRESH_BONUS * 86400, is_admin_granted=False)
         if added_token:
             refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
-            logger.info(f"Token added for user {user_id} via refresh. Ad code {ad_code} marked as used.")
+            logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
             return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts 24 hours. Enjoy! 🍿"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
     except Exception as e:
         logger.error(f"Token refresh failed for user {user_id}: {e}", exc_info=True)
         return False, "❌ <b>Something went wrong!</b>\nPlease try again later. 🤷‍♀️"
-
 
 # --- Rate Limiting ---
 RATE_LIMIT_WINDOW = 120
@@ -2266,9 +2263,9 @@ async def refresh_token_btn(client: Client, message: Message):
             return
 
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
-        # MODIFIED: Reverted to old time-based token link generation
-        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS}")
-        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        # MODIFIED: Use a non-expiring UUID for the refresh link
+        ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
+        long_url = f"https://telegram.dog/{client.me.username}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
         logger.info(f"User {user_id}: get_shortener_config_and_shorten_url call completed. Result: {ad_url}")
@@ -2320,9 +2317,9 @@ async def send_token_earning_options(client: Client, message: Message):
             if wait_msg: await wait_msg.delete()
             return
 
-        # MODIFIED: Reverted to old time-based token link generation
-        ad_code = str_to_b64(f"{user_id}:{get_current_time() + config.REFRESH_TOKEN_LINK_EXPIRY_SECONDS}")
-        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        # MODIFIED: Use a non-expiring UUID for the refresh link
+        ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
+        long_url = f"https://telegram.dog/{client.me.username}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
 
