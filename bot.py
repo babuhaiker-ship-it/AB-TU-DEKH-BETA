@@ -13,7 +13,7 @@ from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
 from aiohttp import ClientTimeout
-from collections import defaultdict
+from collections import defaultdict, deque
 import re
 import html
 import urllib.parse
@@ -135,6 +135,7 @@ admin_delete_video_state = defaultdict(bool)
 admin_rename_category_state = defaultdict(dict)
 admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
 owner_add_admin_state = defaultdict(dict) # State for /addadmin
+batch_add_state = {} # State for /batchadd
 
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
@@ -3077,7 +3078,6 @@ async def addtoken_cmd(client: Client, message: Message):
         await message.reply("❌ Failed to add premium access. Please try again. 🐛")
 
 # --- Batch Add Videos ---
-batch_add_state = {}
 
 def format_size(size_bytes: int) -> str:
     """Converts bytes to a human-readable format (e.g., KB, MB, GB)."""
@@ -3086,6 +3086,73 @@ def format_size(size_bytes: int) -> str:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
+
+async def process_batch_queue(user_id: int, client: Client):
+    """Processes a queue of videos for batch adding, handling rate limits."""
+    state = batch_add_state.get(user_id)
+    if not state or not state.get('batch_mode'):
+        if state: state['is_processing'] = False
+        return
+
+    logger.info(f"Starting batch processing queue for admin {user_id}.")
+    queue = state['video_queue']
+
+    while queue and batch_add_state.get(user_id, {}).get('batch_mode'):
+        message = queue.popleft()
+        category = state['current_category']
+
+        try:
+            file_unique_id = message.video.file_unique_id
+            if media_collection.find_one({"file_unique_id": file_unique_id}):
+                await message.reply_text("⚠️ This video has already been added. Skipping.")
+                continue
+
+            sent_video_message = await client.send_video(
+                chat_id=config.VIDEO_CHANNEL_ID, video=message.video.file_id,
+                caption=f"Added by admin {user_id} for category {category}"
+            )
+            if not sent_video_message or not sent_video_message.video:
+                raise Exception("send_video did not return a valid video message.")
+
+            video_uuid = str(uuid.uuid4())
+            next_sequence_number = state['next_sequence']
+            video_data = {
+                "uuid": video_uuid, "file_id": sent_video_message.video.file_id,
+                "file_unique_id": file_unique_id, "category": category,
+                "size_bytes": message.video.file_size, "timestamp": get_current_time(),
+                "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
+                "banned": False, "custom_caption": message.caption
+            }
+            media_collection.insert_one(video_data)
+            state['next_sequence'] += 1
+            state['videos_this_session'] += 1
+
+            await message.reply_text(
+                f"✅ File Added to <b>{html.escape(category)}</b>!\n"
+                f"📊 Size: {format_size(message.video.file_size)}\n"
+                f"🔢 Sequence: {next_sequence_number}\n"
+                f"Videos processed this session: <b>{state['videos_this_session']}</b>"
+            )
+            logger.info(f"Successfully processed video for {user_id}. Waiting 5 seconds.")
+            await asyncio.sleep(5)
+
+        except FloodWait as e:
+            logger.warning(f"FloodWait encountered for admin {user_id}. Waiting for {e.value} seconds.")
+            await message.reply_text(f"⏳ FloodWait from Telegram. Pausing for {e.value + 1} seconds. The bot will resume automatically.")
+            queue.appendleft(message)
+            await asyncio.sleep(e.value + 1)
+
+        except Exception as e:
+            logger.error(f"Admin {user_id} error adding video from queue: {e}", exc_info=True)
+            await message.reply("❌ Failed to add this video due to an error. Check logs. Skipping.")
+
+    if batch_add_state.get(user_id):
+        batch_add_state[user_id]['is_processing'] = False
+        if not batch_add_state[user_id]['video_queue']:
+            logger.info(f"Batch processing queue for admin {user_id} is now empty.")
+            await client.send_message(user_id, "✅ All queued videos have been processed. You can send more videos or type /done.")
+        else:
+            logger.info(f"Batch processing stopped for admin {user_id}. {len(batch_add_state[user_id]['video_queue'])} videos remain in queue.")
 
 @app.on_message(filters.command("batchadd") & filters.private & admin_only)
 async def batchadd_cmd(client: Client, message: Message):
@@ -3099,18 +3166,8 @@ async def batchadd_cmd(client: Client, message: Message):
             logger.warning(f"Admin {user_id} tried to start batch add with no categories.")
             return
 
-        # Initialize batch_add_state for the user
-        batch_add_state[user_id] = {
-            'batch_mode': False,
-            'current_category': None,
-            'count': 0,
-            'videos_this_session': 0,
-            'next_sequence': 1
-        }
-
         buttons = []
         for category in categories:
-            # Changed: Encode category name for callback data
             buttons.append([InlineKeyboardButton(f"🗂️ {html.escape(category)}", callback_data=f"batchselcat_{str_to_b64(category)}")])
 
         await message.reply(
@@ -3126,35 +3183,21 @@ async def batchadd_cmd(client: Client, message: Message):
 async def batch_select_category_callback(client: Client, callback_query: CallbackQuery):
     """Handles callback for selecting the category in batch add mode."""
     user_id = callback_query.from_user.id
-    # Changed: Decode category name from callback data
     category_name = b64_to_str(callback_query.data[12:])
     logger.info(f"Admin {user_id} selected category for batch adding: {category_name}.")
     try:
         if not is_admin(user_id):
             await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
-            logger.warning(f"Non-admin user {user_id} attempted to select batch category.")
             return
-
-        if user_id not in batch_add_state:
-            # If state was lost, re-initialize it
-            batch_add_state[user_id] = {
-                'batch_mode': False, 'current_category': None, 'count': 0,
-                'videos_this_session': 0, 'next_sequence': 1
-            }
-            logger.info(f"Re-initialized batch add state for admin {user_id}.")
-
 
         if category_name not in get_categories():
             await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
             await callback_query.message.edit_text(
                 "Category not found. Please try again! 🧐",
-                # Changed: Encode category name for callback data in error case
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"batchselcat_{str_to_b64(cat)}")] for cat in get_categories()])
             )
-            logger.warning(f"Admin {user_id} tried to set invalid category for batch: '{category_name}'.")
             return
 
-        # Find the current highest sequence number for the selected category
         last_video_in_category = media_collection.find_one(
             {'category': category_name},
             sort=[('sequence_number', DESCENDING)]
@@ -3163,22 +3206,24 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
         if last_video_in_category and 'sequence_number' in last_video_in_category:
             next_sequence_for_batch = last_video_in_category['sequence_number'] + 1
 
-        batch_add_state[user_id]['batch_mode'] = True
-        batch_add_state[user_id]['current_category'] = category_name
-        batch_add_state[user_id]['count'] = 0
-        batch_add_state[user_id]['videos_this_session'] = 0 # Reset session count on new start
-        batch_add_state[user_id]['next_sequence'] = next_sequence_for_batch
+        batch_add_state[user_id] = {
+            'batch_mode': True,
+            'current_category': category_name,
+            'videos_this_session': 0,
+            'next_sequence': next_sequence_for_batch,
+            'video_queue': deque(),
+            'is_processing': False
+        }
 
         logger.info(f"Admin {user_id} starting batch add for category '{category_name}'. Next sequence will start from: {next_sequence_for_batch}")
 
         await callback_query.message.edit_text(
             f"✅ You are now in batch add mode for category: <b>{html.escape(category_name)}</b>! 🎉\n"
             f"The next video will be sequence <b>{next_sequence_for_batch}</b>.\n"
-            "Send me videos to add. Type /done when finished. ✅\n"
+            "Send me videos to add. They will be processed one by one. Type /done when finished. ✅\n"
             "You can use /category to change the current batch category without exiting batch mode. 🔄"
         )
         await callback_query.answer(f"Category set to '{html.escape(category_name)}'")
-        logger.info(f"Admin {user_id} successfully started batch add mode for category '{category_name}'.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to set batch category in callback: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
@@ -3190,39 +3235,23 @@ async def done_cmd(client: Client, message: Message):
     logger.info(f"Admin {user_id} exited batch add mode.")
     try:
         if user_id in batch_add_state and batch_add_state[user_id].get('batch_mode'):
-            total_added = batch_add_state[user_id].get('videos_this_session', 0)
+            state = batch_add_state[user_id]
+            total_added = state.get('videos_this_session', 0)
+            remaining_in_queue = len(state.get('video_queue', []))
             del batch_add_state[user_id]
-            await message.reply(f"Batch add mode disabled. Added <b>{total_added}</b> videos in this session. 🎉")
-            logger.info(f"Admin {user_id}: Batch add mode disabled. Total videos added: {total_added}.")
+            
+            reply_text = f"Batch add mode disabled. Added <b>{total_added}</b> videos in this session. 🎉"
+            if remaining_in_queue > 0:
+                reply_text += f"\n⚠️ <b>{remaining_in_queue}</b> videos were still in the queue and have not been processed."
+            
+            await message.reply(reply_text)
+            logger.info(f"Admin {user_id}: Batch add mode disabled. Total videos added: {total_added}. Remaining in queue: {remaining_in_queue}.")
         else:
             await message.reply("You are not currently in batch add mode. Use /batchadd to start. 🚀")
             logger.warning(f"Admin {user_id} tried to use /done but not in batch mode.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
-
-async def send_video_with_retry(client: Client, chat_id: int, video_file_id: str, caption: str, retries: int = 3) -> Message | None:
-    """Sends a video with a retry mechanism for FloodWait errors."""
-    last_exception = None
-    for attempt in range(retries):
-        try:
-            sent_message = await client.send_video(
-                chat_id=chat_id,
-                video=video_file_id,
-                caption=caption
-            )
-            return sent_message
-        except FloodWait as fw:
-            last_exception = fw
-            logger.warning(f"FloodWait encountered on attempt {attempt + 1}/{retries}. Waiting for {fw.value + 1} seconds.")
-            await asyncio.sleep(fw.value + 1)
-        except Exception as e:
-            last_exception = e
-            logger.error(f"An unexpected error occurred on attempt {attempt + 1}/{retries}: {e}", exc_info=True)
-            await asyncio.sleep(5)
-
-    logger.error(f"Failed to send video after {retries} attempts. Last error: {last_exception}")
-    return None
 
 @app.on_message(filters.video & filters.private & admin_only)
 async def handle_video_for_admin_modes(client: Client, message: Message):
@@ -3231,7 +3260,6 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
     """
     user_id = message.from_user.id
 
-    # --- Priority 1: Delete Video Mode ---
     if admin_delete_video_state.get(user_id):
         logger.info(f"Admin {user_id} sent a video for deletion.")
         try:
@@ -3255,7 +3283,6 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
             del admin_delete_video_state[user_id]
         return
 
-    # --- Priority 2: Batch Video Link Mode ---
     if user_id in admin_batch_link_state:
         logger.info(f"Admin {user_id} sent a video for batch link creation.")
         file_unique_id = message.video.file_unique_id
@@ -3267,66 +3294,18 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
             await message.reply("⚠️ This video is not in the database. Please add it first using /batchadd.")
         return
 
-    # --- Priority 3: Batch Add Mode ---
     if batch_add_state.get(user_id, {}).get('batch_mode'):
-        logger.info(f"Admin {user_id} sent a video for batch adding.")
-        try:
-            category = batch_add_state[user_id]['current_category']
-            if not category:
-                await message.reply_text("⚠️ Please set a category first using /category.")
-                return
+        logger.info(f"Admin {user_id} queued a video for batch adding.")
+        state = batch_add_state[user_id]
+        state['video_queue'].append(message)
+        await message.reply_text(f"✅ Video queued for category <b>{html.escape(state['current_category'])}</b>. Position in queue: {len(state['video_queue'])}.")
 
-            file_unique_id = message.video.file_unique_id
-            if media_collection.find_one({"file_unique_id": file_unique_id}):
-                await message.reply_text("⚠️ This video has already been added. Skipping.")
-                return
-
-            sent_video_message = await send_video_with_retry(
-                client=client,
-                chat_id=config.VIDEO_CHANNEL_ID,
-                video_file_id=message.video.file_id,
-                caption=f"Added by admin {user_id} for category {category}"
-            )
-
-            if not sent_video_message or not sent_video_message.video:
-                logger.error(f"Failed to send video from admin {user_id} to channel after multiple retries.")
-                await message.reply_text("❌ Failed to send this video to the channel after multiple retries. It has been skipped. Please try this specific video again later.")
-                return
-
-            await asyncio.sleep(2.0)
-
-            video_uuid = str(uuid.uuid4())
-            next_sequence_number = batch_add_state[user_id]['next_sequence']
-            video_data = {
-                "uuid": video_uuid, "file_id": sent_video_message.video.file_id,
-                "file_unique_id": file_unique_id, "category": category,
-                "size_bytes": message.video.file_size, "timestamp": get_current_time(),
-                "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
-                "banned": False, "custom_caption": message.caption
-            }
-            media_collection.insert_one(video_data)
-            batch_add_state[user_id]['next_sequence'] += 1
-            batch_add_state[user_id]['count'] += 1
-            batch_add_state[user_id]['videos_this_session'] += 1
-
-            await message.reply_text(
-                f"✅ File Added to <b>{html.escape(category)}</b>!\n"
-                f"📊 Size: {format_size(message.video.file_size)}\n"
-                f"🔢 Sequence: {next_sequence_number}\n"
-                f"Videos in this category batch: <b>{batch_add_state[user_id]['count']}</b>"
-            )
-
-            if batch_add_state[user_id]['videos_this_session'] > 0 and batch_add_state[user_id]['videos_this_session'] % BATCH_UPLOAD_LIMIT == 0:
-                await message.reply_text(
-                    f"✅ Batch of {BATCH_UPLOAD_LIMIT} videos added.\n"
-                    f"⏱️ Pausing for {BATCH_COOLDOWN_SECONDS} seconds to avoid rate limits..."
-                )
-                await asyncio.sleep(BATCH_COOLDOWN_SECONDS)
-                await message.reply_text("✅ Cooldown finished. You can continue sending videos.")
-
-        except Exception as e:
-            logger.error(f"Admin {user_id} error adding video: {e}", exc_info=True)
-            await message.reply("❌ Failed to add video. Please try again. This item has been skipped.")
+        if not state.get('is_processing'):
+            logger.info(f"Starting batch processing task for admin {user_id} as it was not running.")
+            state['is_processing'] = True
+            create_tracked_task(process_batch_queue(user_id, client))
+        else:
+            logger.info(f"Batch processing task for admin {user_id} is already running.")
         return
 
     logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
@@ -3408,7 +3387,6 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
 
         batch_add_state[user_id]['current_category'] = category_name
         batch_add_state[user_id]['next_sequence'] = next_sequence_for_batch # Update next_sequence for the new category
-        batch_add_state[user_id]['count'] = 0 # Reset count for the new category in this batch session
 
         await callback_query.message.edit_text(
             f"✅ Category set to '<b>{html.escape(category_name)}</b>' for batch adding. 🎉\n"
