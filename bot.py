@@ -49,7 +49,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
     FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
-    MENU_EXPIRY_MINUTES = 60
+    MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
 
 try:
@@ -1176,6 +1176,11 @@ def video_nav_keyboard(
     row_3_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
     buttons.append(row_3_buttons)
 
+    # --- Close Button ---
+    if is_batch or is_shared_link:
+        buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_menu")])
+
+
     return InlineKeyboardMarkup(buttons)
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
@@ -1445,12 +1450,19 @@ async def start_cmd(client: Client, message: Message):
                             await message.reply(result)
                         else:
                             video = result
-                            await send_and_replace_message(
+                            sent_success, _ = await send_and_replace_message(
                                 client, message.chat.id, message.id, "video", video_data=video,
                                 reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
                                 force_new_message=True
                             )
-                            save_history(user_id, video['uuid'], video['category'])
+                            if sent_success:
+                                save_history(user_id, video['uuid'], video['category'])
+                                await client.send_message(
+                                    message.chat.id,
+                                    "💡 To watch more content, click the '❌ Close' button on the video menu above, then use the main '🎞️ Get Video' button.",
+                                    reply_markup=await get_main_keyboard(user_id)
+                                )
+
                     elif deep_link_type == 'batch':
                         batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
                         if not batch_doc or not batch_doc.get('video_uuids'):
@@ -1460,11 +1472,17 @@ async def start_cmd(client: Client, message: Message):
                             if not video:
                                 await message.reply("The first video in this batch is unavailable. 😔")
                             else:
-                                await send_and_replace_message(
+                                sent_success, _ = await send_and_replace_message(
                                     client, message.chat.id, message.id, "video", video_data=video,
                                     reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
                                     force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
                                 )
+                                if sent_success:
+                                    await client.send_message(
+                                        message.chat.id,
+                                        "💡 To watch more content, click the '❌ Close' button on the video menu above, then use the main '🎞️ Get Video' button.",
+                                        reply_markup=await get_main_keyboard(user_id)
+                                    )
             finally:
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
@@ -1551,9 +1569,28 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
     """Handles navigation for single shared videos."""
     await callback_query.answer(
-        "No more videos in this link. Send /start and Click '🎞️ Get Video' to watch your favorite category.",
+        "No more videos in this link. Click on 'Close' and then 'Get Video' in the keyboard to watch your favorite category.",
         show_alert=True
     )
+
+@app.on_callback_query(filters.regex(r"^close_menu$"))
+async def close_menu_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Close' button on video menus."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} clicked the close menu button.")
+    try:
+        await callback_query.message.delete()
+        # Sending a new message with the main keyboard ensures it reappears.
+        await client.send_message(
+            chat_id,
+            "Menu closed. Use the buttons below to explore more content! 👇",
+            reply_markup=await get_main_keyboard(user_id)
+        )
+        await callback_query.answer()
+    except Exception as e:
+        logger.error(f"Error in close_menu_callback for user {user_id}: {e}", exc_info=True)
+        await callback_query.answer("Could not close the menu.", show_alert=True)
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client: Client, message: Message):
