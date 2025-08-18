@@ -1,3 +1,4 @@
+```python
 import os
 import asyncio
 import uuid
@@ -2265,6 +2266,7 @@ async def refresh_token_btn(client: Client, message: Message):
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
         # MODIFIED: Use a non-expiring UUID for the refresh link
         ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
+        # Base long token link (before shortening)
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
@@ -2319,6 +2321,7 @@ async def send_token_earning_options(client: Client, message: Message):
 
         # MODIFIED: Use a non-expiring UUID for the refresh link
         ad_code = str_to_b64(f"{user_id}:{str(uuid.uuid4())}")
+        # Base long token link (before shortening)
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
@@ -3806,20 +3809,20 @@ async def cleanup_expired_menus():
                     logger.info(f"Successfully deleted expired menu message {message_id} for user {user_id}.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start"
                     )
                 except MessageIdInvalid:
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start"
                     )
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
                     try:
                         await app.send_message(
                             chat_id,
-                            "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                            "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰\n\nIf you are not seeing this button, simply type /start"
                         )
                     except Exception as send_e:
                         logger.error(f"Failed to send expiry notification to user {user_id}: {send_e}")
@@ -3942,3 +3945,4 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
+```
