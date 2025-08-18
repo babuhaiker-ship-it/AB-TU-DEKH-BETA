@@ -39,7 +39,7 @@ class BotConfig:
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
-    NEW_USER_TOKENS = 1
+    NEW_USER_TOKENS = 2
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
@@ -49,7 +49,7 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
     FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
-    MENU_EXPIRY_MINUTES = 1
+    MENU_EXPIRY_MINUTES = 60
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
 
 try:
