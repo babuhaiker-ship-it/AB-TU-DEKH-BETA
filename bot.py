@@ -3958,15 +3958,49 @@ async def verify_and_cleanup_media():
         await asyncio.sleep(6 * 3600)
 
 async def health_check():
+    """
+    This is a special debug version of the health check.
+    It will print the exact values the running bot is using.
+    """
+    logger.info("--- STARTING ULTIMATE DEBUG HEALTH CHECK ---")
     try:
+        # Step 1: Log the configuration values the bot is actually using.
+        video_channel_id = config.VIDEO_CHANNEL_ID
+        force_sub_id_1 = config.FORCE_SUB_CHANNEL_ID
+        force_sub_id_2 = config.FORCE_SUB_CHANNEL_ID_2
+
+        logger.info(f"CONFIG CHECK: VIDEO_CHANNEL_ID is '{video_channel_id}' (Type: {type(video_channel_id)})")
+        logger.info(f"CONFIG CHECK: FORCE_SUB_CHANNEL_ID is '{force_sub_id_1}' (Type: {type(force_sub_id_1)})")
+        logger.info(f"CONFIG CHECK: FORCE_SUB_CHANNEL_ID_2 is '{force_sub_id_2}' (Type: {type(force_sub_id_2)})")
+
+        # Ensure they are integers for the API call
+        if not isinstance(video_channel_id, int):
+            logger.error("CRITICAL: VIDEO_CHANNEL_ID is not an integer. This is a major problem.")
+            return
+        
+        # Step 2: Get the bot's own identity.
         me = await app.get_me()
-        logger.info(f"Bot username: {me.username}")
-        member = await app.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
-        logger.info(f"Bot status in channel: {member.status}")
-        force_sub_member = await app.get_chat_member(config.FORCE_SUB_CHANNEL_ID, me.id)
-        logger.info(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
+        logger.info(f"Bot identity confirmed: @{me.username} (ID: {me.id})")
+
+        # Step 3: Explicitly check the bot's status in the video channel.
+        logger.info(f"Attempting to get chat member status in VIDEO_CHANNEL_ID ({video_channel_id})...")
+        member = await app.get_chat_member(video_channel_id, me.id)
+        
+        logger.info(f"SUCCESS: Bot status in video channel is: {member.status}")
+        if member.status != ChatMemberStatus.ADMINISTRATOR:
+            logger.warning("PROBLEM: Bot is not an ADMINISTRATOR in the video channel according to the API.")
+        
+        # Step 4: Check the force-sub channels as well.
+        logger.info(f"Attempting to get chat member status in FORCE_SUB_CHANNEL_ID ({force_sub_id_1})...")
+        force_sub_member = await app.get_chat_member(force_sub_id_1, me.id)
+        logger.info(f"SUCCESS: Bot status in force sub channel 1 is: {force_sub_member.status}")
+
     except Exception as e:
-        logger.error(f"Health check failed: {e}", exc_info=True)
+        logger.error(f"HEALTH CHECK FAILED: An error occurred.", exc_info=True)
+        # The exc_info=True will print the full error traceback, which is crucial.
+    
+    logger.info("--- HEALTH CHECK COMPLETE ---")
+
 
 async def main_bot_logic():
     """
@@ -4007,3 +4041,4 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
+```
