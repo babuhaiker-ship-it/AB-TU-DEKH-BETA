@@ -4038,5 +4038,5 @@ if __name__ == "__main__":
         logger.info("Bot stopped by KeyboardInterrupt (Ctrl+C). Shutting down...")
     except Exception as e:
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
-    finally:
+    finally
         logger.info("Application exiting.")
