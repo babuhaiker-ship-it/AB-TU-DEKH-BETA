@@ -4001,7 +4001,6 @@ async def health_check():
     
     logger.info("--- HEALTH CHECK COMPLETE ---")
 
-
 async def main_bot_logic():
     """
     Main function to start the bot and schedule background tasks.
@@ -4041,4 +4040,3 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
-```
