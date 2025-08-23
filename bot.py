@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, ChatJoinRequest
 )
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
 from pyrogram.enums import ChatMemberStatus
@@ -49,13 +49,15 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
     FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
+    JOIN_REQUEST_FSUB_CHANNEL_ID = -1002249958434 # Your private channel ID for join requests
+    JOIN_REQUEST_FSUB_LINK = "" # Will be populated at runtime
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
 
 try:
     config = BotConfig()
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK, config.FORCE_SUB_CHANNEL_ID_2, config.FORCE_SUB_CHANNEL_LINK_2]):
-        raise ValueError("One or more essential configuration variables are not set. Please check all config variables including both force sub channels.")
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME, config.FORCE_SUB_CHANNEL_ID, config.FORCE_SUB_CHANNEL_LINK, config.FORCE_SUB_CHANNEL_ID_2, config.FORCE_SUB_CHANNEL_LINK_2, config.JOIN_REQUEST_FSUB_CHANNEL_ID]):
+        raise ValueError("One or more essential configuration variables are not set. Please check all config variables including all force sub channels.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -74,6 +76,8 @@ categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
 video_batches_collection = db['video_batches'] # New collection for batch videos
+user_settings_collection = db['user_settings'] # For user-specific settings like jump size
+join_requests_collection = db['join_requests'] # For tracking approved join requests
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -81,12 +85,13 @@ tokens_collection.create_index([("user_id", ASCENDING)], unique=True)
 media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
-media_collection.create_index([("size_bytes", ASCENDING)])
 media_collection.create_index([("category", ASCENDING), ("sequence_number", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True) # Renamed to "used url link" conceptually
 video_batches_collection.create_index([("batch_id", ASCENDING)], unique=True)
+user_settings_collection.create_index([("user_id", ASCENDING)], unique=True)
+join_requests_collection.create_index([("user_id", ASCENDING), ("channel_id", ASCENDING)], unique=True)
 
 # --- Session Management with MongoDB ---
 def get_session_string():
@@ -194,6 +199,16 @@ async def check_membership(client: Client, user_id: int) -> bool:
     if is_admin(user_id):
         return True
 
+    # Check for approval in the join request channel from DB
+    is_approved_via_request = join_requests_collection.count_documents({
+        'user_id': user_id,
+        'channel_id': config.JOIN_REQUEST_FSUB_CHANNEL_ID
+    }) > 0
+
+    if not is_approved_via_request:
+        logger.info(f"User {user_id} has not been approved for the join request channel.")
+        return False
+
     async def check_channel(channel_id):
         try:
             member = await client.get_chat_member(channel_id, user_id)
@@ -205,16 +220,17 @@ async def check_membership(client: Client, user_id: int) -> bool:
             logger.error(f"Error checking membership for user {user_id} in channel {channel_id}: {e}", exc_info=True)
             return False
 
-    results = await asyncio.gather(
+    # Check the public channels
+    public_channel_results = await asyncio.gather(
         check_channel(config.FORCE_SUB_CHANNEL_ID),
         check_channel(config.FORCE_SUB_CHANNEL_ID_2)
     )
 
-    is_member_of_all = all(results)
+    is_member_of_all = all(public_channel_results) and is_approved_via_request
     if is_member_of_all:
         logger.info(f"User {user_id} is a member of all force sub channels.")
     else:
-        logger.info(f"User {user_id} is NOT a member of all force sub channels. Results: {results}")
+        logger.info(f"User {user_id} is NOT a member of all force sub channels. Public Results: {public_channel_results}, Join Request Approved: {is_approved_via_request}")
 
     return is_member_of_all
 
@@ -224,6 +240,7 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("Spicy Nyraa 🥵🔥", url=config.FORCE_SUB_CHANNEL_LINK)],
         [InlineKeyboardButton("Spicy Posting 🌶️", url=config.FORCE_SUB_CHANNEL_LINK_2)],
+        [InlineKeyboardButton("Request To Join 🔐", url=config.JOIN_REQUEST_FSUB_LINK)],
         [InlineKeyboardButton("🔄 Try Again", callback_data="check_join_status")]
     ])
 
@@ -237,7 +254,8 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
     await client.send_message(
         chat_id,
         text_to_send,
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
+        disable_web_page_preview=True
     )
 
 # --- Utility Functions ---
@@ -636,7 +654,7 @@ def get_previous_video_chronological(current_uuid: str, category: str) -> dict |
             sort=[('sequence_number', DESCENDING)]
         )
 
-def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str, jump_size: int = 1) -> dict | None:
     """
     Retrieves the next saved video for a user in a specific category,
     based on their bookmarking order. Loops to the first if at the end.
@@ -669,12 +687,12 @@ def get_next_saved_video_chronological(user_id: int, current_uuid: str, category
         logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning first saved video in category {category}.")
         return get_video_by_uuid(filtered_saved_videos[0]['uuid'])
 
-    next_index = (current_video_index + 1) % len(filtered_saved_videos)
+    next_index = (current_video_index + jump_size) % len(filtered_saved_videos)
     next_video_uuid = filtered_saved_videos[next_index]['uuid']
 
     return get_video_by_uuid(next_video_uuid)
 
-def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str, jump_size: int = 1) -> dict | None:
     """
     Retrieves the previous saved video for a user in a specific category,
     based on their bookmarking order. Loops to the last if at the beginning.
@@ -707,7 +725,7 @@ def get_previous_saved_video_chronological(user_id: int, current_uuid: str, cate
         logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning last saved video in category {category}.")
         return get_video_by_uuid(filtered_saved_videos[-1]['uuid'])
 
-    prev_index = (current_video_index - 1 + len(filtered_saved_videos)) % len(filtered_saved_videos)
+    prev_index = (current_video_index - jump_size + len(filtered_saved_videos)) % len(filtered_saved_videos)
     prev_video_uuid = filtered_saved_videos[prev_index]['uuid']
 
     return get_video_by_uuid(prev_video_uuid)
@@ -1165,6 +1183,9 @@ def video_nav_keyboard(
     elif not is_batch and not is_shared_link:
         row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
 
+    if not is_batch and not is_shared_link:
+        row_2_buttons.append(InlineKeyboardButton("⚙️ Settings", callback_data=f"jump_settings|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"))
+
     row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
     row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
@@ -1424,7 +1445,7 @@ async def start_cmd(client: Client, message: Message):
 
                 if deep_link_type == 'token_refresh':
                     success, msg = await handle_token_refresh(user_id, deep_link_data)
-                    await message.reply(msg)
+                    await message.reply(msg, reply_markup=await get_main_keyboard(user_id))
                     # After successful token refresh, check for pending command
                     user_doc = users_collection.find_one_and_update(
                         {'user_id': user_id},
@@ -1501,6 +1522,27 @@ async def start_cmd(client: Client, message: Message):
         logger.error(f"User {user_id} encountered an unexpected error in start command: {e}", exc_info=True)
         await handle_error(client, message, e)
 
+@app.on_chat_join_request()
+async def handle_join_request(client: Client, join_request: ChatJoinRequest):
+    """Handles join requests for the private force-subscribe channel."""
+    user_id = join_request.from_user.id
+    chat_id = join_request.chat.id
+
+    if chat_id == config.JOIN_REQUEST_FSUB_CHANNEL_ID:
+        logger.info(f"Received join request from user {user_id} for channel {chat_id}.")
+        try:
+            await client.approve_chat_join_request(chat_id, user_id)
+            # Store approval in DB to avoid repeated get_chat_member calls
+            join_requests_collection.update_one(
+                {'user_id': user_id, 'channel_id': chat_id},
+                {'$set': {'approved_at': datetime.utcnow()}},
+                upsert=True
+            )
+            await client.send_message(user_id, "✅ Your request to join our private channel has been approved! You can now use the bot. Send /start to begin.")
+            logger.info(f"Automatically approved join request for user {user_id}.")
+        except Exception as e:
+            logger.error(f"Failed to approve join request for user {user_id}: {e}", exc_info=True)
+
 @app.on_callback_query(filters.regex(r"^check_join_status$"))
 async def check_join_status_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Try Again' button after a user is prompted to join channels."""
@@ -1527,7 +1569,7 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
         mock_message.from_user = callback_query.from_user
         create_tracked_task(start_cmd(client, mock_message))
     else:
-        await callback_query.answer("⚠️ You still need to join all channels to proceed.", show_alert=True)
+        await callback_query.answer("Approval is automatic. Please wait 5 seconds and try again.", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^reload_pending_content$"))
 async def reload_pending_content_callback(client: Client, callback_query: CallbackQuery):
@@ -2040,12 +2082,15 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
                 return
 
+            user_settings = user_settings_collection.find_one({'user_id': user_id})
+            jump_size = user_settings.get('jump_size', 1) if user_settings else 1
+
             video = None
             if is_saved:
                 if action == "next":
-                    video = get_next_saved_video_chronological(user_id, current_uuid, category)
+                    video = get_next_saved_video_chronological(user_id, current_uuid, category, jump_size)
                 elif action == "prev":
-                    video = get_previous_saved_video_chronological(user_id, current_uuid, category)
+                    video = get_previous_saved_video_chronological(user_id, current_uuid, category, jump_size)
 
                 if not video:
                     await callback_query.answer("No more saved videos in this category. Looping to the beginning/end. ❤️", show_alert=True)
@@ -2057,10 +2102,26 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                     await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
                     return
 
-                if action == "next":
-                    video = get_next_video_chronological(current_uuid, category)
-                elif action == "prev":
-                    video = get_previous_video_chronological(current_uuid, category)
+                all_videos_in_category = list(media_collection.find({'category': category}, {'uuid': 1}).sort('sequence_number', ASCENDING))
+                if not all_videos_in_category:
+                    await callback_query.answer(f"No videos in this category. Try another! 😔", show_alert=True)
+                    return
+
+                all_uuids = [v['uuid'] for v in all_videos_in_category]
+                try:
+                    current_video_index = all_uuids.index(current_uuid)
+                except ValueError:
+                    logger.warning(f"Current video {current_uuid} not found in category list for navigation. Defaulting to first video.")
+                    video = get_video_by_uuid(all_uuids[0])
+                else:
+                    total_videos = len(all_uuids)
+                    if action == "next":
+                        new_index = (current_video_index + jump_size) % total_videos
+                    else: # prev
+                        new_index = (current_video_index - jump_size + total_videos) % total_videos
+                    
+                    next_video_uuid = all_uuids[new_index]
+                    video = get_video_by_uuid(next_video_uuid)
 
                 if not video: # This case should ideally not be hit with looping logic
                     await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
@@ -2948,6 +3009,77 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     set_active_video_message(user_id, sent_message.id, chat_id)
     await callback_query.answer()
 
+# --- Jump Size Settings Handlers ---
+@app.on_callback_query(filters.regex(r"^jump_settings\|(.+)\|(.+)\|(\d+)$"))
+async def jump_settings_callback(client: Client, callback_query: CallbackQuery):
+    """Displays the jump size settings menu."""
+    user_id = callback_query.from_user.id
+    _, video_uuid, category_encoded, is_saved_str = callback_query.data.split('|')
+
+    user_settings = user_settings_collection.find_one({'user_id': user_id})
+    current_jump_size = user_settings.get('jump_size', 1) if user_settings else 1
+
+    buttons = []
+    row = []
+    for size in [1, 5, 10, 25]:
+        text = f"[{size}]" if size == current_jump_size else str(size)
+        row.append(InlineKeyboardButton(text, callback_data=f"set_jump_{size}|{video_uuid}|{category_encoded}|{is_saved_str}"))
+    buttons.append(row)
+    buttons.append([InlineKeyboardButton("⬅️ Back to Video", callback_data=f"back_to_video|{video_uuid}|{category_encoded}|{is_saved_str}")])
+
+    await callback_query.message.edit_text(
+        "⚙️ <b>Navigation Settings</b>\n\n"
+        "Select how many videos to skip with each press of the 'Next' or 'Previous' buttons.",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    await callback_query.answer()
+
+@app.on_callback_query(filters.regex(r"^set_jump_(\d+)\|(.+)\|(.+)\|(\d+)$"))
+async def set_jump_size_callback(client: Client, callback_query: CallbackQuery):
+    """Sets the user's jump size preference."""
+    user_id = callback_query.from_user.id
+    parts = callback_query.data.split('|')
+    jump_size = int(parts[0].split('_')[2])
+    video_uuid, category_encoded, is_saved_str = parts[1], parts[2], parts[3]
+
+    user_settings_collection.update_one(
+        {'user_id': user_id},
+        {'$set': {'jump_size': jump_size}},
+        upsert=True
+    )
+    await callback_query.answer(f"Jump size set to {jump_size}!", show_alert=False)
+
+    # Refresh the settings menu to show the new selection
+    mock_callback_query = callback_query
+    mock_callback_query.data = f"jump_settings|{video_uuid}|{category_encoded}|{is_saved_str}"
+    await jump_settings_callback(client, mock_callback_query)
+
+@app.on_callback_query(filters.regex(r"^back_to_video\|(.+)\|(.+)\|(\d+)$"))
+async def back_to_video_callback(client: Client, callback_query: CallbackQuery):
+    """Returns the user from the settings menu back to the video they were watching."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    _, video_uuid, category_encoded, is_saved_str = callback_query.data.split('|')
+    category = b64_to_str(category_encoded)
+    is_saved = bool(int(is_saved_str))
+
+    video = get_video_by_uuid(video_uuid)
+    if not video:
+        await callback_query.answer("The video you were watching is no longer available.", show_alert=True)
+        await callback_query.message.delete()
+        return
+
+    await send_and_replace_message(
+        client,
+        chat_id,
+        message_id_to_edit_or_delete=callback_query.message.id,
+        new_message_type="video",
+        video_data=video,
+        reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
+        force_new_message=True # Force new message to replace the text menu
+    )
+    await callback_query.answer()
+
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
@@ -3161,14 +3293,6 @@ async def addtoken_cmd(client: Client, message: Message):
 
 # --- Batch Add Videos ---
 
-def format_size(size_bytes: int) -> str:
-    """Converts bytes to a human-readable format (e.g., KB, MB, GB)."""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_bytes < 1024:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.2f} PB"
-
 async def process_batch_queue(user_id: int, client: Client):
     """Processes a queue of videos for batch adding, handling rate limits."""
     state = batch_add_state.get(user_id)
@@ -3201,7 +3325,7 @@ async def process_batch_queue(user_id: int, client: Client):
             video_data = {
                 "uuid": video_uuid, "file_id": sent_video_message.video.file_id,
                 "file_unique_id": file_unique_id, "category": category,
-                "size_bytes": message.video.file_size, "timestamp": get_current_time(),
+                "timestamp": get_current_time(),
                 "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
                 "banned": False, "custom_caption": message.caption
             }
@@ -3211,7 +3335,6 @@ async def process_batch_queue(user_id: int, client: Client):
 
             await message.reply_text(
                 f"✅ File Added to <b>{html.escape(category)}</b>!\n"
-                f"📊 Size: {format_size(message.video.file_size)}\n"
                 f"🔢 Sequence: {next_sequence_number}\n"
                 f"Videos processed this session: <b>{state['videos_this_session']}</b>"
             )
@@ -3968,6 +4091,20 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}", exc_info=True)
 
+async def generate_and_store_join_request_link():
+    """Generates a join request invite link for the private channel and stores it in the config."""
+    try:
+        invite_link = await app.create_chat_invite_link(
+            config.JOIN_REQUEST_FSUB_CHANNEL_ID,
+            creates_join_request=True
+        )
+        config.JOIN_REQUEST_FSUB_LINK = invite_link.invite_link
+        logger.info(f"Successfully created and stored join request link: {config.JOIN_REQUEST_FSUB_LINK}")
+    except Exception as e:
+        logger.critical(f"Could not create invite link for join request channel {config.JOIN_REQUEST_FSUB_CHANNEL_ID}. Bot may not be admin or lacks permissions. Error: {e}", exc_info=True)
+        # Fallback or shutdown logic might be needed here
+        raise
+
 async def main_bot_logic():
     """
     Main function to start the bot and schedule background tasks.
@@ -3977,6 +4114,7 @@ async def main_bot_logic():
 
     await app.start()
     await load_admins_from_db()
+    await generate_and_store_join_request_link()
 
     # If this is the first run (in-memory session), export and save the session string
     if not SESSION_STRING:
