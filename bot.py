@@ -81,7 +81,6 @@ tokens_collection.create_index([("user_id", ASCENDING)], unique=True)
 media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
-media_collection.create_index([("size_bytes", ASCENDING)])
 media_collection.create_index([("category", ASCENDING), ("sequence_number", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
@@ -3161,14 +3160,6 @@ async def addtoken_cmd(client: Client, message: Message):
 
 # --- Batch Add Videos ---
 
-def format_size(size_bytes: int) -> str:
-    """Converts bytes to a human-readable format (e.g., KB, MB, GB)."""
-    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_bytes < 1024:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.2f} PB"
-
 async def process_batch_queue(user_id: int, client: Client):
     """Processes a queue of videos for batch adding, handling rate limits."""
     state = batch_add_state.get(user_id)
@@ -3201,7 +3192,7 @@ async def process_batch_queue(user_id: int, client: Client):
             video_data = {
                 "uuid": video_uuid, "file_id": sent_video_message.video.file_id,
                 "file_unique_id": file_unique_id, "category": category,
-                "size_bytes": message.video.file_size, "timestamp": get_current_time(),
+                "timestamp": get_current_time(),
                 "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
                 "banned": False, "custom_caption": message.caption
             }
@@ -3211,7 +3202,6 @@ async def process_batch_queue(user_id: int, client: Client):
 
             await message.reply_text(
                 f"✅ File Added to <b>{html.escape(category)}</b>!\n"
-                f"📊 Size: {format_size(message.video.file_size)}\n"
                 f"🔢 Sequence: {next_sequence_number}\n"
                 f"Videos processed this session: <b>{state['videos_this_session']}</b>"
             )
