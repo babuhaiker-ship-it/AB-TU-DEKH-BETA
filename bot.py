@@ -3158,6 +3158,64 @@ async def addtoken_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} error adding tokens/premium access: {e}", exc_info=True)
         await message.reply("❌ Failed to add premium access. Please try again. 🐛")
 
+@app.on_message(filters.command("removetoken") & filters.private & admin_only)
+async def removetoken_cmd(client: Client, message: Message):
+    """Admin command to remove all tokens/premium access from a user."""
+    admin_user_id = message.from_user.id
+    logger.info(f"Admin {admin_user_id} requested to remove tokens.")
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            logger.warning(f"Admin {admin_user_id} used removetoken with insufficient arguments: {message.text}")
+            await message.reply("Usage: <code>/removetoken &lt;user_id&gt;</code> 📝")
+            return
+
+        target_user_id = int(args[1])
+
+        if target_user_id <= 0:
+            logger.warning(f"Admin {admin_user_id} provided invalid target user ID: {target_user_id}.")
+            await message.reply("User ID must be a positive integer. 🔢")
+            return
+        
+        if is_owner(target_user_id):
+            await message.reply("❌ You cannot remove the owner's access.")
+            return
+
+        user_doc = users_collection.find_one({'user_id': target_user_id})
+        if not user_doc:
+            logger.warning(f"Admin {admin_user_id} attempted to remove tokens from non-existent user {target_user_id}.")
+            await message.reply("User not found in database. 🧐")
+            return
+
+        # Remove all tokens for the user
+        result = tokens_collection.delete_one({'user_id': target_user_id})
+
+        if result.deleted_count > 0:
+            # Update the user's premium status in the users collection
+            users_collection.update_one(
+                {'user_id': target_user_id},
+                {'$set': {'last_premium_check_status': False}}
+            )
+            logger.info(f"Admin {admin_user_id} removed all tokens for user {target_user_id}.")
+            await message.reply(f"✅ All tokens and premium access for user <b>{target_user_id}</b> have been revoked.")
+
+            try:
+                await client.send_message(target_user_id, "⚠️ Your premium access and all active tokens have been revoked by an administrator.")
+            except (UserIsBlocked, ChatInvalid):
+                logger.warning(f"Could not notify user {target_user_id} about token removal; user blocked or chat invalid.")
+            except Exception as notify_e:
+                logger.error(f"Failed to notify user {target_user_id} about token removal: {notify_e}")
+        else:
+            await message.reply(f"User <b>{target_user_id}</b> had no active tokens to remove.")
+            logger.info(f"Admin {admin_user_id} attempted to remove tokens, but user {target_user_id} had none.")
+
+    except ValueError:
+        logger.warning(f"Admin {admin_user_id} provided invalid input for removetoken: {message.text}")
+        await message.reply("User ID must be a valid integer. 🔢")
+    except Exception as e:
+        logger.error(f"Admin {admin_user_id} error removing tokens: {e}", exc_info=True)
+        await message.reply("❌ Failed to remove tokens. Please try again. 🐛")
+
 # --- Batch Add Videos ---
 
 async def process_batch_queue(user_id: int, client: Client):
