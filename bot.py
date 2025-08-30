@@ -1,4 +1,3 @@
-```python
 import os
 import asyncio
 import uuid
@@ -4134,4 +4133,3 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
-```
