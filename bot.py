@@ -1,3 +1,4 @@
+```python
 import os
 import asyncio
 import uuid
@@ -51,6 +52,10 @@ class BotConfig:
     FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
+    # --- New Feature Configuration ---
+    FREE_VIDEOS_LIMIT = 2  # Number of free videos a user can watch from batch links without a token
+    FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free video limit resets
+    TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
 
 try:
     config = BotConfig()
@@ -361,6 +366,63 @@ def user_has_token(user_id: int) -> bool:
         if token.get('expires_at') and token['expires_at'] > now:
             return True
     return False
+
+# --- Free Video Limit Management ---
+async def send_limit_reached_message(client: Client, chat_id: int):
+    """Sends a message informing the user their free limit is reached."""
+    user_id = chat_id  # Assuming private chat
+    ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+    long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+    ad_url = await get_shortener_config_and_shorten_url(long_url)
+
+    text = (
+        f"⌛️ <b>Daily Free Limit Reached!</b> ⌛️\n\n"
+        f"You have watched your {config.FREE_VIDEOS_LIMIT} free videos for today. To continue watching, please choose one of the options below.\n\n"
+        f"Each token gives you <b>{config.TOKEN_ACCESS_HOURS} hours</b> of unlimited access! ✨"
+    )
+    reply_markup = generate_token_earning_keyboard(ad_url)
+    await client.send_message(chat_id, text, reply_markup=reply_markup)
+
+async def check_and_update_free_usage(user_id: int) -> bool:
+    """
+    Checks if a user can watch a video based on their token, premium, or free status.
+    Returns True if access is granted, False otherwise. Increments free usage count if used.
+    """
+    if is_premium_user(user_id) or user_has_token(user_id):
+        return True
+
+    now = datetime.utcnow()
+    user_doc = users_collection.find_one({'user_id': user_id})
+    if not user_doc:
+        # This case should be rare as users are created on /start
+        users_collection.insert_one({'user_id': user_id, 'free_usage': {'count': 0, 'reset_at': now + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}})
+        user_doc = users_collection.find_one({'user_id': user_id})
+
+    free_usage = user_doc.get('free_usage', {})
+    count = free_usage.get('count', 0)
+    reset_at = free_usage.get('reset_at')
+
+    if not reset_at or now >= reset_at:
+        count = 0
+        new_reset_at = now + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'free_usage': {'count': 0, 'reset_at': new_reset_at}}},
+            upsert=True
+        )
+        logger.info(f"Reset free video limit for user {user_id}. Next reset at {new_reset_at}.")
+
+    if count < config.FREE_VIDEOS_LIMIT:
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$inc': {'free_usage.count': 1}},
+            upsert=True
+        )
+        logger.info(f"User {user_id} used a free view. Count is now {count + 1}/{config.FREE_VIDEOS_LIMIT}.")
+        return True
+    else:
+        logger.warning(f"User {user_id} has reached their free video limit.")
+        return False
 
 # --- Premium Status Check and Notification ---
 async def check_premium_status_and_notify(client: Client, user_id: int):
@@ -1175,10 +1237,9 @@ def video_nav_keyboard(
     row_3_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
     buttons.append(row_3_buttons)
 
-    # --- Close Button ---
+    # --- Watch More Button (Replaces Close) ---
     if is_batch or is_shared_link:
-        buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_menu")])
-
+        buttons.append([InlineKeyboardButton("👀 Watch More", callback_data="watch_more")])
 
     return InlineKeyboardMarkup(buttons)
 
@@ -1291,7 +1352,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         if added_token:
             refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
             logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
-            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts 24 hours. Enjoy! 🍿"
+            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {config.TOKEN_ACCESS_HOURS} hours. Enjoy! 🍿"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
     except Exception as e:
@@ -1368,7 +1429,8 @@ async def start_cmd(client: Client, message: Message):
                 'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                 'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
-                'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None
+                'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None,
+                'free_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
@@ -1437,51 +1499,53 @@ async def start_cmd(client: Client, message: Message):
                         mock_message.text = f"/start {pending_command}"
                         create_tracked_task(start_cmd(client, mock_message))
 
-                elif deep_link_type in ['video_share', 'batch']:
+                elif deep_link_type == 'video_share':
                     if not user_has_token(user_id):
                         users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
                         await send_token_earning_options(client, message, is_pending_content=True)
                         return
+                    success, result = await handle_shared_video(client, user_id, deep_link_data)
+                    if not success:
+                        await message.reply(result)
+                    else:
+                        video = result
+                        sent_success, _ = await send_and_replace_message(
+                            client, message.chat.id, message.id, "video", video_data=video,
+                            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
+                            force_new_message=True
+                        )
+                        if sent_success:
+                            save_history(user_id, video['uuid'], video['category'])
+                            await client.send_message(
+                                message.chat.id,
+                                "💡 To watch more content, click the '👀 Watch More' button on the video menu above, then use the main '🎞️ Get Video' button.",
+                                reply_markup=await get_main_keyboard(user_id)
+                            )
 
-                    if deep_link_type == 'video_share':
-                        success, result = await handle_shared_video(client, user_id, deep_link_data)
-                        if not success:
-                            await message.reply(result)
+                elif deep_link_type == 'batch':
+                    if not await check_and_update_free_usage(user_id):
+                        await send_limit_reached_message(client, message.chat.id)
+                        return
+
+                    batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
+                    if not batch_doc or not batch_doc.get('video_uuids'):
+                        await message.reply("This batch link is invalid or has expired. 😔")
+                    else:
+                        video = get_video_by_uuid(batch_doc['video_uuids'][0])
+                        if not video:
+                            await message.reply("The first video in this batch is unavailable. 😔")
                         else:
-                            video = result
                             sent_success, _ = await send_and_replace_message(
                                 client, message.chat.id, message.id, "video", video_data=video,
-                                reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
-                                force_new_message=True
+                                reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
+                                force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
                             )
                             if sent_success:
-                                save_history(user_id, video['uuid'], video['category'])
                                 await client.send_message(
                                     message.chat.id,
-                                    "💡 To watch more content, click the '❌ Close' button on the video menu above, then use the main '🎞️ Get Video' button.",
+                                    "💡 To watch more content, click the '👀 Watch More' button on the video menu above, then use the main '🎞️ Get Video' button.",
                                     reply_markup=await get_main_keyboard(user_id)
                                 )
-
-                    elif deep_link_type == 'batch':
-                        batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
-                        if not batch_doc or not batch_doc.get('video_uuids'):
-                            await message.reply("This batch link is invalid or has expired. 😔")
-                        else:
-                            video = get_video_by_uuid(batch_doc['video_uuids'][0])
-                            if not video:
-                                await message.reply("The first video in this batch is unavailable. 😔")
-                            else:
-                                sent_success, _ = await send_and_replace_message(
-                                    client, message.chat.id, message.id, "video", video_data=video,
-                                    reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
-                                    force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
-                                )
-                                if sent_success:
-                                    await client.send_message(
-                                        message.chat.id,
-                                        "💡 To watch more content, click the '❌ Close' button on the video menu above, then use the main '🎞️ Get Video' button.",
-                                        reply_markup=await get_main_keyboard(user_id)
-                                    )
             finally:
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
@@ -1568,28 +1632,37 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
     """Handles navigation for single shared videos."""
     await callback_query.answer(
-        "No more videos in this link. Click on 'Close' and then 'Get Video' in the keyboard to watch your favorite category.",
+        "No more videos in this link. Click on 'Watch More' to explore other categories.",
         show_alert=True
     )
 
-@app.on_callback_query(filters.regex(r"^close_menu$"))
-async def close_menu_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the 'Close' button on video menus."""
+@app.on_callback_query(filters.regex(r"^watch_more$"))
+async def watch_more_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Watch More' button to show the main category menu."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
-    logger.info(f"User {user_id} clicked the close menu button.")
+    logger.info(f"User {user_id} clicked 'Watch More'.")
+
     try:
         await callback_query.message.delete()
-        # Sending a new message with the main keyboard ensures it reappears.
-        await client.send_message(
+        clear_active_video_message(user_id)
+
+        cats_keyboard = category_keyboard()
+        if cats_keyboard.inline_keyboard[0][0].callback_data == "no_cat":
+            await client.send_message(chat_id, "😔 No categories are available right now. Please check back later!")
+            return
+
+        sent_message = await client.send_message(
             chat_id,
-            "Menu closed. Use the buttons below to explore more content! 👇",
-            reply_markup=await get_main_keyboard(user_id)
+            "🎬 <b>Choose a Category to explore more content:</b>",
+            reply_markup=cats_keyboard
         )
+        set_active_video_message(user_id, sent_message.id, chat_id)
         await callback_query.answer()
+
     except Exception as e:
-        logger.error(f"Error in close_menu_callback for user {user_id}: {e}", exc_info=True)
-        await callback_query.answer("Could not close the menu.", show_alert=True)
+        logger.error(f"Error in watch_more_callback for user {user_id}: {e}", exc_info=True)
+        await callback_query.answer("An error occurred. Please try again!", show_alert=True)
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client: Client, message: Message):
@@ -2099,6 +2172,12 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' for batch video menus."""
     user_id = callback_query.from_user.id
+    
+    if not await check_and_update_free_usage(user_id):
+        await callback_query.answer("Your free limit is reached!", show_alert=True)
+        await send_limit_reached_message(client, callback_query.message.chat.id)
+        return
+
     if user_id in processing_navigation_lock:
         await callback_query.answer("don't spam again", show_alert=True)
         return
@@ -2361,7 +2440,7 @@ async def refresh_token_btn(client: Client, message: Message):
         user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
         await message.reply_text(
             f"💡 <b>Information</b>\nHere's how to get your token! 🚀\n\n"
-            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> 24 hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
+            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> {config.TOKEN_ACCESS_HOURS} hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for {config.TOKEN_ACCESS_HOURS} hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
             disable_web_page_preview = disable_preview,
             reply_markup=generate_token_earning_keyboard(ad_url)
         )
@@ -4055,3 +4134,4 @@ if __name__ == "__main__":
         logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
     finally:
         logger.info("Application exiting.")
+```
