@@ -8,7 +8,7 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired, UserNotParticipant
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
 from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
@@ -137,7 +137,7 @@ admin_delete_video_state = defaultdict(bool)
 admin_rename_category_state = defaultdict(dict)
 admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
 owner_add_admin_state = defaultdict(dict) # State for /addadmin
-owner_delete_user_state = defaultdict(dict) # State for /deleteuser
+admin_delete_user_state = defaultdict(dict) # State for /deleteuser
 batch_add_state = {} # State for /batchadd
 
 # --- Message Tracking and Immediate Deletion ---
@@ -202,8 +202,6 @@ async def check_membership(client: Client, user_id: int) -> bool:
         try:
             member = await client.get_chat_member(channel_id, user_id)
             return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-        except UserNotParticipant:
-            return False
         except PeerIdInvalid:
             logger.error(f"Force subscribe channel ID {channel_id} is invalid. Please check config.")
             return True # Allow access if a channel is misconfigured
@@ -1153,7 +1151,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton("🎞️ Get Video"), KeyboardButton("👤 Profile")],
         [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
-        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos"), KeyboardButton("⬅️ Back")]
+        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")]
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -1206,56 +1204,43 @@ def video_nav_keyboard(
 
     # --- Navigation Row (Previous/Next) ---
     if is_shared_link:
-        # For single shared links, prev/next might not make sense, but we can guide them
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data="shared_nav"),
             InlineKeyboardButton("➡️ Next", callback_data="shared_nav")
         ])
-        # Action Row for shared/batch
-        buttons.append([
-            InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"),
-            InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
-            InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")
-        ])
-        # Watch More Row
-        buttons.append([InlineKeyboardButton("Watch More 🔥", callback_data="watch_more")])
-
     elif is_batch:
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_batch|{batch_id}|{batch_index}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
         ])
-        # Action Row for shared/batch
-        buttons.append([
-            InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"),
-            InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
-            InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")
-        ])
-        # Watch More Row
-        buttons.append([InlineKeyboardButton("Watch More 🔥", callback_data="watch_more")])
-
-    else: # Regular navigation
+    else:
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
         ])
 
-        # --- Action Row (Change Category/Share/Download) ---
-        row_2_buttons = []
-        if is_saved:
-            row_2_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
-        else:
-            row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
+    # --- Action Row (Bookmark/Share/Download) ---
+    row_2_buttons = []
+    if is_saved:
+        # For saved videos, the "Bookmark" button is replaced by "Remove"
+        row_2_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
+    else:
+        row_2_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
 
-        row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
-        row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
-        buttons.append(row_2_buttons)
+    row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
+    row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
+    buttons.append(row_2_buttons)
 
-        # --- Bookmark/Remove Row ---
-        row_3_buttons = []
-        if is_saved:
-            row_3_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
-        row_3_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
+    # --- Third Row (Context-dependent) ---
+    row_3_buttons = []
+    if is_batch or is_shared_link:
+        row_3_buttons.append(InlineKeyboardButton("👀 Watch More", callback_data="watch_more"))
+    elif is_saved:
+        row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
+    else: # Regular navigation
+        row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
+
+    if row_3_buttons:
         buttons.append(row_3_buttons)
 
     return InlineKeyboardMarkup(buttons)
@@ -1784,10 +1769,13 @@ async def profile_cmd(client: Client, message: Message):
         logger.error(f"User {user_id} failed to send profile: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-async def send_category_selection_message(client: Client, message: Message):
-    """Helper function to check access and show the category menu."""
+
+@app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
+async def get_video(client: Client, message: Message):
+    """Handles the 'Get Video' button request."""
     user_id = message.from_user.id
     chat_id = message.chat.id
+    logger.info(f"User {user_id} requested Get Video.")
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -1797,7 +1785,7 @@ async def send_category_selection_message(client: Client, message: Message):
 
     if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
-        logger.warning(f"User {user_id} hit rate limit when trying to view categories.")
+        logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
     wait_msg = await message.reply("Just a moment, checking your access...")
@@ -1808,35 +1796,38 @@ async def send_category_selection_message(client: Client, message: Message):
         return
     await wait_msg.delete()
 
+    message_id_to_edit_or_delete = message.id
+
     cats = get_categories()
     if not cats:
+        if message_id_to_edit_or_delete:
+            try:
+                await client.delete_messages(chat_id, message_id_to_edit_or_delete)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete old message {message_id_to_edit_or_delete} for user {user_id}: {e}")
+
         await message.reply("😔 No categories available. Please ask an admin to add some! 🛠️")
         logger.info(f"No categories found for user {user_id}.")
         return
 
     logger.info(f"User {user_id} prompted to choose category.")
+
     temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
-    await send_and_replace_message(
+
+    sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
         message_id_to_edit_or_delete=temp_msg.id,
         new_message_type="text",
         text_content="🎬 <b>Choose a Category:</b>",
-        reply_markup=category_keyboard(),
-        force_new_message=True
+        reply_markup=category_keyboard()
     )
 
-@app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
-async def get_video(client: Client, message: Message):
-    """Handles the 'Get Video' button request."""
-    logger.info(f"User {message.from_user.id} requested Get Video.")
-    await send_category_selection_message(client, message)
-
-@app.on_message(filters.regex("^⬅️ Back$") & filters.private)
-async def back_btn(client: Client, message: Message):
-    """Handles the 'Back' button request to show categories."""
-    logger.info(f"User {message.from_user.id} clicked Back button.")
-    await send_category_selection_message(client, message)
+    if not sent_success:
+        await message.reply(sent_message_or_error)
+        logger.error(f"User {user_id} failed to send category selection message: {sent_message_or_error}")
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
@@ -3657,12 +3648,6 @@ async def add_admin_cmd(client: Client, message: Message):
     owner_add_admin_state[message.from_user.id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to add as an admin. 📝")
 
-@app.on_message(filters.command("deleteuser") & filters.private & owner_only)
-async def delete_user_cmd(client: Client, message: Message):
-    """Owner command to delete a user from the database."""
-    owner_delete_user_state[message.from_user.id] = {'step': 'await_user_id'}
-    await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete. 🗑️")
-
 @app.on_message(filters.command("removeadmin") & filters.private & owner_only)
 async def remove_admin_cmd(client: Client, message: Message):
     """Owner command to remove an admin."""
@@ -3682,6 +3667,14 @@ async def remove_admin_cmd(client: Client, message: Message):
             buttons.append([InlineKeyboardButton(f"ID: {admin_id}", callback_data=f"rem_admin_{admin_id}")])
 
     await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_message(filters.command("deleteuser") & filters.private & admin_only)
+async def deleteuser_cmd(client: Client, message: Message):
+    """Admin command to delete a user from the database."""
+    admin_user_id = message.from_user.id
+    logger.info(f"Admin {admin_user_id} initiated /deleteuser command.")
+    admin_delete_user_state[admin_user_id] = {'step': 'await_user_id'}
+    await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete from the database. 📝\n\n⚠️ This action is irreversible and will delete all their data, including tokens and history.")
 
 @app.on_callback_query(filters.regex(r"^rem_admin_(\d+)$"))
 async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
@@ -3806,24 +3799,35 @@ async def handle_text_input(client: Client, message: Message):
             finally:
                 del owner_add_admin_state[user_id]
             return
-        
-        if user_id in owner_delete_user_state and owner_delete_user_state[user_id].get('step') == 'await_user_id':
+
+    # --- Admin-only state handling ---
+    if is_admin(user_id):
+        if user_id in admin_delete_user_state and admin_delete_user_state[user_id].get('step') == 'await_user_id':
             try:
                 user_id_to_delete = int(message.text.strip())
+                
                 if is_owner(user_id_to_delete):
-                    await message.reply("❌ You cannot delete the owner.")
+                    await message.reply("❌ You cannot delete the bot owner.")
+                    return
+                
+                if is_admin(user_id_to_delete):
+                    await message.reply("❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin.")
                     return
 
-                # Perform deletion from all relevant collections
-                user_res = users_collection.delete_one({'user_id': user_id_to_delete})
-                token_res = tokens_collection.delete_one({'user_id': user_id_to_delete})
-                history_res = history_collection.delete_one({'user_id': user_id_to_delete})
+                # Perform deletions
+                user_deleted = users_collection.delete_one({'user_id': user_id_to_delete})
+                tokens_deleted = tokens_collection.delete_one({'user_id': user_id_to_delete})
+                history_deleted = history_collection.delete_one({'user_id': user_id_to_delete})
 
-                if user_res.deleted_count > 0:
-                    await message.reply(f"✅ Successfully deleted all data for user ID {user_id_to_delete}.")
-                    logger.info(f"Owner {user_id} deleted user {user_id_to_delete}. Users: {user_res.deleted_count}, Tokens: {token_res.deleted_count}, History: {history_res.deleted_count}")
+                if user_deleted.deleted_count > 0:
+                    await message.reply(f"✅ Successfully deleted user {user_id_to_delete} from the database.\n"
+                                      f"- User record deleted: {user_deleted.deleted_count > 0}\n"
+                                      f"- Tokens record deleted: {tokens_deleted.deleted_count > 0}\n"
+                                      f"- History record deleted: {history_deleted.deleted_count > 0}")
+                    logger.info(f"Admin {user_id} successfully deleted user {user_id_to_delete}.")
                 else:
-                    await message.reply(f"🤷 User ID {user_id_to_delete} not found in the database.")
+                    await message.reply(f"🤷 User {user_id_to_delete} not found in the database.")
+                    logger.warning(f"Admin {user_id} tried to delete non-existent user {user_id_to_delete}.")
 
             except ValueError:
                 await message.reply("Invalid User ID. Please send a valid integer ID.")
@@ -3831,11 +3835,9 @@ async def handle_text_input(client: Client, message: Message):
                 await message.reply(f"An error occurred: {e}")
                 logger.error(f"Error in /deleteuser flow: {e}")
             finally:
-                del owner_delete_user_state[user_id]
+                del admin_delete_user_state[user_id]
             return
 
-    # --- Admin-only state handling ---
-    if is_admin(user_id):
         if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
             template_url = message.text.strip()
 
