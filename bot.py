@@ -139,7 +139,6 @@ admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
 owner_add_admin_state = defaultdict(dict) # State for /addadmin
 admin_delete_user_state = defaultdict(dict) # State for /deleteuser
 batch_add_state = {} # State for /batchadd
-admin_info_state = defaultdict(bool) # State for /info
 
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
@@ -642,49 +641,138 @@ def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dic
 
     return video, current_index + 1, total_videos
 
-def get_jumped_video(current_uuid: str, category: str, user_id: int, is_saved: bool, direction: str) -> dict | None:
+def get_next_video_chronological(current_uuid: str, category: str) -> dict | None:
     """
-    Retrieves a video after jumping forward or backward based on the user's jump_value.
+    Retrieves the video immediately after the current video in the same category,
+    based on sequence_number. Loops to the first video if at the end.
+    """
+    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
+    if not current_video or 'sequence_number' not in current_video:
+        logger.warning(f"Current video {current_uuid} not found or missing sequence_number for next chronological lookup. Attempting to get first video.")
+        return get_first_video_by_sequence_number(category)
+
+    current_sequence = current_video['sequence_number']
+
+    # Find the next video with a sequence number strictly greater than the current one
+    next_video = media_collection.find_one(
+        {'category': category, 'sequence_number': {'$gt': current_sequence}},
+        sort=[('sequence_number', ASCENDING)]
+    )
+
+    if next_video:
+        logger.debug(f"Found next video {next_video['uuid']} with sequence {next_video['sequence_number']} after {current_sequence}.")
+        return next_video
+    else:
+        logger.info(f"End of videos reached for category '{category}'. Looping to first video.")
+        return get_first_video_by_sequence_number(category)
+
+def get_previous_video_chronological(current_uuid: str, category: str) -> dict | None:
+    """
+    Retrieves the video immediately before the current video in the same category,
+    based on sequence_number. Loops to the last video if at the beginning.
+    """
+    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
+    if not current_video or 'sequence_number' not in current_video:
+        logger.warning(f"Current video {current_uuid} not found or missing sequence_number for previous chronological lookup. Attempting to get last video.")
+        return media_collection.find_one(
+            {'category': category},
+            sort=[('sequence_number', DESCENDING)]
+        )
+
+    current_sequence = current_video['sequence_number']
+
+    # Find the previous video with a sequence number strictly less than the current one
+    prev_video = media_collection.find_one(
+        {'category': category, 'sequence_number': {'$lt': current_sequence}},
+        sort=[('sequence_number', DESCENDING)] # Sort descending to get the largest sequence_number less than current
+    )
+
+    if prev_video:
+        logger.debug(f"Found previous video {prev_video['uuid']} with sequence {prev_video['sequence_number']} before {current_sequence}.")
+        return prev_video
+    else:
+        logger.info(f"Beginning of videos reached for category '{category}'. Looping to last video.")
+        return media_collection.find_one(
+            {'category': category},
+            sort=[('sequence_number', DESCENDING)]
+        )
+
+def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+    """
+    Retrieves the next saved video for a user in a specific category,
+    based on their bookmarking order. Loops to the first if at the end.
     """
     user_doc = users_collection.find_one({'user_id': user_id})
-    jump_value = user_doc.get('jump_value', 1)
-    
-    if direction == 'next':
-        jump_offset = jump_value
-    else: # 'prev'
-        jump_offset = -jump_value
-
-    video_list = []
-    if is_saved:
-        bookmarked_videos = user_doc.get('bookmarked_videos', [])
-        filtered_saved_videos = []
-        for bookmark in bookmarked_videos:
-            video_data = get_video_by_uuid(bookmark['uuid'])
-            if video_data and video_data.get('category') == category:
-                filtered_saved_videos.append(bookmark)
-        filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
-        video_list = [v['uuid'] for v in filtered_saved_videos]
-    else:
-        all_videos_in_category = list(media_collection.find(
-            {'category': category},
-            sort=[('sequence_number', ASCENDING)]
-        ))
-        video_list = [v['uuid'] for v in all_videos_in_category]
-
-    if not video_list:
+    if not user_doc or not user_doc.get('bookmarked_videos'):
         return None
 
-    try:
-        current_index = video_list.index(current_uuid)
-    except ValueError:
-        logger.warning(f"Current video {current_uuid} not found in its list for jump navigation.")
-        return get_video_by_uuid(video_list[0]) # Fallback to first video
+    bookmarked_videos = user_doc['bookmarked_videos']
 
-    total_videos = len(video_list)
-    new_index = (current_index + jump_offset) % total_videos
-    
-    next_video_uuid = video_list[new_index]
+    # Filter for the specific category and validity, then sort by bookmarked_at
+    filtered_saved_videos = []
+    for bookmark in bookmarked_videos:
+        video_data = get_video_by_uuid(bookmark['uuid'])
+        if video_data and video_data.get('category') == category:
+            filtered_saved_videos.append(bookmark)
+
+    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+
+    if not filtered_saved_videos:
+        return None
+
+    current_video_index = -1
+    for i, entry in enumerate(filtered_saved_videos):
+        if entry['uuid'] == current_uuid:
+            current_video_index = i
+            break
+
+    if current_video_index == -1: # Current video not found in the filtered list, return first
+        logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning first saved video in category {category}.")
+        return get_video_by_uuid(filtered_saved_videos[0]['uuid'])
+
+    next_index = (current_video_index + 1) % len(filtered_saved_videos)
+    next_video_uuid = filtered_saved_videos[next_index]['uuid']
+
     return get_video_by_uuid(next_video_uuid)
+
+def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+    """
+    Retrieves the previous saved video for a user in a specific category,
+    based on their bookmarking order. Loops to the last if at the beginning.
+    """
+    user_doc = users_collection.find_one({'user_id': user_id})
+    if not user_doc or not user_doc.get('bookmarked_videos'):
+        return None
+
+    bookmarked_videos = user_doc['bookmarked_videos']
+
+    # Filter for the specific category and validity, then sort by bookmarked_at
+    filtered_saved_videos = []
+    for bookmark in bookmarked_videos:
+        video_data = get_video_by_uuid(bookmark['uuid'])
+        if video_data and video_data.get('category') == category:
+            filtered_saved_videos.append(bookmark)
+
+    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+
+    if not filtered_saved_videos:
+        return None
+
+    current_video_index = -1
+    for i, entry in enumerate(filtered_saved_videos):
+        if entry['uuid'] == current_uuid:
+            current_video_index = i
+            break
+
+    if current_video_index == -1: # Current video not found in the filtered list, return last
+        logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning last saved video in category {category}.")
+        return get_video_by_uuid(filtered_saved_videos[-1]['uuid'])
+
+    prev_index = (current_video_index - 1 + len(filtered_saved_videos)) % len(filtered_saved_videos)
+    prev_video_uuid = filtered_saved_videos[prev_index]['uuid']
+
+    return get_video_by_uuid(prev_video_uuid)
+
 
 def save_history(user_id: int, video_uuid: str, category: str):
     """
@@ -1113,7 +1201,6 @@ def video_nav_keyboard(
     Keyboard for navigating videos. Handles regular, saved, batch, and shared video menus.
     """
     buttons = []
-    category_b64 = str_to_b64(category)
 
     # --- Navigation Row (Previous/Next) ---
     if is_shared_link:
@@ -1128,13 +1215,14 @@ def video_nav_keyboard(
         ])
     else:
         buttons.append([
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{category_b64}|{int(is_saved)}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category_b64}|{int(is_saved)}")
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
         ])
 
     # --- Action Row (Bookmark/Share/Download) ---
     row_2_buttons = []
     if is_saved:
+        # For saved videos, the "Bookmark" button is replaced by "Remove"
         row_2_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
     else:
         row_2_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
@@ -1149,10 +1237,8 @@ def video_nav_keyboard(
         row_3_buttons.append(InlineKeyboardButton("👀 Watch More", callback_data="watch_more"))
     elif is_saved:
         row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
-        row_3_buttons.append(InlineKeyboardButton("⚙️ Settings", callback_data=f"settings_menu|{video_uuid}|{category_b64}|{int(is_saved)}"))
     else: # Regular navigation
         row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
-        row_3_buttons.append(InlineKeyboardButton("⚙️ Settings", callback_data=f"settings_menu|{video_uuid}|{category_b64}|{int(is_saved)}"))
 
     if row_3_buttons:
         buttons.append(row_3_buttons)
@@ -1336,9 +1422,9 @@ async def start_cmd(client: Client, message: Message):
         args = message.text.split()
         deep_link_arg = args[1] if len(args) > 1 else None
 
+        # --- Step 1: Handle new user registration and token grant immediately ---
         user = users_collection.find_one({'user_id': user_id})
         is_new_user = not user
-        
         if is_new_user:
             username_safe = html.escape(message.from_user.username) if message.from_user.username else ""
             users_collection.insert_one({
@@ -1346,19 +1432,12 @@ async def start_cmd(client: Client, message: Message):
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                 'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
                 'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None,
-                'free_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)},
-                'jump_value': 1
+                'free_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
 
-            # Send welcome message immediately for new users
-            await message.reply(
-                f"🎉 Congratulations {first_name_safe}!\n\n"
-                f"You've just received {config.NEW_USER_TOKENS} free token(s) 🎁 to start your journey! "
-                f"Each token gives you {config.TOKEN_ACCESS_HOURS} hours of unlimited access."
-            )
-
+            # Handle referral for the newly created user
             if deep_link_arg:
                 referrer_id = handle_referral(user_id, deep_link_arg)
                 if referrer_id:
@@ -1370,24 +1449,29 @@ async def start_cmd(client: Client, message: Message):
                     except Exception as e:
                         logger.warning(f"Failed to notify referrer {referrer_id}: {e}")
 
+        # --- Step 2: Check channel membership for ALL users ---
         has_joined = await check_membership(client, user_id)
         if not has_joined:
             if deep_link_arg:
+                # User doc now exists for new users, so this is just an update
                 users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
-            
+
+            # Prepare custom force-sub message based on user state
             custom_text = None
             if is_new_user:
-                part1 = "To continue, you just need to join our channels first.\n\n"
-                part2 = "Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
+                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received {config.NEW_USER_TOKENS} free token 🎁 to start your journey!\n\n"
+                part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
                 custom_text = part1 + part2
-            
+
             await send_force_subscribe_message(client, user_id, custom_text=custom_text)
             return
 
+        # --- Step 3: User has joined. Handle the request. ---
         if await is_rate_limited(user_id):
             raise FloodWait(10)
         create_tracked_task(check_premium_status_and_notify(client, user_id))
 
+        # Handle deep links first
         if deep_link_arg:
             loading_msg = await message.reply("Loading your request, please wait...")
             try:
@@ -1396,7 +1480,7 @@ async def start_cmd(client: Client, message: Message):
                     deep_link_type, deep_link_data = 'token_refresh', deep_link_arg[6:]
                 elif deep_link_arg.startswith('video_'):
                     deep_link_type, deep_link_data = 'video_share', deep_link_arg.split('_')[1]
-                elif deep_link_arg.startswith('ref_'):
+                elif deep_link_arg.startswith('ref_'): # Referral was already handled for new users
                     pass
                 elif deep_link_arg.startswith('batch_'):
                     deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
@@ -1404,6 +1488,7 @@ async def start_cmd(client: Client, message: Message):
                 if deep_link_type == 'token_refresh':
                     success, msg = await handle_token_refresh(user_id, deep_link_data)
                     await message.reply(msg)
+                    # After successful token refresh, check for pending command
                     user_doc = users_collection.find_one_and_update(
                         {'user_id': user_id},
                         {'$unset': {'pending_command': ""}},
@@ -1426,7 +1511,7 @@ async def start_cmd(client: Client, message: Message):
                         await message.reply(result)
                     else:
                         video = result
-                        sent_success, sent_message = await send_and_replace_message(
+                        sent_success, _ = await send_and_replace_message(
                             client, message.chat.id, message.id, "video", video_data=video,
                             reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
                             force_new_message=True
@@ -1452,7 +1537,7 @@ async def start_cmd(client: Client, message: Message):
                         if not video:
                             await message.reply("The first video in this batch is unavailable. 😔")
                         else:
-                            sent_success, sent_message = await send_and_replace_message(
+                            sent_success, _ = await send_and_replace_message(
                                 client, message.chat.id, message.id, "video", video_data=video,
                                 reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
                                 force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
@@ -1465,12 +1550,14 @@ async def start_cmd(client: Client, message: Message):
                                 )
             finally:
                 if loading_msg: await loading_msg.delete()
-        elif is_new_user:
+        elif is_new_user: # New user, already joined, no deep link
             await message.reply(
+                f"🎉 Congratulations {first_name_safe}!\n"
+                f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
                 f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
                 reply_markup=await get_main_keyboard(user_id)
             )
-        else:
+        else: # Existing user, no deep link
             await message.reply(f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in.", reply_markup=await get_main_keyboard(user_id))
 
     except FloodWait as e:
@@ -1637,8 +1724,7 @@ async def profile_cmd(client: Client, message: Message):
                 'bookmarked_videos': [],
                 'last_premium_check_status': False,
                 'last_viewed_per_category': {},
-                'pending_command': None,
-                'jump_value': 1
+                'pending_command': None
             })
             user = users_collection.find_one({'user_id': user_id})
             if not user:
@@ -2028,11 +2114,31 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
                 return
 
-            video = get_jumped_video(current_uuid, category, user_id, is_saved, action)
+            video = None
+            if is_saved:
+                if action == "next":
+                    video = get_next_saved_video_chronological(user_id, current_uuid, category)
+                elif action == "prev":
+                    video = get_previous_saved_video_chronological(user_id, current_uuid, category)
 
-            if not video:
-                await callback_query.answer(f"No more videos in this category. Try another! 😔", show_alert=True)
-                return
+                if not video:
+                    await callback_query.answer("No more saved videos in this category. Looping to the beginning/end. ❤️", show_alert=True)
+                    return
+
+            else: # Not a saved video, use regular chronological navigation based on sequence_number
+                if category not in get_categories():
+                    logger.warning(f"User {user_id} used invalid category '{category}' for navigation (non-saved).")
+                    await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
+                    return
+
+                if action == "next":
+                    video = get_next_video_chronological(current_uuid, category)
+                elif action == "prev":
+                    video = get_previous_video_chronological(current_uuid, category)
+
+                if not video: # This case should ideally not be hit with looping logic
+                    await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
+                    return
 
             # Call send_and_replace_message. It will handle broken videos and recursive retries.
             sent_success, sent_message_or_error = await send_and_replace_message(
@@ -3364,28 +3470,6 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
     Handles incoming videos for various admin modes: delete, batch add, batch link creation.
     """
     user_id = message.from_user.id
-
-    if admin_info_state.get(user_id):
-        logger.info(f"Admin {user_id} sent a video for /info command.")
-        try:
-            file_unique_id = message.video.file_unique_id
-            video_info = media_collection.find_one({"file_unique_id": file_unique_id})
-            if not video_info:
-                await message.reply_text("❌ Video not found in the database.")
-                return
-            
-            info_text = "📄 <b>Video Information</b>\n\n"
-            for key, value in video_info.items():
-                if key == '_id': continue
-                info_text += f"<b>{key.replace('_', ' ').title()}:</b> <code>{html.escape(str(value))}</code>\n"
-            
-            await message.reply_text(info_text)
-        except Exception as e:
-            logger.error(f"Admin {user_id} error in /info flow: {e}", exc_info=True)
-            await message.reply("❌ An error occurred while fetching video info.")
-        finally:
-            del admin_info_state[user_id]
-        return
 
     if admin_delete_video_state.get(user_id):
         logger.info(f"Admin {user_id} sent a video for deletion.")
