@@ -8,7 +8,7 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired, UserNotParticipant
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
 from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
@@ -137,7 +137,7 @@ admin_delete_video_state = defaultdict(bool)
 admin_rename_category_state = defaultdict(dict)
 admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
 owner_add_admin_state = defaultdict(dict) # State for /addadmin
-owner_delete_user_state = defaultdict(dict) # State for /deleteuser
+admin_delete_user_state = defaultdict(dict) # State for /deleteuser
 batch_add_state = {} # State for /batchadd
 admin_info_state = defaultdict(bool) # State for /info
 
@@ -203,8 +203,6 @@ async def check_membership(client: Client, user_id: int) -> bool:
         try:
             member = await client.get_chat_member(channel_id, user_id)
             return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-        except UserNotParticipant:
-            return False
         except PeerIdInvalid:
             logger.error(f"Force subscribe channel ID {channel_id} is invalid. Please check config.")
             return True # Allow access if a channel is misconfigured
@@ -644,99 +642,49 @@ def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dic
 
     return video, current_index + 1, total_videos
 
-def get_next_video_chronological(current_uuid: str, category: str, jump: int = 1) -> dict | None:
+def get_jumped_video(current_uuid: str, category: str, user_id: int, is_saved: bool, direction: str) -> dict | None:
     """
-    Retrieves the Nth video (based on jump value) after the current one.
-    """
-    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
-    if not current_video or 'sequence_number' not in current_video:
-        return get_first_video_by_sequence_number(category)
-
-    current_sequence = current_video['sequence_number']
-    cursor = media_collection.find(
-        {'category': category, 'sequence_number': {'$gt': current_sequence}},
-        sort=[('sequence_number', ASCENDING)]
-    ).skip(jump - 1)
-
-    try:
-        next_video = next(cursor, None)
-        if next_video:
-            return next_video
-        else: # Loop back
-            return next(media_collection.find({'category': category}, sort=[('sequence_number', ASCENDING)]).skip(jump - 1), None)
-    except StopIteration:
-        return get_first_video_by_sequence_number(category)
-
-
-def get_previous_video_chronological(current_uuid: str, category: str, jump: int = 1) -> dict | None:
-    """
-    Retrieves the Nth video (based on jump value) before the current one.
-    """
-    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
-    if not current_video or 'sequence_number' not in current_video:
-        return media_collection.find_one({'category': category}, sort=[('sequence_number', DESCENDING)])
-
-    current_sequence = current_video['sequence_number']
-    cursor = media_collection.find(
-        {'category': category, 'sequence_number': {'$lt': current_sequence}},
-        sort=[('sequence_number', DESCENDING)]
-    ).skip(jump - 1)
-
-    try:
-        prev_video = next(cursor, None)
-        if prev_video:
-            return prev_video
-        else: # Loop back
-            return next(media_collection.find({'category': category}, sort=[('sequence_number', DESCENDING)]).skip(jump - 1), None)
-    except StopIteration:
-        return media_collection.find_one({'category': category}, sort=[('sequence_number', DESCENDING)])
-
-
-def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str, jump: int = 1) -> dict | None:
-    """
-    Retrieves the Nth saved video (based on jump value) after the current one.
+    Retrieves a video after jumping forward or backward based on the user's jump_value.
     """
     user_doc = users_collection.find_one({'user_id': user_id})
-    if not user_doc or not user_doc.get('bookmarked_videos'):
-        return None
+    jump_value = user_doc.get('jump_value', 1)
+    
+    if direction == 'next':
+        jump_offset = jump_value
+    else: # 'prev'
+        jump_offset = -jump_value
 
-    bookmarked_videos = user_doc['bookmarked_videos']
-    filtered_saved_videos = [b for b in bookmarked_videos if get_video_by_uuid(b['uuid']) and get_video_by_uuid(b['uuid']).get('category') == category]
-    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+    video_list = []
+    if is_saved:
+        bookmarked_videos = user_doc.get('bookmarked_videos', [])
+        filtered_saved_videos = []
+        for bookmark in bookmarked_videos:
+            video_data = get_video_by_uuid(bookmark['uuid'])
+            if video_data and video_data.get('category') == category:
+                filtered_saved_videos.append(bookmark)
+        filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+        video_list = [v['uuid'] for v in filtered_saved_videos]
+    else:
+        all_videos_in_category = list(media_collection.find(
+            {'category': category},
+            sort=[('sequence_number', ASCENDING)]
+        ))
+        video_list = [v['uuid'] for v in all_videos_in_category]
 
-    if not filtered_saved_videos:
-        return None
-
-    try:
-        current_video_index = [v['uuid'] for v in filtered_saved_videos].index(current_uuid)
-        next_index = (current_video_index + jump) % len(filtered_saved_videos)
-        return get_video_by_uuid(filtered_saved_videos[next_index]['uuid'])
-    except ValueError:
-        return get_video_by_uuid(filtered_saved_videos[0]['uuid'])
-
-
-def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str, jump: int = 1) -> dict | None:
-    """
-    Retrieves the Nth saved video (based on jump value) before the current one.
-    """
-    user_doc = users_collection.find_one({'user_id': user_id})
-    if not user_doc or not user_doc.get('bookmarked_videos'):
-        return None
-
-    bookmarked_videos = user_doc['bookmarked_videos']
-    filtered_saved_videos = [b for b in bookmarked_videos if get_video_by_uuid(b['uuid']) and get_video_by_uuid(b['uuid']).get('category') == category]
-    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
-
-    if not filtered_saved_videos:
+    if not video_list:
         return None
 
     try:
-        current_video_index = [v['uuid'] for v in filtered_saved_videos].index(current_uuid)
-        prev_index = (current_video_index - jump + len(filtered_saved_videos)) % len(filtered_saved_videos)
-        return get_video_by_uuid(filtered_saved_videos[prev_index]['uuid'])
+        current_index = video_list.index(current_uuid)
     except ValueError:
-        return get_video_by_uuid(filtered_saved_videos[-1]['uuid'])
+        logger.warning(f"Current video {current_uuid} not found in its list for jump navigation.")
+        return get_video_by_uuid(video_list[0]) # Fallback to first video
 
+    total_videos = len(video_list)
+    new_index = (current_index + jump_offset) % total_videos
+    
+    next_video_uuid = video_list[new_index]
+    return get_video_by_uuid(next_video_uuid)
 
 def save_history(user_id: int, video_uuid: str, category: str):
     """
@@ -937,7 +885,7 @@ async def send_and_replace_message(
                     for button in row:
                         if button.callback_data and '|' in button.callback_data:
                             parts = button.callback_data.split('|')
-                            if len(parts) >= 4 and (parts[0] == 'next' or parts[0] == 'prev'):
+                            if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
                                 is_saved_from_markup = bool(int(parts[3]))
                                 break
                     if is_saved_from_markup:
@@ -1115,7 +1063,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton("🎞️ Get Video"), KeyboardButton("👤 Profile")],
         [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
-        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos"), KeyboardButton("⬅️ Back")]
+        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos")]
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -1166,7 +1114,6 @@ def video_nav_keyboard(
     """
     buttons = []
     category_b64 = str_to_b64(category)
-    is_saved_int = int(is_saved)
 
     # --- Navigation Row (Previous/Next) ---
     if is_shared_link:
@@ -1174,51 +1121,43 @@ def video_nav_keyboard(
             InlineKeyboardButton("⬅️ Previous", callback_data="shared_nav"),
             InlineKeyboardButton("➡️ Next", callback_data="shared_nav")
         ])
-        buttons.append([
-            InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"),
-            InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
-            InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")
-        ])
-        buttons.append([InlineKeyboardButton("Watch More 🔥", callback_data="watch_more")])
-
     elif is_batch:
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_batch|{batch_id}|{batch_index}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
         ])
+    else:
         buttons.append([
-            InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"),
-            InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
-            InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{category_b64}|{int(is_saved)}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category_b64}|{int(is_saved)}")
         ])
-        buttons.append([InlineKeyboardButton("Watch More 🔥", callback_data="watch_more")])
 
+    # --- Action Row (Bookmark/Share/Download) ---
+    row_2_buttons = []
+    if is_saved:
+        row_2_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
+    else:
+        row_2_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
+
+    row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
+    row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
+    buttons.append(row_2_buttons)
+
+    # --- Third Row (Context-dependent) ---
+    row_3_buttons = []
+    if is_batch or is_shared_link:
+        row_3_buttons.append(InlineKeyboardButton("👀 Watch More", callback_data="watch_more"))
+    elif is_saved:
+        row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
+        row_3_buttons.append(InlineKeyboardButton("⚙️ Settings", callback_data=f"settings_menu|{video_uuid}|{category_b64}|{int(is_saved)}"))
     else: # Regular navigation
-        buttons.append([
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{category_b64}|{is_saved_int}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{category_b64}|{is_saved_int}")
-        ])
+        row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
+        row_3_buttons.append(InlineKeyboardButton("⚙️ Settings", callback_data=f"settings_menu|{video_uuid}|{category_b64}|{int(is_saved)}"))
 
-        row_2_buttons = []
-        if is_saved:
-            row_2_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
-        else:
-            row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
-        row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
-        row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
-        buttons.append(row_2_buttons)
-
-        row_3_buttons = []
-        if is_saved:
-            row_3_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
-        row_3_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
-        # Add Settings button
-        settings_callback = f"settings|{video_uuid}|{category_b64}|{is_saved_int}"
-        row_3_buttons.append(InlineKeyboardButton("⚙️ Settings", callback_data=settings_callback))
+    if row_3_buttons:
         buttons.append(row_3_buttons)
 
     return InlineKeyboardMarkup(buttons)
-
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
     """Keyboard for displaying a referral link."""
@@ -1399,7 +1338,7 @@ async def start_cmd(client: Client, message: Message):
 
         user = users_collection.find_one({'user_id': user_id})
         is_new_user = not user
-
+        
         if is_new_user:
             username_safe = html.escape(message.from_user.username) if message.from_user.username else ""
             users_collection.insert_one({
@@ -1408,16 +1347,16 @@ async def start_cmd(client: Client, message: Message):
                 'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
                 'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None,
                 'free_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)},
-                'navigation_jump': 1
+                'jump_value': 1
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
-            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token(s).")
+            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
 
-            token_days = config.TOKEN_ACCESS_HOURS / 24
-            day_str = "day" if token_days == 1 else "days"
+            # Send welcome message immediately for new users
             await message.reply(
                 f"🎉 Congratulations {first_name_safe}!\n\n"
-                f"You have received {config.NEW_USER_TOKENS} token(s). Each token gives you {int(token_days)} {day_str} of unlimited access."
+                f"You've just received {config.NEW_USER_TOKENS} free token(s) 🎁 to start your journey! "
+                f"Each token gives you {config.TOKEN_ACCESS_HOURS} hours of unlimited access."
             )
 
             if deep_link_arg:
@@ -1435,7 +1374,14 @@ async def start_cmd(client: Client, message: Message):
         if not has_joined:
             if deep_link_arg:
                 users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
-            await send_force_subscribe_message(client, user_id)
+            
+            custom_text = None
+            if is_new_user:
+                part1 = "To continue, you just need to join our channels first.\n\n"
+                part2 = "Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
+                custom_text = part1 + part2
+            
+            await send_force_subscribe_message(client, user_id, custom_text=custom_text)
             return
 
         if await is_rate_limited(user_id):
@@ -1459,7 +1405,9 @@ async def start_cmd(client: Client, message: Message):
                     success, msg = await handle_token_refresh(user_id, deep_link_data)
                     await message.reply(msg)
                     user_doc = users_collection.find_one_and_update(
-                        {'user_id': user_id}, {'$unset': {'pending_command': ""}}, return_document=ReturnDocument.BEFORE
+                        {'user_id': user_id},
+                        {'$unset': {'pending_command': ""}},
+                        return_document=ReturnDocument.BEFORE
                     )
                     pending_command = user_doc.get('pending_command') if user_doc else None
                     if pending_command:
@@ -1478,18 +1426,24 @@ async def start_cmd(client: Client, message: Message):
                         await message.reply(result)
                     else:
                         video = result
-                        sent_success, sent_msg = await send_and_replace_message(
+                        sent_success, sent_message = await send_and_replace_message(
                             client, message.chat.id, message.id, "video", video_data=video,
                             reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
                             force_new_message=True
                         )
                         if sent_success:
                             save_history(user_id, video['uuid'], video['category'])
+                            await client.send_message(
+                                message.chat.id,
+                                "🫣Tap \"watch more\" to watch your favorite category",
+                                reply_markup=await get_main_keyboard(user_id)
+                            )
 
                 elif deep_link_type == 'batch':
                     if not await check_and_update_free_usage(user_id):
                         await send_limit_reached_message(client, message.chat.id)
                         return
+
                     batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
                     if not batch_doc or not batch_doc.get('video_uuids'):
                         await message.reply("This batch link is invalid or has expired. 😔")
@@ -1498,14 +1452,25 @@ async def start_cmd(client: Client, message: Message):
                         if not video:
                             await message.reply("The first video in this batch is unavailable. 😔")
                         else:
-                            await send_and_replace_message(
+                            sent_success, sent_message = await send_and_replace_message(
                                 client, message.chat.id, message.id, "video", video_data=video,
                                 reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
                                 force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
                             )
+                            if sent_success:
+                                await client.send_message(
+                                    message.chat.id,
+                                    "🫣Tap \"watch more\" to watch your favorite category",
+                                    reply_markup=await get_main_keyboard(user_id)
+                                )
             finally:
                 if loading_msg: await loading_msg.delete()
-        elif not is_new_user:
+        elif is_new_user:
+            await message.reply(
+                f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
+                reply_markup=await get_main_keyboard(user_id)
+            )
+        else:
             await message.reply(f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in.", reply_markup=await get_main_keyboard(user_id))
 
     except FloodWait as e:
@@ -1673,7 +1638,7 @@ async def profile_cmd(client: Client, message: Message):
                 'last_premium_check_status': False,
                 'last_viewed_per_category': {},
                 'pending_command': None,
-                'navigation_jump': 1
+                'jump_value': 1
             })
             user = users_collection.find_one({'user_id': user_id})
             if not user:
@@ -1718,10 +1683,13 @@ async def profile_cmd(client: Client, message: Message):
         logger.error(f"User {user_id} failed to send profile: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-async def send_category_selection_message(client: Client, message: Message):
-    """Helper function to check access and show the category menu."""
+
+@app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
+async def get_video(client: Client, message: Message):
+    """Handles the 'Get Video' button request."""
     user_id = message.from_user.id
     chat_id = message.chat.id
+    logger.info(f"User {user_id} requested Get Video.")
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -1731,7 +1699,7 @@ async def send_category_selection_message(client: Client, message: Message):
 
     if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
-        logger.warning(f"User {user_id} hit rate limit when trying to view categories.")
+        logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
     wait_msg = await message.reply("Just a moment, checking your access...")
@@ -1742,35 +1710,38 @@ async def send_category_selection_message(client: Client, message: Message):
         return
     await wait_msg.delete()
 
+    message_id_to_edit_or_delete = message.id
+
     cats = get_categories()
     if not cats:
+        if message_id_to_edit_or_delete:
+            try:
+                await client.delete_messages(chat_id, message_id_to_edit_or_delete)
+            except MessageIdInvalid:
+                pass
+            except Exception as e:
+                logger.warning(f"Failed to delete old message {message_id_to_edit_or_delete} for user {user_id}: {e}")
+
         await message.reply("😔 No categories available. Please ask an admin to add some! 🛠️")
         logger.info(f"No categories found for user {user_id}.")
         return
 
     logger.info(f"User {user_id} prompted to choose category.")
+
     temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
-    await send_and_replace_message(
+
+    sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
         message_id_to_edit_or_delete=temp_msg.id,
         new_message_type="text",
         text_content="🎬 <b>Choose a Category:</b>",
-        reply_markup=category_keyboard(),
-        force_new_message=True
+        reply_markup=category_keyboard()
     )
 
-@app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
-async def get_video(client: Client, message: Message):
-    """Handles the 'Get Video' button request."""
-    logger.info(f"User {message.from_user.id} requested Get Video.")
-    await send_category_selection_message(client, message)
-
-@app.on_message(filters.regex("^⬅️ Back$") & filters.private)
-async def back_btn(client: Client, message: Message):
-    """Handles the 'Back' button request to show categories."""
-    logger.info(f"User {message.from_user.id} clicked Back button.")
-    await send_category_selection_message(client, message)
+    if not sent_success:
+        await message.reply(sent_message_or_error)
+        logger.error(f"User {user_id} failed to send category selection message: {sent_message_or_error}")
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
@@ -1998,13 +1969,16 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' video navigation."""
     user_id = callback_query.from_user.id
 
+    # --- Processing Lock to prevent race conditions ---
     if user_id in processing_navigation_lock:
         await callback_query.answer("don't spam again", show_alert=True)
         return
     processing_navigation_lock.add(user_id)
+    # --- End Processing Lock ---
 
     try:
         chat_id = callback_query.message.chat.id
+        # Parse callback data: action (next/prev), current_uuid, category, is_saved_flag
         parts = callback_query.data.split('|')
         if len(parts) != 4:
             logger.error(f"Invalid callback data for navigate_video: {callback_query.data}")
@@ -2012,8 +1986,9 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             return
 
         action, current_uuid, category_encoded, is_saved_flag_str = parts
+        # Changed: Decode category name from callback data
         category = b64_to_str(category_encoded)
-        is_saved = bool(int(is_saved_flag_str))
+        is_saved = bool(int(is_saved_flag_str)) # Convert '0' or '1' to boolean
 
         logger.info(f"User {user_id} requested {action} video in category '{category}', is_saved: {is_saved}.")
 
@@ -2026,64 +2001,66 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         try:
             if await is_rate_limited(user_id):
                 await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
+                logger.warning(f"User {user_id} hit rate limit in navigate_video.")
                 return
 
             current_active_tracked_message = active_video_message.get(user_id)
             if current_active_tracked_message and \
                current_active_tracked_message.get('message_id') == callback_query.message.id and \
                datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+
                 logger.warning(f"User {user_id} tried to navigate but menu expired.")
                 await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
                 try:
                     await client.delete_messages(chat_id, callback_query.message.id)
-                except MessageIdInvalid: pass
+                except MessageIdInvalid:
+                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to delete expired menu message for user {user_id}: {e}")
                 clear_active_video_message(user_id)
                 await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
                 return
 
+            # If the user clicks an old button, just answer and return. The active message logic will handle it.
             if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
-                logger.warning(f"User {user_id} clicked old menu button.")
+                logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
                 await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+                # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
                 return
 
-            user_doc = users_collection.find_one({'user_id': user_id})
-            jump_value = user_doc.get('navigation_jump', 1)
-
-            video = None
-            if is_saved:
-                if action == "next":
-                    video = get_next_saved_video_chronological(user_id, current_uuid, category, jump_value)
-                elif action == "prev":
-                    video = get_previous_saved_video_chronological(user_id, current_uuid, category, jump_value)
-            else:
-                if category not in get_categories():
-                    await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
-                    return
-                if action == "next":
-                    video = get_next_video_chronological(current_uuid, category, jump_value)
-                elif action == "prev":
-                    video = get_previous_video_chronological(current_uuid, category, jump_value)
+            video = get_jumped_video(current_uuid, category, user_id, is_saved, action)
 
             if not video:
-                await callback_query.answer(f"No more videos found. Looping around.", show_alert=True)
+                await callback_query.answer(f"No more videos in this category. Try another! 😔", show_alert=True)
                 return
 
+            # Call send_and_replace_message. It will handle broken videos and recursive retries.
             sent_success, sent_message_or_error = await send_and_replace_message(
-                client, chat_id, callback_query.message.id, "video", video_data=video,
+                client,
+                chat_id,
+                message_id_to_edit_or_delete=callback_query.message.id,
+                new_message_type="video",
+                video_data=video,
                 reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
-                force_new_message=False
+                force_new_message=False # Try to edit the existing message
             )
 
             if sent_success:
                 save_history(user_id, video['uuid'], category)
+                logger.info(f"User {user_id} navigated to {action} video {video['uuid']} in category {category}.")
                 await callback_query.answer()
             else:
+                logger.error(f"User {user_id} failed to send {action} video: {sent_message_or_error}. Clearing active video message.")
                 await callback_query.answer(f"❌ Failed to load {action} video. Please try again. 😥", show_alert=True)
                 clear_active_video_message(user_id)
         except Exception as e:
             logger.error(f"User {user_id} error in navigate_video ({action}): {e}", exc_info=True)
-            await callback_query.answer("An unexpected error occurred. Try again. 🤷‍♀️", show_alert=True)
+            await callback_query.answer(
+                "An unexpected error occurred. Try again. 🤷‍♀️",
+                show_alert=True
+            )
     finally:
+        # Ensure the lock is always released
         if user_id in processing_navigation_lock:
             processing_navigation_lock.remove(user_id)
 
@@ -2130,6 +2107,7 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
 
         if not video:
             await callback_query.answer("The next video in this batch is unavailable.", show_alert=True)
+            # In a more robust system, you might skip to the next available one.
             return
 
         await send_and_replace_message(
@@ -2137,6 +2115,7 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
             reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=batch_id, batch_index=new_index),
             force_new_message=False, is_batch=True, batch_id=batch_id, batch_index=new_index
         )
+        # DO NOT save history for batch videos
         await callback_query.answer()
 
     except Exception as e:
@@ -3394,22 +3373,13 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
             if not video_info:
                 await message.reply_text("❌ Video not found in the database.")
                 return
-
-            channel_id_str = str(config.VIDEO_CHANNEL_ID).replace("-100", "")
-            video_link = f"https://t.me/c/{channel_id_str}/{video_info.get('message_id', 'N/A')}"
             
-            info_text = (
-                f"ℹ️ <b>Video Information</b>\n\n"
-                f"<b>UUID:</b> <code>{video_info.get('uuid')}</code>\n"
-                f"<b>Category:</b> {html.escape(video_info.get('category', 'N/A'))}\n"
-                f"<b>Sequence:</b> {video_info.get('sequence_number', 'N/A')}\n"
-                f"<b>File ID:</b> <code>{video_info.get('file_id')}</code>\n"
-                f"<b>File Unique ID:</b> <code>{video_info.get('file_unique_id')}</code>\n"
-                f"<b>Message ID:</b> {video_info.get('message_id', 'N/A')}\n"
-                f"<b>Channel Link:</b> <a href='{video_link}'>Click Here</a>\n"
-                f"<b>Custom Caption:</b> {html.escape(video_info.get('custom_caption', 'None'))}"
-            )
-            await message.reply_text(info_text, disable_web_page_preview=True)
+            info_text = "📄 <b>Video Information</b>\n\n"
+            for key, value in video_info.items():
+                if key == '_id': continue
+                info_text += f"<b>{key.replace('_', ' ').title()}:</b> <code>{html.escape(str(value))}</code>\n"
+            
+            await message.reply_text(info_text)
         except Exception as e:
             logger.error(f"Admin {user_id} error in /info flow: {e}", exc_info=True)
             await message.reply("❌ An error occurred while fetching video info.")
@@ -3594,12 +3564,6 @@ async def add_admin_cmd(client: Client, message: Message):
     owner_add_admin_state[message.from_user.id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to add as an admin. 📝")
 
-@app.on_message(filters.command("deleteuser") & filters.private & owner_only)
-async def delete_user_cmd(client: Client, message: Message):
-    """Owner command to delete a user from the database."""
-    owner_delete_user_state[message.from_user.id] = {'step': 'await_user_id'}
-    await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete. 🗑️")
-
 @app.on_message(filters.command("removeadmin") & filters.private & owner_only)
 async def remove_admin_cmd(client: Client, message: Message):
     """Owner command to remove an admin."""
@@ -3619,6 +3583,14 @@ async def remove_admin_cmd(client: Client, message: Message):
             buttons.append([InlineKeyboardButton(f"ID: {admin_id}", callback_data=f"rem_admin_{admin_id}")])
 
     await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
+
+@app.on_message(filters.command("deleteuser") & filters.private & admin_only)
+async def deleteuser_cmd(client: Client, message: Message):
+    """Admin command to delete a user from the database."""
+    admin_user_id = message.from_user.id
+    logger.info(f"Admin {admin_user_id} initiated /deleteuser command.")
+    admin_delete_user_state[admin_user_id] = {'step': 'await_user_id'}
+    await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete from the database. 📝\n\n⚠️ This action is irreversible and will delete all their data, including tokens and history.")
 
 @app.on_callback_query(filters.regex(r"^rem_admin_(\d+)$"))
 async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
@@ -3743,24 +3715,35 @@ async def handle_text_input(client: Client, message: Message):
             finally:
                 del owner_add_admin_state[user_id]
             return
-        
-        if user_id in owner_delete_user_state and owner_delete_user_state[user_id].get('step') == 'await_user_id':
+
+    # --- Admin-only state handling ---
+    if is_admin(user_id):
+        if user_id in admin_delete_user_state and admin_delete_user_state[user_id].get('step') == 'await_user_id':
             try:
                 user_id_to_delete = int(message.text.strip())
+                
                 if is_owner(user_id_to_delete):
-                    await message.reply("❌ You cannot delete the owner.")
+                    await message.reply("❌ You cannot delete the bot owner.")
+                    return
+                
+                if is_admin(user_id_to_delete):
+                    await message.reply("❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin.")
                     return
 
-                # Perform deletion from all relevant collections
-                user_res = users_collection.delete_one({'user_id': user_id_to_delete})
-                token_res = tokens_collection.delete_one({'user_id': user_id_to_delete})
-                history_res = history_collection.delete_one({'user_id': user_id_to_delete})
+                # Perform deletions
+                user_deleted = users_collection.delete_one({'user_id': user_id_to_delete})
+                tokens_deleted = tokens_collection.delete_one({'user_id': user_id_to_delete})
+                history_deleted = history_collection.delete_one({'user_id': user_id_to_delete})
 
-                if user_res.deleted_count > 0:
-                    await message.reply(f"✅ Successfully deleted all data for user ID {user_id_to_delete}.")
-                    logger.info(f"Owner {user_id} deleted user {user_id_to_delete}. Users: {user_res.deleted_count}, Tokens: {token_res.deleted_count}, History: {history_res.deleted_count}")
+                if user_deleted.deleted_count > 0:
+                    await message.reply(f"✅ Successfully deleted user {user_id_to_delete} from the database.\n"
+                                      f"- User record deleted: {user_deleted.deleted_count > 0}\n"
+                                      f"- Tokens record deleted: {tokens_deleted.deleted_count > 0}\n"
+                                      f"- History record deleted: {history_deleted.deleted_count > 0}")
+                    logger.info(f"Admin {user_id} successfully deleted user {user_id_to_delete}.")
                 else:
-                    await message.reply(f"🤷 User ID {user_id_to_delete} not found in the database.")
+                    await message.reply(f"🤷 User {user_id_to_delete} not found in the database.")
+                    logger.warning(f"Admin {user_id} tried to delete non-existent user {user_id_to_delete}.")
 
             except ValueError:
                 await message.reply("Invalid User ID. Please send a valid integer ID.")
@@ -3768,11 +3751,9 @@ async def handle_text_input(client: Client, message: Message):
                 await message.reply(f"An error occurred: {e}")
                 logger.error(f"Error in /deleteuser flow: {e}")
             finally:
-                del owner_delete_user_state[user_id]
+                del admin_delete_user_state[user_id]
             return
 
-    # --- Admin-only state handling ---
-    if is_admin(user_id):
         if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
             template_url = message.text.strip()
 
