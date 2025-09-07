@@ -1467,7 +1467,7 @@ async def verify_telegram_init_data(request: Request) -> dict:
 
         # Calculate the secret key
         secret_key = hmac.new("WebAppData".encode(), config.BOT_TOKEN.encode(), hashlib.sha256).digest()
-        
+
         # Calculate our own hash
         calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
@@ -1480,10 +1480,10 @@ async def verify_telegram_init_data(request: Request) -> dict:
         user_data_json = params.get('user', [None])[0]
         if not user_data_json:
             raise HTTPException(status_code=401, detail="Unauthorized: User data not found in Init Data")
-        
+
         user_data = json.loads(unquote(user_data_json))
         user_id = user_data.get('id')
-        
+
         if not user_id:
             raise HTTPException(status_code=401, detail="Unauthorized: User ID not found in user data")
 
@@ -1514,7 +1514,7 @@ async def get_api_profile(auth: dict = Depends(verify_telegram_init_data)):
 
     now = datetime.utcnow()
     tokens_count = sum(1 for token in tokens_doc.get('tokens', []) if token.get('expires_at') and token['expires_at'] > now)
-    
+
     is_premium = False
     for token in tokens_doc.get('tokens', []):
         if token.get('is_admin_granted', False) and token.get('expires_at') and token['expires_at'] > now:
@@ -1543,7 +1543,7 @@ async def get_api_feed(category: str, auth: dict = Depends(verify_telegram_init_
         {'category': category, 'banned': {'$ne': True}},
         {'uuid': 1, 'custom_caption': 1, '_id': 0}
     ).sort('sequence_number', ASCENDING)
-    
+
     videos = await cursor.to_list(length=None) # Be cautious with large categories
     return videos
 
@@ -1554,7 +1554,7 @@ async def stream_api_video(video_uuid: str, auth: dict = Depends(verify_telegram
     It generates a temporary direct download link and redirects the client to it.
     """
     user_id = auth["user_id"]
-    
+
     # Check if user has access (token or premium)
     if not user_has_token(user_id) and not is_premium_user(user_id):
          raise HTTPException(status_code=403, detail="Access Denied: Token required")
@@ -1571,7 +1571,7 @@ async def stream_api_video(video_uuid: str, auth: dict = Depends(verify_telegram
         # Use the running Pyrogram client to generate the download link
         # The link is temporary and secure
         download_link = await app.get_download_link(file_id)
-        
+
         # Redirect the user's browser to the temporary link
         return RedirectResponse(url=download_link, status_code=302)
     except FileReferenceExpired:
@@ -1579,14 +1579,14 @@ async def stream_api_video(video_uuid: str, auth: dict = Depends(verify_telegram
         try:
             message_id_in_channel = video_doc.get('message_id')
             if not message_id_in_channel: raise ValueError("No message_id for healing.")
-            
+
             healed_message = await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
             if not healed_message or not healed_message.video: raise ValueError("Failed to fetch healed message.")
-            
+
             new_file_id = healed_message.video.file_id
             await async_media_collection.update_one({'uuid': video_uuid}, {'$set': {'file_id': new_file_id}})
             logger.info(f"DB updated with new file_id for {video_uuid} via API self-heal. Retrying.")
-            
+
             download_link = await app.get_download_link(new_file_id)
             return RedirectResponse(url=download_link, status_code=302)
         except Exception as heal_e:
@@ -1607,7 +1607,7 @@ async def get_api_saved_videos(auth: dict = Depends(verify_telegram_init_data)):
     bookmarked_videos = user_doc.get('bookmarked_videos', [])
     # Sort by bookmark time, newest first
     bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min), reverse=True)
-    
+
     # Return just the UUIDs
     return [b['uuid'] for b in bookmarked_videos]
 
@@ -1843,7 +1843,7 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
 async def reload_pending_content_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Refresh' button to reload content after getting a token."""
     user_id = callback_query.from_user.id
-    
+
     if not await check_membership(client, user_id):
         await callback_query.answer("You must join our channels first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
@@ -2420,7 +2420,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' for batch video menus."""
     user_id = callback_query.from_user.id
-    
+
     if not await check_and_update_free_usage(user_id):
         await callback_query.answer("Your free limit is reached!", show_alert=True)
         await send_limit_reached_message(client, callback_query.message.chat.id)
@@ -2735,7 +2735,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             )
 
         reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content)
-        
+
         await message.reply(
             text,
             reply_markup=reply_markup,
@@ -3528,7 +3528,7 @@ async def removetoken_cmd(client: Client, message: Message):
             logger.warning(f"Admin {admin_user_id} provided invalid target user ID: {target_user_id}.")
             await message.reply("User ID must be a positive integer. 🔢")
             return
-        
+
         if is_owner(target_user_id):
             await message.reply("❌ You cannot remove the owner's access.")
             return
@@ -3721,11 +3721,11 @@ async def done_cmd(client: Client, message: Message):
             total_added = state.get('videos_this_session', 0)
             remaining_in_queue = len(state.get('video_queue', []))
             del batch_add_state[user_id]
-            
+
             reply_text = f"Batch add mode disabled. Added <b>{total_added}</b> videos in this session. 🎉"
             if remaining_in_queue > 0:
                 reply_text += f"\n⚠️ <b>{remaining_in_queue}</b> videos were still in the queue and have not been processed."
-            
+
             await message.reply(reply_text)
             logger.info(f"Admin {user_id}: Batch add mode disabled. Total videos added: {total_added}. Remaining in queue: {remaining_in_queue}.")
         else:
@@ -4014,16 +4014,16 @@ async def create_batch_link_cmd(client: Client, message: Message):
 
     video_uuids = admin_batch_link_state[user_id]
     batch_id = str(uuid.uuid4())
-    
+
     video_batches_collection.insert_one({
         "batch_id": batch_id,
         "video_uuids": video_uuids,
         "created_by": user_id,
         "created_at": datetime.utcnow()
     })
-    
+
     share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=batch_{batch_id}"
-    
+
     await message.reply(
         f"✅ Batch link created successfully for <b>{len(video_uuids)}</b> videos!\n\n"
         f"Share this link:\n`{share_link}`"
@@ -4051,7 +4051,7 @@ async def handle_text_input(client: Client, message: Message):
                 if user_id_to_add in BOT_ADMINS:
                     await message.reply("This user is already an admin.")
                     return
-                
+
                 BOT_ADMINS.add(user_id_to_add)
                 # Persist change to DB
                 settings_collection.update_one(
@@ -4076,11 +4076,11 @@ async def handle_text_input(client: Client, message: Message):
         if user_id in admin_delete_user_state and admin_delete_user_state[user_id].get('step') == 'await_user_id':
             try:
                 user_id_to_delete = int(message.text.strip())
-                
+
                 if is_owner(user_id_to_delete):
                     await message.reply("❌ You cannot delete the bot owner.")
                     return
-                
+
                 if is_admin(user_id_to_delete):
                     await message.reply("❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin.")
                     return
@@ -4412,65 +4412,39 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}", exc_info=True)
 
-# --- NEW: Combined Bot and Server Runner ---
-async def main():
+@fastapi_app.on_event("startup")
+async def startup_event():
     """
-    Main function to start the Pyrogram bot, the FastAPI server, and background tasks concurrently.
+    This function runs when the FastAPI server starts.
+    It initializes and starts the Pyrogram client in the background.
     """
-    logger.info("Starting bot and web server...")
-
-    # Configure Uvicorn to run the FastAPI app
-    uvicorn_config = uvicorn.Config(
-        app=fastapi_app,
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)), # Use PORT from environment or default to 8080
-        log_level="info"
-    )
-    server = uvicorn.Server(uvicorn_config)
+    logger.info("FastAPI server is starting up...")
 
     # Start the Pyrogram client
     await app.start()
     logger.info("Pyrogram client started.")
 
-    # If this is the first run (in-memory session), export and save the session string
+    # If this is the first run, save the session string
     if not SESSION_STRING:
-        logger.info("First run with in-memory session detected. Exporting and saving session string to DB...")
+        logger.info("Saving session string to DB for future runs...")
         new_session_string = await app.export_session_string()
         set_session_string(new_session_string)
-        logger.info("Session string has been saved. Future runs will use this session.")
 
-    # Load dynamic admins from the database
+    # Load admins and run background tasks
     await load_admins_from_db()
-    
-    # Perform an initial health check
     await health_check()
-    logger.info("Bot has connected to Telegram.")
-
-    # Schedule background tasks
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
-    logger.info("Background tasks initiated.")
+    logger.info("Background tasks initiated. Bot is now fully operational.")
 
-    # Run the Pyrogram client and Uvicorn server concurrently
-    logger.info("Running bot and web server concurrently...")
-    await asyncio.gather(
-        server.serve(),
-        asyncio.Event().wait() # This keeps the Pyrogram part running indefinitely
-    )
 
-    # Graceful shutdown
+@fastapi_app.on_event("shutdown")
+async def shutdown_event():
+    """
+    This function runs when the FastAPI server is shutting down.
+    It gracefully stops the Pyrogram client.
+    """
+    logger.info("FastAPI server is shutting down...")
     await app.stop()
     logger.info("Pyrogram client stopped.")
-
-
-if __name__ == "__main__":
-    logger.info("Script started. Entering main execution block.")
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by KeyboardInterrupt (Ctrl+C). Shutting down...")
-    except Exception as e:
-        logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
-    finally:
-        logger.info("Application exiting.")
