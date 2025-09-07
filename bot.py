@@ -6,9 +6,9 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
+from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired, UserNotParticipant
 from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
@@ -18,18 +18,6 @@ import re
 import html
 import urllib.parse
 from shortzy import Shortzy
-
-# --- Mini App / Web Server Imports ---
-import uvicorn
-from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, JSONResponse
-from motor.motor_asyncio import AsyncIOMotorClient
-import hmac
-import hashlib
-from urllib.parse import unquote, parse_qs
-import json
-from pydantic import BaseModel
-
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -67,8 +55,6 @@ class BotConfig:
     FREE_VIDEOS_LIMIT = 2  # Number of free videos a user can watch from batch links without a token
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free video limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
-    # --- Mini App Configuration ---
-    MINI_APP_URL = "https://your-webapp-url.com" # IMPORTANT: Replace with your actual frontend URL
 
 try:
     config = BotConfig()
@@ -92,15 +78,6 @@ categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
 video_batches_collection = db['video_batches'] # New collection for batch videos
-
-# --- NEW: Async MongoDB Client for FastAPI ---
-async_client = AsyncIOMotorClient(config.MONGO_URI)
-async_db = async_client[config.MONGO_DB_NAME]
-async_users_collection = async_db['users']
-async_media_collection = async_db['media']
-async_categories_collection = async_db['categories']
-async_tokens_collection = async_db['tokens']
-
 
 # Create indexes
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
@@ -151,9 +128,6 @@ else:
         bot_token=config.BOT_TOKEN
     )
 
-# --- NEW: FastAPI App Initialization ---
-fastapi_app = FastAPI()
-
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
 
@@ -163,7 +137,7 @@ admin_delete_video_state = defaultdict(bool)
 admin_rename_category_state = defaultdict(dict)
 admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
 owner_add_admin_state = defaultdict(dict) # State for /addadmin
-admin_delete_user_state = defaultdict(dict) # State for /deleteuser
+owner_delete_user_state = defaultdict(dict) # State for /deleteuser
 batch_add_state = {} # State for /batchadd
 
 # --- Message Tracking and Immediate Deletion ---
@@ -228,6 +202,8 @@ async def check_membership(client: Client, user_id: int) -> bool:
         try:
             member = await client.get_chat_member(channel_id, user_id)
             return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+        except UserNotParticipant:
+            return False
         except PeerIdInvalid:
             logger.error(f"Force subscribe channel ID {channel_id} is invalid. Please check config.")
             return True # Allow access if a channel is misconfigured
@@ -1175,10 +1151,9 @@ async def send_and_replace_message(
 async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     """Main keyboard for the bot."""
     buttons = [
-        [KeyboardButton("📱 Open App"), KeyboardButton("🎞️ Get Video")],
-        [KeyboardButton("👤 Profile"), KeyboardButton("🔗 Refer & Earn")],
-        [KeyboardButton("💰 Buy Token"), KeyboardButton("🔄 Refresh Token")],
-        [KeyboardButton("🔖 Saved Videos")]
+        [KeyboardButton("🎞️ Get Video"), KeyboardButton("👤 Profile")],
+        [KeyboardButton("🔗 Refer & Earn"), KeyboardButton("💰 Buy Token")],
+        [KeyboardButton("🔄 Refresh Token"), KeyboardButton("🔖 Saved Videos"), KeyboardButton("⬅️ Back")]
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -1231,43 +1206,56 @@ def video_nav_keyboard(
 
     # --- Navigation Row (Previous/Next) ---
     if is_shared_link:
+        # For single shared links, prev/next might not make sense, but we can guide them
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data="shared_nav"),
             InlineKeyboardButton("➡️ Next", callback_data="shared_nav")
         ])
+        # Action Row for shared/batch
+        buttons.append([
+            InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"),
+            InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
+            InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")
+        ])
+        # Watch More Row
+        buttons.append([InlineKeyboardButton("Watch More 🔥", callback_data="watch_more")])
+
     elif is_batch:
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_batch|{batch_id}|{batch_index}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
         ])
-    else:
+        # Action Row for shared/batch
+        buttons.append([
+            InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"),
+            InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"),
+            InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}")
+        ])
+        # Watch More Row
+        buttons.append([InlineKeyboardButton("Watch More 🔥", callback_data="watch_more")])
+
+    else: # Regular navigation
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
             InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
         ])
 
-    # --- Action Row (Bookmark/Share/Download) ---
-    row_2_buttons = []
-    if is_saved:
-        # For saved videos, the "Bookmark" button is replaced by "Remove"
-        row_2_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
-    else:
-        row_2_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
+        # --- Action Row (Change Category/Share/Download) ---
+        row_2_buttons = []
+        if is_saved:
+            row_2_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
+        else:
+            row_2_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
 
-    row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
-    row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
-    buttons.append(row_2_buttons)
+        row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
+        row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
+        buttons.append(row_2_buttons)
 
-    # --- Third Row (Context-dependent) ---
-    row_3_buttons = []
-    if is_batch or is_shared_link:
-        row_3_buttons.append(InlineKeyboardButton("👀 Watch More", callback_data="watch_more"))
-    elif is_saved:
-        row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
-    else: # Regular navigation
-        row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
-
-    if row_3_buttons:
+        # --- Bookmark/Remove Row ---
+        row_3_buttons = []
+        if is_saved:
+            row_3_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
+        row_3_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
         buttons.append(row_3_buttons)
 
     return InlineKeyboardMarkup(buttons)
@@ -1438,224 +1426,6 @@ async def handle_error(client: Client, message: Message, error: Exception):
     else:
         logger.error(f"An unexpected error occurred for user {message.from_user.id}: {error}", exc_info=True)
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later. 🥺")
-
-# =====================================================================================
-# ======================== MINI APP (FASTAPI) BACKEND CODE ============================
-# =====================================================================================
-
-# --- Mini App Security ---
-async def verify_telegram_init_data(request: Request) -> dict:
-    """
-    Middleware-style dependency to verify the initData from a Telegram Mini App request.
-    """
-    try:
-        # The initData is sent in the 'X-Telegram-Init-Data' header
-        init_data_str = request.headers.get("X-Telegram-Init-Data")
-        if not init_data_str:
-            logger.error("API call received without X-Telegram-Init-Data header.")
-            raise HTTPException(status_code=401, detail="Unauthorized: Missing Telegram Init Data")
-
-        # Parse the initData string
-        params = dict(parse_qs(init_data_str))
-        hash_from_telegram = params.pop('hash', [None])[0]
-
-        if not hash_from_telegram:
-            raise HTTPException(status_code=401, detail="Unauthorized: Hash not found in Init Data")
-
-        # Sort and format the remaining data for hash calculation
-        data_check_string = "\n".join(f"{k}={v[0]}" for k, v in sorted(params.items()))
-
-        # Calculate the secret key
-        secret_key = hmac.new("WebAppData".encode(), config.BOT_TOKEN.encode(), hashlib.sha256).digest()
-
-        # Calculate our own hash
-        calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-        # Compare hashes
-        if calculated_hash != hash_from_telegram:
-            logger.error(f"API call with invalid hash. Calculated: {calculated_hash}, Received: {hash_from_telegram}")
-            raise HTTPException(status_code=403, detail="Forbidden: Invalid data signature")
-
-        # Extract user data
-        user_data_json = params.get('user', [None])[0]
-        if not user_data_json:
-            raise HTTPException(status_code=401, detail="Unauthorized: User data not found in Init Data")
-
-        user_data = json.loads(unquote(user_data_json))
-        user_id = user_data.get('id')
-
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Unauthorized: User ID not found in user data")
-
-        logger.info(f"API call verified for user_id: {user_id}")
-        return {"user_id": user_id}
-
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Bad Request: Invalid JSON in user data")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during initData verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-# --- Pydantic Models for API ---
-class BookmarkRequest(BaseModel):
-    video_uuid: str
-
-# --- API Endpoints ---
-
-@fastapi_app.get("/api/profile")
-async def get_api_profile(auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get user profile information."""
-    user_id = auth["user_id"]
-    user_doc = await async_users_collection.find_one({'user_id': user_id})
-    tokens_doc = await async_tokens_collection.find_one({'user_id': user_id})
-
-    if not user_doc:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    now = datetime.utcnow()
-    tokens_count = sum(1 for token in tokens_doc.get('tokens', []) if token.get('expires_at') and token['expires_at'] > now)
-
-    is_premium = False
-    for token in tokens_doc.get('tokens', []):
-        if token.get('is_admin_granted', False) and token.get('expires_at') and token['expires_at'] > now:
-            is_premium = True
-            break
-
-    return {
-        "status": "Premium" if is_premium else "Free",
-        "tokens": tokens_count,
-        "referrals": user_doc.get('referral_count', 0)
-    }
-
-@fastapi_app.get("/api/categories")
-async def get_api_categories(auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get all video categories."""
-    cursor = async_categories_collection.find({}, {'name': 1, '_id': 0})
-    categories = [doc['name'] async for doc in cursor]
-    return sorted(categories)
-
-@fastapi_app.get("/api/feed/{category}")
-async def get_api_feed(category: str, auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get a feed of videos for a specific category."""
-    # For simplicity, sending all videos in the category.
-    # For a real-world app, you'd implement pagination here (e.g., with query params ?page=1&limit=10)
-    cursor = async_media_collection.find(
-        {'category': category, 'banned': {'$ne': True}},
-        {'uuid': 1, 'custom_caption': 1, '_id': 0}
-    ).sort('sequence_number', ASCENDING)
-
-    videos = await cursor.to_list(length=None) # Be cautious with large categories
-    return videos
-
-@fastapi_app.get("/api/stream/{video_uuid}")
-async def stream_api_video(video_uuid: str, auth: dict = Depends(verify_telegram_init_data)):
-    """
-    API endpoint to stream a video.
-    It generates a temporary direct download link and redirects the client to it.
-    """
-    user_id = auth["user_id"]
-
-    # Check if user has access (token or premium)
-    if not user_has_token(user_id) and not is_premium_user(user_id):
-         raise HTTPException(status_code=403, detail="Access Denied: Token required")
-
-    video_doc = await async_media_collection.find_one({'uuid': video_uuid})
-    if not video_doc:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    file_id = video_doc.get('file_id')
-    if not file_id:
-        raise HTTPException(status_code=500, detail="Video data is incomplete")
-
-    try:
-        # Use the running Pyrogram client to generate the download link
-        # The link is temporary and secure
-        download_link = await app.get_download_link(file_id)
-
-        # Redirect the user's browser to the temporary link
-        return RedirectResponse(url=download_link, status_code=302)
-    except FileReferenceExpired:
-        logger.warning(f"FileReferenceExpired for API stream {video_uuid}. Attempting self-heal.")
-        try:
-            message_id_in_channel = video_doc.get('message_id')
-            if not message_id_in_channel: raise ValueError("No message_id for healing.")
-
-            healed_message = await app.get_messages(config.VIDEO_CHANNEL_ID, message_id_in_channel)
-            if not healed_message or not healed_message.video: raise ValueError("Failed to fetch healed message.")
-
-            new_file_id = healed_message.video.file_id
-            await async_media_collection.update_one({'uuid': video_uuid}, {'$set': {'file_id': new_file_id}})
-            logger.info(f"DB updated with new file_id for {video_uuid} via API self-heal. Retrying.")
-
-            download_link = await app.get_download_link(new_file_id)
-            return RedirectResponse(url=download_link, status_code=302)
-        except Exception as heal_e:
-            logger.error(f"API self-healing failed for {video_uuid}: {heal_e}")
-            raise HTTPException(status_code=503, detail="Service Unavailable: Could not retrieve video stream.")
-    except Exception as e:
-        logger.error(f"Error generating download link for API stream {video_uuid}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@fastapi_app.get("/api/saved")
-async def get_api_saved_videos(auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get the user's bookmarked videos."""
-    user_id = auth["user_id"]
-    user_doc = await async_users_collection.find_one({'user_id': user_id})
-    if not user_doc:
-        return []
-
-    bookmarked_videos = user_doc.get('bookmarked_videos', [])
-    # Sort by bookmark time, newest first
-    bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min), reverse=True)
-
-    # Return just the UUIDs
-    return [b['uuid'] for b in bookmarked_videos]
-
-@fastapi_app.post("/api/bookmark")
-async def toggle_api_bookmark(request: BookmarkRequest, auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to add or remove a video bookmark."""
-    user_id = auth["user_id"]
-    video_uuid = request.video_uuid
-
-    user_doc = await async_users_collection.find_one({'user_id': user_id})
-    if not user_doc:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    bookmarked_videos = user_doc.get('bookmarked_videos', [])
-    is_already_bookmarked = any(v['uuid'] == video_uuid for v in bookmarked_videos)
-
-    if is_already_bookmarked:
-        # Remove bookmark
-        await async_users_collection.update_one(
-            {'user_id': user_id},
-            {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
-        )
-        return JSONResponse(content={"status": "removed"}, status_code=200)
-    else:
-        # Add bookmark
-        is_premium = is_premium_user(user_id)
-        if not is_premium and len(bookmarked_videos) >= config.FREE_USER_SAVE_LIMIT:
-            raise HTTPException(status_code=403, detail=f"Bookmark limit of {config.FREE_USER_SAVE_LIMIT} reached for free users.")
-
-        video_data = await async_media_collection.find_one({'uuid': video_uuid})
-        if not video_data:
-            raise HTTPException(status_code=404, detail="Video to bookmark not found.")
-
-        new_bookmark = {
-            'uuid': video_uuid,
-            'bookmarked_at': datetime.utcnow(),
-            'category': video_data.get('category')
-        }
-        await async_users_collection.update_one(
-            {'user_id': user_id},
-            {'$push': {'bookmarked_videos': new_bookmark}}
-        )
-        return JSONResponse(content={"status": "added"}, status_code=201)
-
-# =====================================================================================
-# ============================= END OF MINI APP BACKEND ===============================
-# =====================================================================================
-
 
 # --- Handlers ---
 @app.on_message(filters.command("start") & filters.private)
@@ -1843,7 +1613,7 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
 async def reload_pending_content_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Refresh' button to reload content after getting a token."""
     user_id = callback_query.from_user.id
-
+    
     if not await check_membership(client, user_id):
         await callback_query.answer("You must join our channels first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
@@ -1928,8 +1698,7 @@ async def help_cmd(client: Client, message: Message):
 
     await message.reply(
         f"👋 Hey {user_mention_safe}! Here's how to use the bot: 📚\n\n"
-        "- **📱 Open App**: Launch the new, fast, full-screen video browser.\n"
-        "- **🎞️ Get Video**: The classic button to browse and watch content.\n"
+        "- **🎞️ Get Video**: The main button to browse and watch content.\n"
         "- **👤 Profile**: Check your status, tokens, and referral stats.\n"
         "- **🔗 Refer & Earn**: Get your unique link to invite friends and earn free tokens.\n"
         "- **💰 Buy Token**: Upgrade to Premium for the best experience.\n"
@@ -2015,13 +1784,10 @@ async def profile_cmd(client: Client, message: Message):
         logger.error(f"User {user_id} failed to send profile: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-
-@app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
-async def get_video(client: Client, message: Message):
-    """Handles the 'Get Video' button request."""
+async def send_category_selection_message(client: Client, message: Message):
+    """Helper function to check access and show the category menu."""
     user_id = message.from_user.id
     chat_id = message.chat.id
-    logger.info(f"User {user_id} requested Get Video.")
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -2031,7 +1797,7 @@ async def get_video(client: Client, message: Message):
 
     if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
-        logger.warning(f"User {user_id} hit rate limit in get_video.")
+        logger.warning(f"User {user_id} hit rate limit when trying to view categories.")
         return
 
     wait_msg = await message.reply("Just a moment, checking your access...")
@@ -2042,38 +1808,35 @@ async def get_video(client: Client, message: Message):
         return
     await wait_msg.delete()
 
-    message_id_to_edit_or_delete = message.id
-
     cats = get_categories()
     if not cats:
-        if message_id_to_edit_or_delete:
-            try:
-                await client.delete_messages(chat_id, message_id_to_edit_or_delete)
-            except MessageIdInvalid:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete old message {message_id_to_edit_or_delete} for user {user_id}: {e}")
-
         await message.reply("😔 No categories available. Please ask an admin to add some! 🛠️")
         logger.info(f"No categories found for user {user_id}.")
         return
 
     logger.info(f"User {user_id} prompted to choose category.")
-
     temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
-
-    sent_success, sent_message_or_error = await send_and_replace_message(
+    await send_and_replace_message(
         client,
         chat_id,
         message_id_to_edit_or_delete=temp_msg.id,
         new_message_type="text",
         text_content="🎬 <b>Choose a Category:</b>",
-        reply_markup=category_keyboard()
+        reply_markup=category_keyboard(),
+        force_new_message=True
     )
 
-    if not sent_success:
-        await message.reply(sent_message_or_error)
-        logger.error(f"User {user_id} failed to send category selection message: {sent_message_or_error}")
+@app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
+async def get_video(client: Client, message: Message):
+    """Handles the 'Get Video' button request."""
+    logger.info(f"User {message.from_user.id} requested Get Video.")
+    await send_category_selection_message(client, message)
+
+@app.on_message(filters.regex("^⬅️ Back$") & filters.private)
+async def back_btn(client: Client, message: Message):
+    """Handles the 'Back' button request to show categories."""
+    logger.info(f"User {message.from_user.id} clicked Back button.")
+    await send_category_selection_message(client, message)
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
@@ -2420,7 +2183,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' for batch video menus."""
     user_id = callback_query.from_user.id
-
+    
     if not await check_and_update_free_usage(user_id):
         await callback_query.answer("Your free limit is reached!", show_alert=True)
         await send_limit_reached_message(client, callback_query.message.chat.id)
@@ -2735,7 +2498,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             )
 
         reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content)
-
+        
         await message.reply(
             text,
             reply_markup=reply_markup,
@@ -3274,31 +3037,6 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     set_active_video_message(user_id, sent_message.id, chat_id)
     await callback_query.answer()
 
-# --- NEW: Mini App Launch Handler ---
-@app.on_message(filters.regex("^📱 Open App$") & filters.private)
-async def open_app_btn(client: Client, message: Message):
-    """Handles the 'Open App' button to launch the Mini App."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked 'Open App' button.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    if not user_has_token(user_id) and not is_premium_user(user_id):
-        logger.info(f"User {user_id} has no tokens, cannot open Mini App.")
-        await send_token_earning_options(client, message)
-        return
-
-    # The WebAppInfo object tells Telegram to open our web app.
-    # IMPORTANT: The URL must be HTTPS and must be replaced with your actual frontend URL.
-    await message.reply(
-        text="Click the button below to launch the full-screen video experience!",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🚀 Launch App", web_app=WebAppInfo(url=config.MINI_APP_URL))]]
-        )
-    )
-
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
@@ -3528,7 +3266,7 @@ async def removetoken_cmd(client: Client, message: Message):
             logger.warning(f"Admin {admin_user_id} provided invalid target user ID: {target_user_id}.")
             await message.reply("User ID must be a positive integer. 🔢")
             return
-
+        
         if is_owner(target_user_id):
             await message.reply("❌ You cannot remove the owner's access.")
             return
@@ -3721,11 +3459,11 @@ async def done_cmd(client: Client, message: Message):
             total_added = state.get('videos_this_session', 0)
             remaining_in_queue = len(state.get('video_queue', []))
             del batch_add_state[user_id]
-
+            
             reply_text = f"Batch add mode disabled. Added <b>{total_added}</b> videos in this session. 🎉"
             if remaining_in_queue > 0:
                 reply_text += f"\n⚠️ <b>{remaining_in_queue}</b> videos were still in the queue and have not been processed."
-
+            
             await message.reply(reply_text)
             logger.info(f"Admin {user_id}: Batch add mode disabled. Total videos added: {total_added}. Remaining in queue: {remaining_in_queue}.")
         else:
@@ -3919,6 +3657,12 @@ async def add_admin_cmd(client: Client, message: Message):
     owner_add_admin_state[message.from_user.id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to add as an admin. 📝")
 
+@app.on_message(filters.command("deleteuser") & filters.private & owner_only)
+async def delete_user_cmd(client: Client, message: Message):
+    """Owner command to delete a user from the database."""
+    owner_delete_user_state[message.from_user.id] = {'step': 'await_user_id'}
+    await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete. 🗑️")
+
 @app.on_message(filters.command("removeadmin") & filters.private & owner_only)
 async def remove_admin_cmd(client: Client, message: Message):
     """Owner command to remove an admin."""
@@ -3938,14 +3682,6 @@ async def remove_admin_cmd(client: Client, message: Message):
             buttons.append([InlineKeyboardButton(f"ID: {admin_id}", callback_data=f"rem_admin_{admin_id}")])
 
     await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
-
-@app.on_message(filters.command("deleteuser") & filters.private & admin_only)
-async def deleteuser_cmd(client: Client, message: Message):
-    """Admin command to delete a user from the database."""
-    admin_user_id = message.from_user.id
-    logger.info(f"Admin {admin_user_id} initiated /deleteuser command.")
-    admin_delete_user_state[admin_user_id] = {'step': 'await_user_id'}
-    await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete from the database. 📝\n\n⚠️ This action is irreversible and will delete all their data, including tokens and history.")
 
 @app.on_callback_query(filters.regex(r"^rem_admin_(\d+)$"))
 async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
@@ -4014,16 +3750,16 @@ async def create_batch_link_cmd(client: Client, message: Message):
 
     video_uuids = admin_batch_link_state[user_id]
     batch_id = str(uuid.uuid4())
-
+    
     video_batches_collection.insert_one({
         "batch_id": batch_id,
         "video_uuids": video_uuids,
         "created_by": user_id,
         "created_at": datetime.utcnow()
     })
-
+    
     share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=batch_{batch_id}"
-
+    
     await message.reply(
         f"✅ Batch link created successfully for <b>{len(video_uuids)}</b> videos!\n\n"
         f"Share this link:\n`{share_link}`"
@@ -4051,7 +3787,7 @@ async def handle_text_input(client: Client, message: Message):
                 if user_id_to_add in BOT_ADMINS:
                     await message.reply("This user is already an admin.")
                     return
-
+                
                 BOT_ADMINS.add(user_id_to_add)
                 # Persist change to DB
                 settings_collection.update_one(
@@ -4070,35 +3806,24 @@ async def handle_text_input(client: Client, message: Message):
             finally:
                 del owner_add_admin_state[user_id]
             return
-
-    # --- Admin-only state handling ---
-    if is_admin(user_id):
-        if user_id in admin_delete_user_state and admin_delete_user_state[user_id].get('step') == 'await_user_id':
+        
+        if user_id in owner_delete_user_state and owner_delete_user_state[user_id].get('step') == 'await_user_id':
             try:
                 user_id_to_delete = int(message.text.strip())
-
                 if is_owner(user_id_to_delete):
-                    await message.reply("❌ You cannot delete the bot owner.")
+                    await message.reply("❌ You cannot delete the owner.")
                     return
 
-                if is_admin(user_id_to_delete):
-                    await message.reply("❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin.")
-                    return
+                # Perform deletion from all relevant collections
+                user_res = users_collection.delete_one({'user_id': user_id_to_delete})
+                token_res = tokens_collection.delete_one({'user_id': user_id_to_delete})
+                history_res = history_collection.delete_one({'user_id': user_id_to_delete})
 
-                # Perform deletions
-                user_deleted = users_collection.delete_one({'user_id': user_id_to_delete})
-                tokens_deleted = tokens_collection.delete_one({'user_id': user_id_to_delete})
-                history_deleted = history_collection.delete_one({'user_id': user_id_to_delete})
-
-                if user_deleted.deleted_count > 0:
-                    await message.reply(f"✅ Successfully deleted user {user_id_to_delete} from the database.\n"
-                                      f"- User record deleted: {user_deleted.deleted_count > 0}\n"
-                                      f"- Tokens record deleted: {tokens_deleted.deleted_count > 0}\n"
-                                      f"- History record deleted: {history_deleted.deleted_count > 0}")
-                    logger.info(f"Admin {user_id} successfully deleted user {user_id_to_delete}.")
+                if user_res.deleted_count > 0:
+                    await message.reply(f"✅ Successfully deleted all data for user ID {user_id_to_delete}.")
+                    logger.info(f"Owner {user_id} deleted user {user_id_to_delete}. Users: {user_res.deleted_count}, Tokens: {token_res.deleted_count}, History: {history_res.deleted_count}")
                 else:
-                    await message.reply(f"🤷 User {user_id_to_delete} not found in the database.")
-                    logger.warning(f"Admin {user_id} tried to delete non-existent user {user_id_to_delete}.")
+                    await message.reply(f"🤷 User ID {user_id_to_delete} not found in the database.")
 
             except ValueError:
                 await message.reply("Invalid User ID. Please send a valid integer ID.")
@@ -4106,9 +3831,11 @@ async def handle_text_input(client: Client, message: Message):
                 await message.reply(f"An error occurred: {e}")
                 logger.error(f"Error in /deleteuser flow: {e}")
             finally:
-                del admin_delete_user_state[user_id]
+                del owner_delete_user_state[user_id]
             return
 
+    # --- Admin-only state handling ---
+    if is_admin(user_id):
         if user_id in admin_shortener_setup_state and admin_shortener_setup_state[user_id].get('step') == 'await_template_url':
             template_url = message.text.strip()
 
@@ -4412,39 +4139,42 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}", exc_info=True)
 
-@fastapi_app.on_event("startup")
-async def startup_event():
+async def main_bot_logic():
     """
-    This function runs when the FastAPI server starts.
-    It initializes and starts the Pyrogram client in the background.
+    Main function to start the bot and schedule background tasks.
+    This function will be run once by app.run().
     """
-    logger.info("FastAPI server is starting up...")
+    logger.info("Starting bot and scheduling background tasks...")
 
-    # Start the Pyrogram client
     await app.start()
-    logger.info("Pyrogram client started.")
+    await load_admins_from_db()
 
-    # If this is the first run, save the session string
+    # If this is the first run (in-memory session), export and save the session string
     if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
+        logger.info("First run with in-memory session detected. Exporting and saving session string to DB...")
         new_session_string = await app.export_session_string()
         set_session_string(new_session_string)
+        logger.info("Session string has been saved. Future runs will use this session.")
 
-    # Load admins and run background tasks
-    await load_admins_from_db()
     await health_check()
+    logger.info("Bot has connected to Telegram.")
+
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
+
     logger.info("Background tasks initiated. Bot is now fully operational.")
 
+    await asyncio.Event().wait()
 
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    """
-    This function runs when the FastAPI server is shutting down.
-    It gracefully stops the Pyrogram client.
-    """
-    logger.info("FastAPI server is shutting down...")
-    await app.stop()
-    logger.info("Pyrogram client stopped.")
+
+if __name__ == "__main__":
+    logger.info("Script started. Entering main execution block.")
+    try:
+        app.run(main_bot_logic())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by KeyboardInterrupt (Ctrl+C). Shutting down...")
+    except Exception as e:
+        logger.critical(f"An unhandled error occurred during bot startup or main execution: {e}", exc_info=True)
+    finally:
+        logger.info("Application exiting.")
