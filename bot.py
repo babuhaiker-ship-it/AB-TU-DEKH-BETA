@@ -23,6 +23,7 @@ from shortzy import Shortzy
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import hmac
 import hashlib
@@ -153,6 +154,29 @@ else:
 
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
+
+# ==================================================
+# ADD THIS ENTIRE BLOCK TO FIX THE LOADING SCREEN
+# ==================================================
+# Configure CORS to allow the frontend to communicate with the backend
+origins = [
+    config.MINI_APP_URL,  # Your frontend URL
+    # You can add other URLs for local testing if needed
+    # "http://localhost",
+    # "http://localhost:8080",
+]
+
+fastapi_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
+# ==================================================
+# END OF BLOCK TO ADD
+# ==================================================
+
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
