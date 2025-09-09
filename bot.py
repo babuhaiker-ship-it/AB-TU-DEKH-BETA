@@ -4435,7 +4435,6 @@ async def health_check():
         logger.info(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
     except Exception as e:
         logger.error(f"Health check failed: {e}", exc_info=True)
-
 @fastapi_app.on_event("startup")
 async def startup_event():
     """
