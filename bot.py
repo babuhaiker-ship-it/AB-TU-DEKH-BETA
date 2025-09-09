@@ -131,26 +131,13 @@ def set_session_string(session_string):
     logger.info("Pyrogram session string has been saved to the database.")
 
 # --- Pyrogram Client Initialization ---
-SESSION_STRING = get_session_string()
-
-if SESSION_STRING:
-    logger.info("Found session string in DB. Initializing client from session string.")
-    app = Client(
-        name="spicynyraa_from_string",
-        session_string=SESSION_STRING,
-        api_id=config.API_ID,
-        api_hash=config.API_HASH,
-        bot_token=config.BOT_TOKEN
-    )
-else:
-    logger.warning("No session string found in DB. Initializing client in memory for the first run.")
-    app = Client(
-        name="spicynyraa_in_memory",
-        in_memory=True,
-        api_id=config.API_ID,
-        api_hash=config.API_HASH,
-        bot_token=config.BOT_TOKEN
-    )
+logger.info("Initializing Pyrogram client...")
+app = Client(
+    name="spicynyraa_session",  # A name for the session file
+    api_id=config.API_ID,
+    api_hash=config.API_HASH,
+    bot_token=config.BOT_TOKEN
+)
 
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
@@ -4434,8 +4421,8 @@ async def health_check():
         force_sub_member = await app.get_chat_member(config.FORCE_SUB_CHANNEL_ID, me.id)
         logger.info(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
     except Exception as e:
-        # This will log the error but will NOT crash the server
         logger.error(f"Health check failed: {e}", exc_info=True)
+
 @fastapi_app.on_event("startup")
 async def startup_event():
     """
@@ -4449,6 +4436,7 @@ async def startup_event():
     logger.info("Pyrogram client started.")
 
     # If this is the first run, save the session string
+    SESSION_STRING = get_session_string()
     if not SESSION_STRING:
         logger.info("Saving session string to DB for future runs...")
         new_session_string = await app.export_session_string()
