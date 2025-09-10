@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import uuid
 import base64
@@ -2620,7 +2621,7 @@ async def refer_and_earn_inline_callback(client: Client, callback_query: Callbac
             logger.warning(f"User {user_id} hit rate limit in refer_and_earn_inline_callback.")
             return
 
-        ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
+        ref_link = f"https.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
         await callback_query.message.reply(
             f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
             quote=True,
@@ -2683,7 +2684,7 @@ async def refresh_token_btn(client: Client, message: Message):
 
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        long_url = f"https.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
         logger.info(f"User {user_id}: get_shortener_config_and_shorten_url call completed. Result: {ad_url}")
@@ -2735,7 +2736,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        long_url = f"https.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url)
 
         text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
@@ -2782,7 +2783,7 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
             return
 
         share_payload = f"video_{video_uuid}_{user_id}"
-        share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start={share_payload}"
+        share_link = f"https.me/{config.BOT_USERNAME[1:]}?start={share_payload}"
 
         await callback_query.answer()
         logger.info(f"User {user_id} requested share link for video {video_uuid}.")
@@ -4033,7 +4034,7 @@ async def create_batch_link_cmd(client: Client, message: Message):
         "created_at": datetime.utcnow()
     })
 
-    share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=batch_{batch_id}"
+    share_link = f"https.me/{config.BOT_USERNAME[1:]}?start=batch_{batch_id}"
 
     await message.reply(
         f"✅ Batch link created successfully for <b>{len(video_uuids)}</b> videos!\n\n"
@@ -4412,26 +4413,81 @@ async def verify_and_cleanup_media():
 
         await asyncio.sleep(6 * 3600)
 
-async def health_check():
+def trigger_full_restart():
+    """
+    Triggers a full, clean restart of the bot process by replacing the
+    current process with a new instance of itself. This function never returns.
+    """
+    logger.critical("="*60)
+    logger.critical("RESTART TRIGGERED: Critical permissions missing or invalid.")
+    logger.critical("The bot will now attempt a full process restart.")
+    logger.critical("Please ensure the bot has the required admin permissions in all channels.")
+    logger.critical("="*60)
+
+    # We add a '--restarted' flag to the arguments list.
+    # This helps us detect on the next run that we are in a potential restart loop.
+    args = sys.argv[:]
+    if '--restarted' not in args:
+        args.append('--restarted')
+
+    # os.execv replaces the current process with the new one.
+    # It requires the path to the Python executable and the list of arguments.
+    # The first argument is traditionally the program name itself.
+    os.execv(sys.executable, [sys.executable] + args)
+
+async def health_check(client: Client) -> bool:
+    """
+    Verifies the bot's status and permissions in all critical channels.
+    Returns True if all checks pass, False otherwise.
+    """
+    logger.info("--- [Health Check] Starting verification of critical permissions...")
+    all_checks_ok = True
+
     try:
-        me = await app.get_me()
-        logger.info(f"Bot username: {me.username}")
-        member = await app.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
-        logger.info(f"Bot status in channel: {member.status}")
-        force_sub_member = await app.get_chat_member(config.FORCE_SUB_CHANNEL_ID, me.id)
-        logger.info(f"Bot status in force subscribe channel ({config.FORCE_SUB_CHANNEL_ID}): {force_sub_member.status}")
+        me = await client.get_me()
+
+        # 1. Video Channel Check (Most Critical)
+        try:
+            member = await client.get_chat_member(config.VIDEO_CHANNEL_ID, me.id)
+            if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                logger.critical(f"[Health Check] FAILED: Bot is NOT an admin in the Video Channel ({config.VIDEO_CHANNEL_ID}). A restart will be triggered.")
+                all_checks_ok = False
+            elif not member.can_post_messages or not member.can_delete_messages:
+                logger.critical(f"[Health Check] FAILED: Bot is an admin in Video Channel ({config.VIDEO_CHANNEL_ID}), but lacks 'Post Messages' or 'Delete Messages' permissions. A restart will be triggered.")
+                all_checks_ok = False
+            else:
+                logger.info(f"[Health Check] OK: Bot is an admin with required permissions in Video Channel ({config.VIDEO_CHANNEL_ID}).")
+        except ChatAdminRequired:
+            logger.critical(f"[Health Check] FAILED: Bot is not in the Video Channel ({config.VIDEO_CHANNEL_ID}) or lacks permissions to see its own status. A restart will be triggered.")
+            all_checks_ok = False
+        except (ValueError, PeerIdInvalid):
+            logger.critical(f"[Health Check] FAILED: The Video Channel ID ({config.VIDEO_CHANNEL_ID}) is invalid or inaccessible. Please check the configuration. A restart will be triggered.")
+            all_checks_ok = False
+
+        # 2. Force Subscribe Channels Check
+        for channel_id, channel_name in [(config.FORCE_SUB_CHANNEL_ID, "1"), (config.FORCE_SUB_CHANNEL_ID_2, "2")]:
+            try:
+                await client.get_chat(channel_id)
+                logger.info(f"[Health Check] OK: Bot can access Force Subscribe Channel {channel_name} ({channel_id}).")
+            except (ValueError, PeerIdInvalid):
+                logger.critical(f"[Health Check] FAILED: Force Subscribe Channel {channel_name} ID ({channel_id}) is invalid or the bot was kicked. A restart will be triggered.")
+                all_checks_ok = False
+
     except Exception as e:
-        logger.error(f"Health check failed: {e}", exc_info=True)
+        logger.critical(f"[Health Check] A critical error occurred during health check, possibly related to bot token or API credentials: {e}", exc_info=True)
+        all_checks_ok = False
+
+    logger.info("--- [Health Check] Finished. ---")
+    return all_checks_ok
 
 @fastapi_app.on_event("startup")
 async def startup_event():
     """
     This function runs when the FastAPI server starts.
-    It initializes and starts the Pyrogram client in the background.
+    It initializes the Pyrogram client and performs a critical health check.
+    If the check fails, it triggers a full restart of the entire process after a delay.
     """
     logger.info("FastAPI server is starting up...")
-
-    # Start the Pyrogram client
     await app.start()
     logger.info("Pyrogram client started.")
 
@@ -4442,13 +4498,37 @@ async def startup_event():
         new_session_string = await app.export_session_string()
         set_session_string(new_session_string)
 
-    # Load admins and run background tasks
-    await load_admins_from_db()
-    await health_check()
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    create_tracked_task(cleanup_expired_menus())
-    logger.info("Background tasks initiated. Bot is now fully operational.")
+    # --- Health Check and Restart Logic ---
+    async def run_initial_health_check():
+        """
+        Checks for critical permissions. If they fail, it waits 5 minutes and
+        restarts the bot. If they pass, it allows the bot to become operational.
+        """
+        # SAFETY FEATURE: Check if we were just restarted due to an error.
+        if '--restarted' in sys.argv:
+            logger.warning("Bot was recently restarted due to a health check failure. Waiting for 5 minutes (300 seconds) before the next check to allow for manual intervention...")
+            await asyncio.sleep(300) # 5-minute wait
+
+        # Perform the health check.
+        if not await health_check(app):
+            # If the check fails, call the function to restart the whole script.
+            # This function will never return, as the process is replaced.
+            trigger_full_restart()
+        else:
+            # If the check passes, we can proceed.
+            logger.info("="*60)
+            logger.info("INITIAL HEALTH CHECK PASSED. Bot is fully operational.")
+            logger.info("="*60)
+            
+            # Load admins and run background tasks ONLY after the check passes.
+            await load_admins_from_db()
+            create_tracked_task(cleanup_expired_data())
+            create_tracked_task(verify_and_cleanup_media())
+            create_tracked_task(cleanup_expired_menus())
+            logger.info("Background tasks initiated.")
+
+    # Run the check. This task will either complete successfully or restart the bot.
+    create_tracked_task(run_initial_health_check())
 
 
 @fastapi_app.on_event("shutdown")
