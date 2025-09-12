@@ -47,8 +47,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    # REMOVED HARDCODED CHANNELS - NOW DYNAMIC
-    # VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
+    # VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID - REMOVED
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
@@ -59,11 +58,10 @@ class BotConfig:
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 199
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
-    # REMOVED HARDCODED CHANNELS - NOW DYNAMIC
-    # FORCE_SUB_CHANNEL_ID = -1002622483638
-    # FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
-    # FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
-    # FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
+    # FORCE_SUB_CHANNEL_ID = -1002622483638 # REMOVED
+    # FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa" # REMOVED
+    # FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel - REMOVED
+    # FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link - REMOVED
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
@@ -75,9 +73,9 @@ class BotConfig:
 
 try:
     config = BotConfig()
-    # MODIFIED: Removed hardcoded channel checks
+    # Modified validation to remove hardcoded channel checks
     if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME]):
-        raise ValueError("One or more essential configuration variables (excluding channels) are not set.")
+        raise ValueError("One or more essential configuration variables are not set. Please check all config variables.")
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
@@ -180,7 +178,7 @@ owner_add_admin_state = defaultdict(dict) # State for /addadmin
 admin_delete_user_state = defaultdict(dict) # State for /deleteuser
 batch_add_state = {} # State for /batchadd
 
-# --- NEW: Dynamic Channel Configuration State ---
+# --- NEW: Dynamic Channel Configuration ---
 DYNAMIC_CONFIG = {
     "force_subscribe_channels": [], # List of {"channel_id": int, "invite_link": str}
     "data_channel_id": None # int
@@ -201,27 +199,9 @@ async def load_dynamic_config():
             DYNAMIC_CONFIG["data_channel_id"] = None
         logger.info("Successfully loaded dynamic channel configuration from DB.")
     else:
-        logger.warning("Channel configuration not found in DB. Initializing with defaults (if any) or empty.")
-        # Initialize with current hardcoded values if no config exists, then save.
-        # This ensures a smooth transition for existing deployments.
-        initial_fsub_channels = [
-            {"channel_id": -1002622483638, "invite_link": "https://t.me/SpicyNyraa"},
-            {"channel_id": -1002539389126, "invite_link": "https://t.me/+uD3cGGm-Dso0NGU1"}
-        ]
-        initial_data_channel_id = -1002621716446
-
-        settings_collection.update_one(
-            {'_id': 'channel_config'},
-            {'$set': {
-                'force_subscribe_channels': initial_fsub_channels,
-                'data_channel': {'channel_id': initial_data_channel_id}
-            }},
-            upsert=True
-        )
-        DYNAMIC_CONFIG["force_subscribe_channels"] = initial_fsub_channels
-        DYNAMIC_CONFIG["data_channel_id"] = initial_data_channel_id
-        logger.info("Initialized channel_config in DB with default hardcoded values.")
-
+        logger.warning("Channel configuration not found in DB. Bot will have limited functionality until channels are set via admin commands.")
+        DYNAMIC_CONFIG["force_subscribe_channels"] = []
+        DYNAMIC_CONFIG["data_channel_id"] = None
 
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
@@ -283,7 +263,7 @@ async def check_membership(client: Client, user_id: int) -> bool:
 
     fsub_channels = DYNAMIC_CONFIG.get("force_subscribe_channels", [])
     if not fsub_channels:
-        logger.warning("No force subscribe channels configured. Allowing access.")
+        logger.warning(f"No force subscribe channels configured. User {user_id} allowed access.")
         return True # No channels configured, allow access
 
     tasks = []
@@ -302,8 +282,8 @@ async def check_membership(client: Client, user_id: int) -> bool:
         tasks.append(check_channel(channel_id))
 
     results = await asyncio.gather(*tasks)
-    is_member_of_all = all(results)
 
+    is_member_of_all = all(results)
     if is_member_of_all:
         logger.info(f"User {user_id} is a member of all force sub channels.")
     else:
@@ -316,7 +296,7 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
     logger.info(f"Sending force subscribe message to user {chat_id}.")
     fsub_channels = DYNAMIC_CONFIG.get("force_subscribe_channels", [])
     if not fsub_channels:
-        await client.send_message(chat_id, "The bot is currently under maintenance (force subscribe channels not configured). Please try again later.")
+        await client.send_message(chat_id, "The bot is currently under maintenance (force-subscribe channels not configured). Please try again later.")
         return
 
     buttons = []
@@ -325,8 +305,8 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
             chat = await client.get_chat(channel['channel_id'])
             title = chat.title
         except Exception:
-            title = f"Channel {channel['channel_id']}" # Fallback if chat title can't be fetched
-        buttons.append([InlineKeyboardButton(f"Join {title}", url=channel['invite_link'])])
+            title = f"Channel ID: {channel['channel_id']}" # Fallback if chat title can't be fetched
+        buttons.append([InlineKeyboardButton(f"📢 {html.escape(title)}", url=channel['invite_link'])])
 
     buttons.append([InlineKeyboardButton("🔄 Try Again", callback_data="check_join_status")])
     reply_markup = InlineKeyboardMarkup(buttons)
@@ -962,12 +942,11 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
     Handles sequence rearrangement and user data cleanup.
     """
     logger.info(f"Attempting to delete broken video {video_uuid} from DB and channel.")
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
-
-    if not data_channel_id:
-        logger.error(f"Data channel not configured. Cannot delete message from channel for video {video_uuid}.")
-        # Proceed with DB deletion but skip channel interaction
-        # This is a critical error, but we try to clean up DB anyway.
+    DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+    if not DATA_CHANNEL:
+        logger.error("Cannot delete from channel: Data channel not configured. Proceeding with DB deletion only.")
+        # Set message_id_in_channel to None to skip channel interaction
+        message_id_in_channel = None
 
     try:
         # 1. Delete from media collection
@@ -1013,24 +992,24 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
                     )
                     logger.info(f"Removed video {video_uuid} from last_viewed_per_category for user {user_id_to_update}.")
 
-            # 6. Attempt to delete from Telegram channel (only if bot has permission and channel is configured)
-            if message_id_in_channel and data_channel_id:
-                logger.info(f"Checking bot permissions to delete message {message_id_in_channel} from channel {data_channel_id}.")
+            # 6. Attempt to delete from Telegram channel (only if bot has permission and DATA_CHANNEL is set)
+            if message_id_in_channel and DATA_CHANNEL:
+                logger.info(f"Checking bot permissions to delete message {message_id_in_channel} from channel {DATA_CHANNEL}.")
                 try:
                     me = await client.get_me()
-                    member = await client.get_chat_member(data_channel_id, me.id)
+                    member = await client.get_chat_member(DATA_CHANNEL, me.id)
 
                     if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER] and member.can_delete_messages:
-                        await client.delete_messages(data_channel_id, message_id_in_channel)
-                        logger.info(f"Successfully deleted message {message_id_in_channel} from channel {data_channel_id}.")
+                        await client.delete_messages(DATA_CHANNEL, message_id_in_channel)
+                        logger.info(f"Successfully deleted message {message_id_in_channel} from channel {DATA_CHANNEL}.")
                     else:
-                        logger.warning(f"Bot lacks 'Delete Messages' permission in channel {data_channel_id}. Cannot delete message {message_id_in_channel}. DB entry removed.")
+                        logger.warning(f"Bot lacks 'Delete Messages' permission in channel {DATA_CHANNEL}. Cannot delete message {message_id_in_channel}. DB entry removed.")
                 except MessageIdInvalid:
-                    logger.warning(f"Message {message_id_in_channel} already deleted or invalid in channel {data_channel_id}. DB entry removed.")
+                    logger.warning(f"Message {message_id_in_channel} already deleted or invalid in channel {DATA_CHANNEL}. DB entry removed.")
                 except FloodWait as fw:
                     logger.warning(f"FloodWait deleting message {message_id_in_channel}: {fw.value}s. Skipping channel deletion for now. DB entry removed.")
                 except ChatAdminRequired:
-                    logger.warning(f"Bot is not admin in channel {data_channel_id}. Cannot delete message {message_id_in_channel}. DB entry removed.")
+                    logger.warning(f"Bot is not admin in channel {DATA_CHANNEL}. Cannot delete message {message_id_in_channel}. DB entry removed.")
                 except Exception as e:
                     logger.error(f"Failed to delete channel message {message_id_in_channel} for broken video {video_uuid}: {e}", exc_info=True)
                     logger.warning(f"Channel deletion failed for {video_uuid}. DB entry removed.")
@@ -1066,11 +1045,11 @@ async def send_and_replace_message(
     sent_message = None
     settings = settings_collection.find_one({'_id': 'settings'}) or {}
     protect_content_for_user = settings.get('protect_content', True)
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
+    DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
 
-    if new_message_type == "video" and not data_channel_id:
-        logger.critical(f"Data channel not configured. Cannot send video for user {chat_id}.")
-        return False, "Bot is not configured to send videos. Please contact admin."
+    if new_message_type == "video" and video_data and not DATA_CHANNEL:
+        logger.error(f"Cannot send video {video_data.get('uuid')}: Data channel not configured.")
+        return False, "Video storage channel is not configured. Please contact bot admin."
 
     # --- Prepare Caption ---
     caption_text = ""
@@ -1130,7 +1109,7 @@ async def send_and_replace_message(
                 try:
                     message_id_in_channel = video_data.get('message_id')
                     if not message_id_in_channel: raise ValueError("No message_id for healing.")
-                    healed_message = await client.get_messages(data_channel_id, message_id_in_channel)
+                    healed_message = await client.get_messages(DATA_CHANNEL, message_id_in_channel)
                     if not healed_message or not healed_message.video: raise ValueError("Failed to fetch healed message.")
                     new_file_id = healed_message.video.file_id
                     media_collection.update_one({'uuid': video_data['uuid']}, {'$set': {'file_id': new_file_id}})
@@ -1160,10 +1139,10 @@ async def send_and_replace_message(
         # Method 2: Send a new message if editing failed or was skipped
         if not sent_message:
             try:
-                logger.info(f"Attempting to send video {video_data['uuid']} via copy_message from channel {data_channel_id}.")
+                logger.info(f"Attempting to send video {video_data['uuid']} via copy_message from channel {DATA_CHANNEL}.")
                 sent_message = await client.copy_message(
                     chat_id=chat_id,
-                    from_chat_id=data_channel_id,
+                    from_chat_id=DATA_CHANNEL,
                     message_id=video_data.get('message_id'),
                     caption=caption_text,
                     protect_content=protect_content_for_user,
@@ -1171,7 +1150,7 @@ async def send_and_replace_message(
                 )
                 logger.info(f"Successfully sent video {video_data['uuid']} via copy_message.")
             except ChatAdminRequired:
-                logger.critical(f"Bot is not an admin in the video channel {data_channel_id}. Cannot copy messages.")
+                logger.critical(f"Bot is not an admin in the video channel {DATA_CHANNEL}. Cannot copy messages.")
                 await client.send_message(chat_id, "Please wait, the bot just got restarted. The admin is adding the bot to the channel.")
                 return False, "Bot is not admin in video channel."
             except MessageIdInvalid as e:
@@ -1198,7 +1177,7 @@ async def send_and_replace_message(
                         if not message_id_in_channel:
                             raise ValueError("No message_id found in DB for self-healing.")
 
-                        healed_message = await client.get_messages(data_channel_id, message_id_in_channel)
+                        healed_message = await client.get_messages(DATA_CHANNEL, message_id_in_channel)
                         if not healed_message or not healed_message.video:
                             raise ValueError("Failed to fetch or find video in healed message.")
 
@@ -1640,11 +1619,11 @@ async def stream_api_video(video_uuid: str, auth: dict = Depends(verify_telegram
     It generates a temporary direct download link and redirects the client to it.
     """
     user_id = auth["user_id"]
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
+    DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
 
-    if not data_channel_id:
-        logger.critical(f"Data channel not configured. Cannot stream video for user {user_id}.")
-        raise HTTPException(status_code=503, detail="Service Unavailable: Bot is not configured to stream videos.")
+    if not DATA_CHANNEL:
+        logger.error(f"API stream for {video_uuid} failed: Data channel not configured.")
+        raise HTTPException(status_code=503, detail="Service Unavailable: Video storage channel not configured.")
 
     # Check if user has access (token or premium)
     if not user_has_token(user_id) and not is_premium_user(user_id):
@@ -1671,7 +1650,7 @@ async def stream_api_video(video_uuid: str, auth: dict = Depends(verify_telegram
             message_id_in_channel = video_doc.get('message_id')
             if not message_id_in_channel: raise ValueError("No message_id for healing.")
 
-            healed_message = await app.get_messages(data_channel_id, message_id_in_channel)
+            healed_message = await app.get_messages(DATA_CHANNEL, message_id_in_channel)
             if not healed_message or not healed_message.video: raise ValueError("Failed to fetch healed message.")
 
             new_file_id = healed_message.video.file_id
@@ -2320,6 +2299,17 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
         return
 
+    if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
+        logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
+        await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
+        try:
+            await client.delete_messages(chat_id, callback_query.message.id)
+        except MessageIdInvalid:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
+        return
+
     user_doc = users_collection.find_one({'user_id': user_id})
     bookmarked_videos = user_doc.get('bookmarked_videos', [])
 
@@ -2882,14 +2872,8 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
     chat_id = callback_query.message.chat.id
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
 
     logger.info(f"User {user_id} requested download for video {video_uuid}.")
-
-    if not data_channel_id:
-        logger.critical(f"Data channel not configured. Cannot process download for user {user_id}.")
-        await callback_query.answer("Bot is not configured to send videos. Please contact admin.", show_alert=True)
-        return
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -2914,6 +2898,12 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
             return
 
+        DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+        if not DATA_CHANNEL:
+            logger.error(f"Download for {video_uuid} failed: Data channel not configured.")
+            await callback_query.answer("❌ Video storage channel is not configured. Please contact bot admin.", show_alert=True)
+            return
+
         try:
             await client.send_video(
                 chat_id,
@@ -2930,7 +2920,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                 if not message_id_in_channel:
                     raise ValueError("No message_id found in DB for self-healing during download.")
 
-                healed_message = await client.get_messages(data_channel_id, message_id_in_channel)
+                healed_message = await client.get_messages(DATA_CHANNEL, message_id_in_channel)
                 if not healed_message or not healed_message.video:
                     raise ValueError("Failed to fetch or find video in healed message during download.")
 
@@ -3154,7 +3144,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                         if not sent_success:
                             await client.send_message(chat_id, "❌ Failed to load next saved video. Please try again. 😥")
                     else:
-                        await client.send_message(chat_id, "The next saved video was not found. It may have been removed.😔")
+                        await client.send_message(chat_id, "The next saved video was not found. It may have been removed. 😔")
                 else:
                     # No more saved videos in this category, go back to saved categories menu
                     await send_and_replace_message(
@@ -3676,10 +3666,10 @@ async def process_batch_queue(user_id: int, client: Client):
 
     logger.info(f"Starting batch processing queue for admin {user_id}.")
     queue = state['video_queue']
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
+    DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
 
-    if not data_channel_id:
-        await client.send_message(user_id, "❌ Data channel not configured. Cannot add videos. Please set it using /setdata.")
+    if not DATA_CHANNEL:
+        await client.send_message(user_id, "❌ Batch processing failed: Data channel not configured. Please set it using /setdata.")
         state['is_processing'] = False
         return
 
@@ -3694,7 +3684,7 @@ async def process_batch_queue(user_id: int, client: Client):
                 continue
 
             sent_video_message = await client.send_video(
-                chat_id=data_channel_id, video=message.video.file_id,
+                chat_id=DATA_CHANNEL, video=message.video.file_id,
                 caption=f"Added by admin {user_id} for category {category}"
             )
             if not sent_video_message or not sent_video_message.video:
@@ -3726,7 +3716,11 @@ async def process_batch_queue(user_id: int, client: Client):
             await message.reply_text(f"⏳ FloodWait from Telegram. Pausing for {e.value + 1} seconds. The bot will resume automatically.")
             queue.appendleft(message)
             await asyncio.sleep(e.value + 1)
-
+        except ChatAdminRequired:
+            logger.error(f"Bot is not admin in data channel {DATA_CHANNEL} for batch add.")
+            await client.send_message(user_id, f"❌ Error: Bot is not an admin in the data channel (<code>{DATA_CHANNEL}</code>) or lacks 'Post Messages' permission. Batch processing stopped. Please fix with /setdata.")
+            state['is_processing'] = False
+            return
         except Exception as e:
             logger.error(f"Admin {user_id} error adding video from queue: {e}", exc_info=True)
             await message.reply("❌ Failed to add this video due to an error. Check logs. Skipping.")
@@ -3744,12 +3738,12 @@ async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and choose category."""
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated batch add mode.")
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
-    if not data_channel_id:
-        await message.reply("❌ Data channel not configured. Please set it using /setdata before adding videos.")
-        return
-
     try:
+        DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+        if not DATA_CHANNEL:
+            await message.reply("❌ Data channel is not configured. Please set it using /setdata before adding videos.")
+            return
+
         categories = get_categories()
         if not categories:
             await message.reply("⚠️ No categories exist. Please create at least one category using /addcategory before starting batch add. ➕")
@@ -3780,9 +3774,9 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
             await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
             return
 
-        data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
-        if not data_channel_id:
-            await callback_query.answer("❌ Data channel not configured. Please set it using /setdata.", show_alert=True)
+        DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+        if not DATA_CHANNEL:
+            await callback_query.answer("❌ Data channel is not configured. Please set it using /setdata.", show_alert=True)
             return
 
         if category_name not in get_categories():
@@ -3854,10 +3848,10 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
     Handles incoming videos for various admin modes: delete, batch add, batch link creation.
     """
     user_id = message.from_user.id
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
+    DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
 
-    if not data_channel_id:
-        await message.reply("❌ Data channel not configured. Please set it using /setdata before performing video operations.")
+    if not DATA_CHANNEL:
+        await message.reply("❌ Data channel is not configured. Cannot process videos. Please set it using /setdata.")
         return
 
     if admin_delete_video_state.get(user_id):
@@ -4108,9 +4102,9 @@ async def deletevideo_cmd(client: Client, message: Message):
     """Admin command to initiate video deletion mode."""
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated /deletevideo command.")
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
-    if not data_channel_id:
-        await message.reply("❌ Data channel not configured. Please set it using /setdata before deleting videos.")
+    DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+    if not DATA_CHANNEL:
+        await message.reply("❌ Data channel is not configured. Cannot delete videos. Please set it using /setdata.")
         return
     admin_delete_video_state[user_id] = True
     await message.reply("Send the <b>video file from the database</b> to delete it. This must be the original video file, not a forwarded one. 🎥")
@@ -4119,9 +4113,9 @@ async def deletevideo_cmd(client: Client, message: Message):
 async def batch_video_add_cmd(client: Client, message: Message):
     """Admin command to create a shareable link for a batch of videos."""
     user_id = message.from_user.id
-    data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
-    if not data_channel_id:
-        await message.reply("❌ Data channel not configured. Please set it using /setdata before creating batch links.")
+    DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+    if not DATA_CHANNEL:
+        await message.reply("❌ Data channel is not configured. Cannot create batch links. Please set it using /setdata.")
         return
     admin_batch_link_state[user_id] = [] # Reset state
     await message.reply(
@@ -4177,7 +4171,7 @@ async def get_fsub_management_keyboard() -> InlineKeyboardMarkup:
             title = chat.title
         except Exception:
             title = f"ID: {channel_id}"
-        buttons.append([InlineKeyboardButton(f"📢 {title}", callback_data=f"view_fsub_{channel_id}")])
+        buttons.append([InlineKeyboardButton(f"📢 {html.escape(title)}", callback_data=f"view_fsub_{channel_id}")])
 
     buttons.append([InlineKeyboardButton("➕ Add New Channel", callback_data="add_fsub_channel")])
     buttons.append([InlineKeyboardButton("Done", callback_data="cancel_admin_action")])
@@ -4216,7 +4210,7 @@ async def view_fsub_callback(client: Client, callback_query: CallbackQuery):
     text = (
         f"<b>Channel Details</b>\n\n"
         f"<b>ID:</b> <code>{channel_info['channel_id']}</code>\n"
-        f"<b>Invite Link:</b> {channel_info['invite_link']}\n\n"
+        f"<b>Invite Link:</b> {html.escape(channel_info['invite_link'])}\n\n"
         "Do you want to remove this channel from the force-subscribe list?"
     )
     keyboard = InlineKeyboardMarkup([
@@ -4255,27 +4249,6 @@ async def back_to_fsub_main_callback(client: Client, callback_query: CallbackQue
 @app.on_callback_query(filters.regex(r"^cancel_admin_action$"))
 async def cancel_admin_action_callback(client: Client, callback_query: CallbackQuery):
     """A generic callback to close an admin menu."""
-    user_id = callback_query.from_user.id
-    # Clear any pending admin states for this user
-    if user_id in admin_fsub_state:
-        del admin_fsub_state[user_id]
-    if user_id in admin_data_channel_state:
-        del admin_data_channel_state[user_id]
-    if user_id in admin_shortener_setup_state:
-        del admin_shortener_setup_state[user_id]
-    if user_id in admin_delete_video_state:
-        del admin_delete_video_state[user_id]
-    if user_id in admin_batch_link_state:
-        del admin_batch_link_state[user_id]
-    if user_id in owner_add_admin_state:
-        del owner_add_admin_state[user_id]
-    if user_id in admin_delete_user_state:
-        del admin_delete_user_state[user_id]
-    if user_id in batch_add_state:
-        del batch_add_state[user_id]
-    if user_id in admin_rename_category_state:
-        del admin_rename_category_state[user_id]
-
     await callback_query.message.delete()
     await callback_query.answer("Action cancelled.")
 
@@ -4287,7 +4260,7 @@ async def setdata_cmd(client: Client, message: Message):
     if current_id:
         try:
             chat = await client.get_chat(current_id)
-            text += f"Current Data Channel: <b>{chat.title}</b> (<code>{current_id}</code>)"
+            text += f"Current Data Channel: <b>{html.escape(chat.title)}</b> (<code>{current_id}</code>)"
         except Exception:
             text += f"Current Data Channel ID: <code>{current_id}</code> (Could not fetch title)"
     else:
@@ -4307,7 +4280,6 @@ async def set_data_channel_callback(client: Client, callback_query: CallbackQuer
         "Please make sure the bot is an administrator in the channel with permission to post messages, then forward a message from the channel here or send its ID."
     )
     await callback_query.answer()
-
 
 @app.on_message(filters.text & filters.private)
 async def handle_text_input(client: Client, message: Message):
@@ -4344,7 +4316,7 @@ async def handle_text_input(client: Client, message: Message):
 
     # --- Admin-only state handling ---
     if is_admin(user_id):
-        # Handle FSub channel addition state
+        # --- Handle Force Subscribe Channel Setup ---
         if user_id in admin_fsub_state:
             state = admin_fsub_state[user_id]
             step = state.get('step')
@@ -4386,7 +4358,7 @@ async def handle_text_input(client: Client, message: Message):
             elif step == 'await_link':
                 invite_link = message.text.strip()
                 if not invite_link.startswith(("https://t.me/", "http://t.me/")):
-                    await message.reply("Invalid invite link format. It must start with `https://t.me/` or `http://t.me/`. Please try again.")
+                    await message.reply("Invalid invite link format. It must start with `https://t.me/`. Please try again.")
                     return
 
                 channel_id = state['channel_id']
@@ -4413,7 +4385,7 @@ async def handle_text_input(client: Client, message: Message):
                 del admin_fsub_state[user_id] # Clean up state
                 return
 
-        # Handle Data channel setting state
+        # --- Handle Data Channel Setup ---
         if admin_data_channel_state.get(user_id):
             try:
                 channel_id = 0
@@ -4750,5 +4722,98 @@ async def verify_and_cleanup_media():
     """Periodically verifies if media files still exist in the channel and logs missing/inaccessible entries, but does NOT delete anything."""
     while True:
         logger.info("Starting media verification and cleanup task.")
-        data_channel_id = DYNAMIC_CONFIG.get("data_channel_id")
-        
+        DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+        if not DATA_CHANNEL:
+            logger.warning("Media verification skipped: Data channel not configured.")
+            await asyncio.sleep(6 * 3600)
+            continue
+
+        try:
+            all_media = list(media_collection.find({}))
+            for media_item in all_media:
+                video_uuid = media_item.get('uuid')
+                message_id_in_channel = media_item.get('message_id')
+
+                if not message_id_in_channel:
+                    logger.warning(f"Media item {video_uuid} has no message_id in channel. (Would delete, but deletion is disabled)")
+                    continue
+
+                try:
+                    await app.get_messages(DATA_CHANNEL, message_id_in_channel)
+                    logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
+                except (MessageIdInvalid, ValueError):
+                    logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. (Would delete, but deletion is disabled)")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error verifying media {video_uuid} in channel {DATA_CHANNEL}: {e}", exc_info=True)
+                    if "not enough rights" in str(e).lower() or "permission" in str(e).lower() or "access" in str(e).lower():
+                        logger.warning(f"Bot has no access to channel. Skipping deletion for {video_uuid}.")
+                        continue
+                    continue
+
+            logger.info("Media verification and cleanup task completed.")
+        except asyncio.CancelledError:
+            logger.info("verify_and_cleanup_media task cancelled gracefully.")
+            break
+        except Exception as e:
+            logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
+
+        await asyncio.sleep(6 * 3600)
+
+async def health_check():
+    try:
+        me = await app.get_me()
+        logger.info(f"Bot username: {me.username}")
+
+        DATA_CHANNEL = DYNAMIC_CONFIG.get("data_channel_id")
+        if DATA_CHANNEL:
+            try:
+                member = await app.get_chat_member(DATA_CHANNEL, me.id)
+                logger.info(f"Bot status in data channel ({DATA_CHANNEL}): {member.status}")
+            except Exception as e:
+                logger.warning(f"Could not check bot status in data channel {DATA_CHANNEL}: {e}")
+        else:
+            logger.warning("Data channel not configured. Skipping health check for it.")
+
+        fsub_channels = DYNAMIC_CONFIG.get("force_subscribe_channels", [])
+        if fsub_channels:
+            for channel in fsub_channels:
+                channel_id = channel['channel_id']
+                try:
+                    fsub_member = await app.get_chat_member(channel_id, me.id)
+                    logger.info(f"Bot status in force subscribe channel ({channel_id}): {fsub_member.status}")
+                except Exception as e:
+                    logger.warning(f"Could not check bot status in force subscribe channel {channel_id}: {e}")
+        else:
+            logger.warning("No force subscribe channels configured. Skipping health check for them.")
+
+    except Exception as e:
+        logger.error(f"Health check failed: {e}", exc_info=True)
+
+@fastapi_app.on_event("startup")
+async def startup_event():
+    """
+    This function runs when the FastAPI server starts.
+    It initializes and starts the Pyrogram client in the background.
+    """
+    logger.info("FastAPI server is starting up...")
+
+    # Start the Pyrogram client
+    await app.start()
+    logger.info("Pyrogram client started.")
+
+    # If this is the first run, save the session string
+    SESSION_STRING = get_session_string()
+    if not SESSION_STRING:
+        logger.info("Saving session string to DB for future runs...")
+        new_session_string = await app.export_session_string()
+        set_session_string(new_session_string)
+
+    # Load dynamic and admin configurations
+    await load_dynamic_config() # <-- ADDED
+    await load_admins_from_db()
+    await health_check()
+    create_tracked_task(cleanup_expired_data())
+    create_tracked_task(verify_and_cleanup_media())
+    create_tracked_task(cleanup_expired_menus())
+    logger.info("Background tasks initiated. Bot is now
