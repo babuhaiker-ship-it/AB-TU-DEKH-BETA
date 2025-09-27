@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration #demo ---
 class BotConfig:
-    BOT_TOKEN = '8336714943:AAEDF5NRMs4MKIlu__ZoEi9VVfz0xwCIJFA'
+    BOT_TOKEN = '8336714943:AAEDF5NRMs4MKIlu__ZoEi8VVfz0xwCIJFA'
     API_ID = 29800015
     API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
     BOT_USERNAME = '@SpicyNyraa_bot'
