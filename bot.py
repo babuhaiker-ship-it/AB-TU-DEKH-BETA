@@ -69,7 +69,7 @@ class BotConfig:
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free video limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
-    MINI_APP_URL = "https://ab-tu-dekh-beta-li3u.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
+    MINI_APP_URL = "ab-tu-dekh-beta-li3u.vercel.app" # IMPORTANT: Replace with your actual frontend URL
 
 try:
     config = BotConfig()
