@@ -886,14 +886,15 @@ def save_history(user_id: int, video_uuid: str, category: str):
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
 
-def set_active_video_message(user_id: int, message_id: int, chat_id: int):
+def set_active_video_message(user_id: int, message_id: int, chat_id: int, free_video_shown: bool = False): # MODIFIED: Added free_video_shown
     """Set the active message for a user, to be deleted on next action."""
     active_video_message[user_id] = {
         'message_id': message_id,
         'chat_id': chat_id,
-        'timestamp': datetime.utcnow()
+        'timestamp': datetime.utcnow(),
+        'free_video_shown': free_video_shown # NEW
     }
-    logger.info(f"Active video message set for user {user_id}: message_id={message_id}, chat_id={chat_id}")
+    logger.info(f"Active video message set for user {user_id}: message_id={message_id}, chat_id={chat_id}, free_video_shown={free_video_shown}")
 
 def clear_active_video_message(user_id: int):
     """Clear a user's active message state."""
@@ -1037,7 +1038,8 @@ async def send_and_replace_message(
     force_new_message: bool = False,
     is_batch: bool = False,
     batch_id: str = None,
-    batch_index: int = -1
+    batch_index: int = -1,
+    free_video_shown: bool = False # NEW PARAMETER
 ) -> tuple[bool, Message | str]:
     """
     [MODIFIED] Prefers editing media/text over sending new messages for a smoother experience.
@@ -1229,7 +1231,7 @@ async def send_and_replace_message(
 
     # --- Finalization ---
     if isinstance(sent_message, Message):
-        set_active_video_message(chat_id, sent_message.id, chat_id)
+        set_active_video_message(chat_id, sent_message.id, chat_id, free_video_shown=free_video_shown) # Pass the flag
         return True, sent_message
     else:
         error_message = "Failed to send or edit the message due to an unexpected error."
@@ -2138,13 +2140,14 @@ async def get_video(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
-    wait_msg = await message.reply("Just a moment, checking your access...")
-    if not user_has_token(user_id):
-        await wait_msg.delete()
-        logger.info(f"User {user_id} has no tokens, prompting earning options.")
-        await send_token_earning_options(client, message)
-        return
-    await wait_msg.delete()
+    # REMOVED: Initial token check as per new flow
+    # wait_msg = await message.reply("Just a moment, checking your access...")
+    # if not user_has_token(user_id):
+    #     await wait_msg.delete()
+    #     logger.info(f"User {user_id} has no tokens, prompting earning options.")
+    #     await send_token_earning_options(client, message)
+    #     return
+    # await wait_msg.delete()
 
     message_id_to_edit_or_delete = message.id
 
@@ -2269,7 +2272,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], category_name, user_id, is_saved=False), # Not from saved_videos path
-        force_new_message=True # Force a new message for a clean transition from category menu
+        force_new_message=True, # Force a new message for a clean transition from category menu
+        free_video_shown=True # NEW: Mark this as the free video
     )
 
     if sent_success:
@@ -2299,7 +2303,6 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
     logger.info(f"User {user_id} selected saved category: {selected_category}.")
 
     if not await check_membership(client, user_id):
-        await callback_query.answer("You must join our channel first!", show_alert=True)
         await send_force_subscribe_message(client, user_id)
         return
 
@@ -2381,7 +2384,8 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         new_message_type="video",
         video_data=video_to_display,
         reply_markup=video_nav_keyboard(video_to_display['uuid'], selected_category, user_id, is_saved=True),
-        force_new_message=True
+        force_new_message=True,
+        free_video_shown=False # Saved videos are not part of the "one free video" logic
     )
 
     if sent_success:
@@ -2454,8 +2458,41 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             if current_active_tracked_message and current_active_tracked_message.get('message_id') != callback_query.message.id:
                 logger.warning(f"User {user_id} clicked old menu button. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
                 await callback_query.answer("This menu is outdated. Please use the latest one. 🔄", show_alert=True)
-                # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
                 return
+
+            # NEW LOGIC FOR FREE USER NAVIGATION
+            # If it's not a saved video, and the user has seen their one free video, and they don't have a token
+            if not is_saved and current_active_tracked_message and current_active_tracked_message.get('free_video_shown', False) and not user_has_token(user_id):
+                logger.info(f"Free user {user_id} attempted navigation after viewing one free video. Prompting for tokens.")
+                ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+                long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+                ad_url = await get_shortener_config_and_shorten_url(long_url)
+
+                low_token_text = (
+                    "You’re low on tokens. The rest of our private collections are locked. "
+                    "But if you can’t wait... uninterrupted access is ready now."
+                )
+                
+                # Generate the keyboard with the dynamic ad_url
+                low_token_buttons = [
+                    [InlineKeyboardButton("🔓 Unlock 24-Hour Uninterrupted Access", url=ad_url)],
+                    [InlineKeyboardButton("✨ Become a VIP (Instant, Ad-Free Access)", url=config.BUY_BOT_URL)],
+                    [InlineKeyboardButton("❓ 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)],
+                    [InlineKeyboardButton("🔗 Refer and Earn", callback_data="refer_and_earn_inline")],
+                ]
+                low_token_keyboard = InlineKeyboardMarkup(low_token_buttons)
+
+                await send_and_replace_message(
+                    client,
+                    chat_id,
+                    message_id_to_edit_or_delete=callback_query.message.id,
+                    new_message_type="text",
+                    text_content=low_token_text,
+                    reply_markup=low_token_keyboard,
+                    force_new_message=False # Try to edit the existing message
+                )
+                await callback_query.answer("You're low on tokens! Unlock more access. 🔓", show_alert=True)
+                return # IMPORTANT: Stop further navigation
 
             video = None
             if is_saved:
@@ -2491,7 +2528,8 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 new_message_type="video",
                 video_data=video,
                 reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
-                force_new_message=False # Try to edit the existing message
+                force_new_message=False, # Try to edit the existing message
+                free_video_shown=current_active_tracked_message.get('free_video_shown', False) # Preserve the flag
             )
 
             if sent_success:
@@ -2562,7 +2600,8 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
         await send_and_replace_message(
             client, chat_id, callback_query.message.id, "video", video_data=video,
             reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=batch_id, batch_index=new_index),
-            force_new_message=False, is_batch=True, batch_id=batch_id, batch_index=new_index
+            force_new_message=False, is_batch=True, batch_id=batch_id, batch_index=new_index,
+            free_video_shown=False # Batch videos are handled by check_and_update_free_usage, not this flag
         )
         # DO NOT save history for batch videos
         await callback_query.answer()
@@ -3031,6 +3070,7 @@ async def saved_videos_btn(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in saved_videos_btn.")
         return
 
+    # Keep token check for saved videos as per the request's scope
     if not user_has_token(user_id):
         logger.info(f"User {user_id} has no tokens, prompting earning options for saved videos.")
         await send_token_earning_options(client, message)
@@ -3154,7 +3194,8 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                             new_message_type="video",
                             video_data=next_video,
                             reply_markup=video_nav_keyboard(next_video['uuid'], current_category_of_removed_video, user_id, is_saved=True),
-                            force_new_message=False # Try to edit the existing message
+                            force_new_message=False, # Try to edit the existing message
+                            free_video_shown=False # Saved videos are not part of the "one free video" logic
                         )
                         if not sent_success:
                             await client.send_message(chat_id, "❌ Failed to load next saved video. Please try again. 😥")
@@ -3237,7 +3278,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         return
 
     wait_msg = await callback_query.message.reply("Just a moment, checking your access...")
-    if not user_has_token(user_id):
+    if not user_has_token(user_id): # Keep token check here
         await wait_msg.delete()
         await callback_query.answer("You need a token to watch this video. Please get a token first! 🧐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
@@ -3260,7 +3301,8 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         new_message_type="video",
         video_data=video,
         reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=True),
-        force_new_message=False # Try to edit the existing message
+        force_new_message=False, # Try to edit the existing message
+        free_video_shown=False # Saved videos are not part of the "one free video" logic
     )
 
     if sent_success:
@@ -4817,28 +4859,3 @@ async def startup_event():
 
     # If this is the first run, save the session string
     SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
-
-    # Load admins and run background tasks
-    await load_admins_from_db()
-    await load_data_channel_id() # NEW: Load data channel ID
-    await load_force_sub_channels() # NEW: Load force sub channels
-    await health_check()
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    create_tracked_task(cleanup_expired_menus())
-    logger.info("Background tasks initiated. Bot is now fully operational.")
-
-
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    """
-    This function runs when the FastAPI server is shutting down.
-    It gracefully stops the Pyrogram client.
-    """
-    logger.info("FastAPI server is shutting down...")
-    await app.stop()
-    logger.info("Pyrogram client stopped.")
