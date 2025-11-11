@@ -65,7 +65,7 @@ class BotConfig:
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
-    FREE_BATCH_LIMIT = 2  # Number of free batch videos a user can watch without a token
+    FREE_BATCHES_PER_DAY = 1 # Number of free batches a user can watch per day.
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free video limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
@@ -454,11 +454,17 @@ async def send_limit_reached_message(client: Client, chat_id: int):
     ad_url = await get_shortener_config_and_shorten_url(long_url)
 
     text = (
-        f"⌛️ <b>Daily Free Batch Limit Reached!</b> ⌛️\n\n"
-        f"You have watched your {config.FREE_BATCH_LIMIT} free batch videos for today. To continue watching, please choose one of the options below.\n\n"
-        f"Each token gives you <b>{config.TOKEN_ACCESS_HOURS} hours</b> of unlimited access! ✨"
+        "You’ve reached the end of today’s free stream... The rest of our private collection is still waiting for you.\n\n"
+        "Unlock full, uninterrupted access and keep the vibe going."
     )
-    reply_markup = generate_token_earning_keyboard(ad_url)
+
+    buttons = [
+        [InlineKeyboardButton("🔓 Unlock 24-Hour Access (Watch Ad)", url=ad_url)],
+        [InlineKeyboardButton("✨ Become a VIP (Ad-Free Access)", url=config.BUY_BOT_URL)],
+        [InlineKeyboardButton("❓ 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)],
+        [InlineKeyboardButton("🔗 Refer & Earn Tokens", callback_data="refer_and_earn_inline")],
+    ]
+    reply_markup = InlineKeyboardMarkup(buttons)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 async def check_and_update_free_usage(user_id: int, is_batch_video: bool = False) -> bool:
@@ -496,13 +502,13 @@ async def check_and_update_free_usage(user_id: int, is_batch_video: bool = False
         )
         logger.info(f"Reset free batch video limit for user {user_id}. Next reset at {new_reset_at}.")
 
-    if count < config.FREE_BATCH_LIMIT:
+    if count < config.FREE_BATCHES_PER_DAY:
         users_collection.update_one(
             {'user_id': user_id},
             {'$inc': {'free_usage.count': 1}},
             upsert=True
         )
-        logger.info(f"User {user_id} used a free batch view. Count is now {count + 1}/{config.FREE_BATCH_LIMIT}.")
+        logger.info(f"User {user_id} used a free batch view. Count is now {count + 1}/{config.FREE_BATCHES_PER_DAY}.")
         return True
     else:
         logger.warning(f"User {user_id} has reached their free batch video limit.")
@@ -1449,7 +1455,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         if added_token:
             refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
             logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
-            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {config.TOKEN_ACCESS_HOURS} hours. Enjoy! 🍿"
+            return True, "✅ <b>Access Granted.</b> Your 24-hour unlimited pass is now live. Nothing will interrupt you. Enjoy the stream while it lasts."
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
     except Exception as e:
@@ -2469,7 +2475,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 ad_url = await get_shortener_config_and_shorten_url(long_url)
 
                 low_token_text = (
-                    "You’re low on tokens. The rest of our private collections are locked. "
+                    "You’re low on tokens. The rest of our private collections are locked until your next free batch unlocks.\n\n"
                     "But if you can’t wait... uninterrupted access is ready now."
                 )
                 
@@ -2517,7 +2523,14 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                     video = get_previous_video_chronological(current_uuid, category)
 
                 if not video: # This case should ideally not be hit with looping logic
-                    await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
+                    if user_has_token(user_id):
+                        await client.send_message(
+                            chat_id,
+                            "You’ve just finished the full collection. Want more like this? Tap below to discover fresh drops.",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Discover More", callback_data="watch_more")]])
+                        )
+                    else:
+                        await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
                     return
 
             # Call send_and_replace_message. It will handle broken videos and recursive retries.
