@@ -65,8 +65,8 @@ class BotConfig:
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
-    FREE_VIDEOS_LIMIT = 2  # Number of free videos a user can watch from batch links without a token
-    FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free video limit resets
+    FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
+    FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
     MINI_APP_URL = "ab-tu-dekh-beta-li3u.vercel.app" # IMPORTANT: Replace with your actual frontend URL
@@ -445,8 +445,8 @@ def user_has_token(user_id: int) -> bool:
             return True
     return False
 
-# --- Free Video Limit Management ---
-async def send_limit_reached_message(client: Client, chat_id: int):
+# --- Free Batch Limit Management ---
+async def send_free_limit_reached_message(client: Client, chat_id: int):
     """Sends a message informing the user their free limit is reached."""
     user_id = chat_id  # Assuming private chat
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
@@ -454,52 +454,62 @@ async def send_limit_reached_message(client: Client, chat_id: int):
     ad_url = await get_shortener_config_and_shorten_url(long_url)
 
     text = (
-        f"⌛️ <b>Daily Free Limit Reached!</b> ⌛️\n\n"
-        f"You have watched your {config.FREE_VIDEOS_LIMIT} free videos for today. To continue watching, please choose one of the options below.\n\n"
-        f"Each token gives you <b>{config.TOKEN_ACCESS_HOURS} hours</b> of unlimited access! ✨"
+        "🛑 **You’ve reached the end of today’s free stream...** 🛑\n\n"
+        "The rest of our private collection is still waiting for you. 🤫\n\n"
+        "Unlock full, uninterrupted access and keep the vibe going. ✨"
     )
     reply_markup = generate_token_earning_keyboard(ad_url)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
-async def check_and_update_free_usage(user_id: int) -> bool:
+async def check_and_update_free_batch_usage(user_id: int, batch_id: str) -> bool:
     """
-    Checks if a user can watch a video based on their token, premium, or free status.
-    Returns True if access is granted, False otherwise. Increments free usage count if used.
+    Checks if a user can watch a batch based on their token, premium, or free status.
+    A user gets a limited number of free batches per day.
+    Once a batch is claimed as free, all videos in it can be watched for the day.
+    Returns True if access is granted, False otherwise.
     """
     if is_premium_user(user_id) or user_has_token(user_id):
         return True
 
     now = datetime.utcnow()
-    user_doc = users_collection.find_one({'user_id': user_id})
-    if not user_doc:
-        # This case should be rare as users are created on /start
-        users_collection.insert_one({'user_id': user_id, 'free_usage': {'count': 0, 'reset_at': now + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}})
-        user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = users_collection.find_one_and_update(
+        {'user_id': user_id},
+        {'$setOnInsert': {
+            'free_batch_usage': {'claimed_batches': [], 'reset_at': now + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
+        }},
+        upsert=True,
+        return_document=ReturnDocument.AFTER
+    )
 
-    free_usage = user_doc.get('free_usage', {})
-    count = free_usage.get('count', 0)
+    free_usage = user_doc.get('free_batch_usage', {})
+    claimed_batches = free_usage.get('claimed_batches', [])
     reset_at = free_usage.get('reset_at')
 
+    # Reset if the time has come
     if not reset_at or now >= reset_at:
-        count = 0
         new_reset_at = now + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)
         users_collection.update_one(
             {'user_id': user_id},
-            {'$set': {'free_usage': {'count': 0, 'reset_at': new_reset_at}}},
-            upsert=True
+            {'$set': {'free_batch_usage': {'claimed_batches': [], 'reset_at': new_reset_at}}}
         )
-        logger.info(f"Reset free video limit for user {user_id}. Next reset at {new_reset_at}.")
+        claimed_batches = []
+        logger.info(f"Reset free batch limit for user {user_id}. Next reset at {new_reset_at}.")
 
-    if count < config.FREE_VIDEOS_LIMIT:
+    # If they've already claimed this batch today, they can continue watching
+    if batch_id in claimed_batches:
+        logger.info(f"User {user_id} has access to already claimed batch {batch_id}.")
+        return True
+
+    # If they haven't claimed it, check if they have free slots
+    if len(claimed_batches) < config.FREE_BATCH_LIMIT:
         users_collection.update_one(
             {'user_id': user_id},
-            {'$inc': {'free_usage.count': 1}},
-            upsert=True
+            {'$push': {'free_batch_usage.claimed_batches': batch_id}}
         )
-        logger.info(f"User {user_id} used a free view. Count is now {count + 1}/{config.FREE_VIDEOS_LIMIT}.")
+        logger.info(f"User {user_id} claimed a new free batch {batch_id}. Total claimed today: {len(claimed_batches) + 1}/{config.FREE_BATCH_LIMIT}.")
         return True
     else:
-        logger.warning(f"User {user_id} has reached their free video limit.")
+        logger.warning(f"User {user_id} has reached their free batch limit for today.")
         return False
 
 # --- Premium Status Check and Notification ---
@@ -1245,10 +1255,10 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
 def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False) -> InlineKeyboardMarkup:
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = [
-        [InlineKeyboardButton("👆 Click Here To Refresh Token", url=ad_url)],
-        [InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")],
-        [InlineKeyboardButton("❓ How To Open Links?", url=config.TUTORIAL_LINK_2)],
-        [InlineKeyboardButton("💳 Buy Token", url=config.BUY_BOT_URL)],
+        [InlineKeyboardButton("🔓 Unlock 24-Hour Access (Watch Ad)", url=ad_url)],
+        [InlineKeyboardButton("💎 Become a VIP (Ad-Free Access)", url=config.BUY_BOT_URL)],
+        [InlineKeyboardButton("📚 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)],
+        [InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")],
     ]
     if is_pending_content:
         buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
@@ -1775,7 +1785,7 @@ async def start_cmd(client: Client, message: Message):
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                 'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
                 'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None,
-                'free_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
+                'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
@@ -1868,8 +1878,8 @@ async def start_cmd(client: Client, message: Message):
                             )
 
                 elif deep_link_type == 'batch':
-                    if not await check_and_update_free_usage(user_id):
-                        await send_limit_reached_message(client, message.chat.id)
+                    if not await check_and_update_free_batch_usage(user_id, deep_link_data):
+                        await send_free_limit_reached_message(client, message.chat.id)
                         return
 
                     batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
@@ -2511,10 +2521,11 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' for batch video menus."""
     user_id = callback_query.from_user.id
+    action, batch_id, current_index_str = callback_query.data.split('|')
 
-    if not await check_and_update_free_usage(user_id):
+    if not await check_and_update_free_batch_usage(user_id, batch_id):
         await callback_query.answer("Your free limit is reached!", show_alert=True)
-        await send_limit_reached_message(client, callback_query.message.chat.id)
+        await send_free_limit_reached_message(client, callback_query.message.chat.id)
         return
 
     if user_id in processing_navigation_lock:
