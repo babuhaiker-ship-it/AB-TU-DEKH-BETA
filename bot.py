@@ -2199,6 +2199,11 @@ async def select_category(client: Client, callback_query: CallbackQuery):
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
+    if not user_has_token(user_id):
+        await callback_query.answer("You are low on tokens!", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
+
     if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ Too many category changes. Wait 1 min. ⏳", show_alert=True)
         logger.warning(f"User {user_id} hit rate limit in select_category.")
