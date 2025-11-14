@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video App</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div id="app">
+        <div id="home-page" class="page">
+            <div id="video-feed">
+                <!-- Video items will be injected here by JavaScript -->
+            </div>
+        </div>
+
+        <div id="explore-page" class="page" style="display: none;">
+            <h2>Explore Categories</h2>
+            <div id="categories-list"></div>
+        </div>
+
+        <div id="saved-page" class="page" style="display: none;">
+            <h2>Saved Videos</h2>
+            <div id="saved-videos-list"></div>
+        </div>
+
+       <div id="profile-page" class="page" style="display: none;">
+            <h2>Profile</h2>
+            <div id="profile-info"></div>
+            <!-- Refer & Earn Section -->
+            <div id="referral-section">
+                <h3>Refer & Earn</h3>
+                <p id="referral-link">Referral Link: <span id="referral-code"></span></p>
+                <p id="referral-stats">Referrals: <span id="referral-count">0</span></p>
+                <button id="copy-referral-link">Copy Link</button>
+            </div>
+            
+            <!-- Buy Token Section -->
+            <div id="buy-token-section">
+                <h3>Buy Tokens</h3>
+                <button id="buy-token-button">Buy Tokens</button>
+            </div>
+
+            <!-- Refresh Token Section -->
+            <div id="refresh-token-section">
+                <h3>Refresh Tokens</h3>
+                <button id="refresh-token-button">Refresh Token</button>
+            </div>
+        </div>
+
+        <nav id="bottom-nav">
+            <a href="#" class="nav-item active" data-page="home">Home</a>
+            <a href="#" class="nav-item" data-page="explore">Explore</a>
+            <a href="#" class="nav-item" data-page="saved">Saved</a>
+            <a href="#" class="nav-item" data-page="profile">Profile</a>
+        </nav>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
