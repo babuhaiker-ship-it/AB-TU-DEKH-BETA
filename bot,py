@@ -76,12 +76,12 @@ class BotConfig:
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
-    MINI_APP_URL = os.environ.get("STREAM_BASE_URL", "http://localhost:8000") # Frontend and Backend are on the same domain # MODIFIED
+    MINI_APP_URL = os.environ.get("STREAM_BASE_URL", "https://ab-tu-dekh-beta-1-u3lq.onrender.com") # Frontend and Backend are on the same domain # MODIFIED
 
     # --- ADDED THIS ---
     # This MUST be the public URL of your Render Web Service.
     # e.g., "https://your-app-name.onrender.com"
-    STREAM_BASE_URL = os.environ.get("STREAM_BASE_URL", "http://localhost:8000")
+    STREAM_BASE_URL = os.environ.get("STREAM_BASE_URL", "https://ab-tu-dekh-beta-1-u3lq.onrender.com")
 
 
 try:
