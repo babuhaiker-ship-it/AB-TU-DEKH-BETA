@@ -7,3 +7,5 @@ motor
 aiohttp
 shortzy
 pydantic
+Jinja2
+PyJWT
