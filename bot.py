@@ -22,7 +22,8 @@ from shortzy import Shortzy
 # --- Mini App / Web Server Imports ---
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import hmac
@@ -176,6 +177,14 @@ fastapi_app.add_middleware(
 # ==================================================
 # END OF BLOCK TO ADD
 # ==================================================
+
+# Mount the 'static' directory to serve frontend files
+fastapi_app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@fastapi_app.get("/")
+async def serve_index():
+    """Serves the main index.html file for the web interface."""
+    return FileResponse('static/index.html')
 
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
@@ -1712,6 +1721,30 @@ async def get_api_feed(category: str, page: int = 1, limit: int = 20, auth: dict
     videos = await cursor.to_list(length=limit)
     return videos
 
+@fastapi_app.get("/api/categories")
+async def get_api_categories(auth: dict = Depends(verify_telegram_init_data)):
+    """API endpoint to get all video categories."""
+    cursor = async_categories_collection.find({}, {'name': 1, '_id': 0})
+    categories = [doc['name'] async for doc in cursor]
+    return sorted(categories)
+
+@fastapi_app.get("/api/feed/{category}")
+async def get_api_feed(category: str, page: int = 1, limit: int = 20, auth: dict = Depends(verify_telegram_init_data)):
+    """API endpoint to get a feed of videos for a specific category with pagination."""
+    if page < 1:
+        raise HTTPException(status_code=400, detail="Page number must be 1 or greater.")
+    if limit < 1 or limit > 100: # Set a reasonable max limit
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 100.")
+
+    skip_count = (page - 1) * limit
+    cursor = async_media_collection.find(
+        {'category': category, 'banned': {'$ne': True}},
+        {'uuid': 1, 'custom_caption': 1, '_id': 0}
+    ).sort('sequence_number', ASCENDING).skip(skip_count).limit(limit)
+
+    videos = await cursor.to_list(length=limit)
+    return videos
+
 @fastapi_app.get("/api/get-stream-url/{video_uuid}")
 async def get_api_stream_url(video_uuid: str, auth: dict = Depends(verify_telegram_init_data)):
     """
@@ -1737,11 +1770,9 @@ async def get_api_stream_url(video_uuid: str, auth: dict = Depends(verify_telegr
         raise HTTPException(status_code=503, detail="Service Unavailable: Video storage channel not configured.")
 
     try:
-        file_obj = [obj async for obj in app.get_file(file_id)][0]
-        if not file_obj or not file_obj.file_path:
-            raise HTTPException(status_code=500, detail="Could not retrieve file path from Telegram.")
-        download_link = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{file_obj.file_path}"
-        return JSONResponse(content={"url": download_link})
+        # Instead of generating a direct download link, we now return a link to our own streaming endpoint.
+        stream_url = f"/stream/{video_uuid}"
+        return JSONResponse(content={"url": stream_url})
     except FileReferenceExpired:
         logger.warning(f"FileReferenceExpired for API stream {video_uuid}. Attempting self-heal.")
         try:
@@ -1850,6 +1881,89 @@ async def toggle_api_bookmark(request: BookmarkRequest, auth: dict = Depends(ver
             {'$push': {'bookmarked_videos': new_bookmark}}
         )
         return JSONResponse(content={"status": "added"}, status_code=201)
+
+@fastapi_app.get("/stream/{video_uuid}")
+async def stream_video(video_uuid: str, request: Request):
+    """
+    Handles video streaming with support for HTTP Range requests.
+    """
+    video_doc = await async_media_collection.find_one({'uuid': video_uuid})
+    if not video_doc:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    file_id = video_doc.get('file_id')
+    file_size = video_doc.get('file_size')
+    mime_type = video_doc.get('mime_type')
+
+    if not file_id:
+        raise HTTPException(status_code=500, detail="Video data is incomplete")
+
+    if not file_size or not mime_type:
+        try:
+            # Fetch the message to get the video details
+            message = await app.get_messages(DATA_CHANNEL_ID, video_doc['message_id'])
+            if message.video:
+                file_size = message.video.file_size
+                mime_type = message.video.mime_type
+                # Update the database with the new information
+                await async_media_collection.update_one(
+                    {'uuid': video_uuid},
+                    {'$set': {'file_size': file_size, 'mime_type': mime_type}}
+                )
+            else:
+                raise HTTPException(status_code=500, detail="Could not retrieve video details")
+        except Exception as e:
+            logger.error(f"Error fetching video details for {video_uuid}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Could not retrieve video details")
+
+    range_header = request.headers.get('Range')
+    start, end = 0, file_size - 1
+
+    if range_header:
+        byte1, byte2 = 0, None
+        match = re.search(r"(\d+)-(\d*)", range_header)
+        groups = match.groups()
+
+        if groups[0]:
+            byte1 = int(groups[0])
+        if groups[1]:
+            byte2 = int(groups[1])
+
+        start = byte1
+        if byte2:
+            end = byte2
+        else:
+            end = file_size - 1
+
+    chunk_size = end - start + 1
+
+    headers = {
+        'Content-Range': f'bytes {start}-{end}/{file_size}',
+        'Content-Length': str(chunk_size),
+        'Accept-Ranges': 'bytes',
+        'Content-Type': video_doc.get('mime_type', 'video/mp4'),
+        'Content-Disposition': 'inline',
+    }
+
+    status_code = 206 if range_header else 200
+
+    async def video_generator():
+        CHUNK_SIZE = 256 * 1024
+        offset = start
+
+        while offset < end:
+            limit = min(CHUNK_SIZE, end - offset + 1)
+            try:
+                chunk = b''
+                async for part in app.stream_media(file_id, offset=offset, limit=limit):
+                    chunk += part
+                yield chunk
+                offset += len(chunk)
+            except Exception as e:
+                logger.error(f"Error streaming video chunk for {video_uuid}: {e}", exc_info=True)
+                break
+
+    return StreamingResponse(video_generator(), headers=headers, status_code=status_code)
 
 # =====================================================================================
 # ============================= END OF MINI APP BACKEND ===============================
@@ -3858,7 +3972,9 @@ async def process_batch_queue(user_id: int, client: Client):
                 "file_unique_id": file_unique_id, "category": category,
                 "timestamp": get_current_time(),
                 "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
-                "banned": False, "custom_caption": message.caption
+                "banned": False, "custom_caption": message.caption,
+                "file_size": sent_video_message.video.file_size,
+                "mime_type": sent_video_message.video.mime_type
             }
             media_collection.insert_one(video_data)
             state['next_sequence'] += 1
