@@ -65,6 +65,8 @@ class BotConfig:
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
+    DAILY_FREE_SCROLLS = 5 # Number of free video scrolls for users without a token
+    FREE_SCROLL_RESET_HOURS = 1 # Hours after which the free scroll limit resets
     FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
@@ -510,6 +512,49 @@ async def check_and_update_free_batch_usage(user_id: int, batch_id: str) -> bool
         return True
     else:
         logger.warning(f"User {user_id} has reached their free batch limit for today.")
+        return False
+
+def check_and_update_free_scrolls(user_id: int) -> bool:
+    """
+    Checks if a user can use a free scroll.
+    Returns True if access is granted, False otherwise.
+    """
+    if is_premium_user(user_id) or user_has_token(user_id):
+        return True
+
+    now = datetime.utcnow()
+    user_doc = users_collection.find_one_and_update(
+        {'user_id': user_id},
+        {'$setOnInsert': {
+            'free_scroll_usage': {'count': 0, 'reset_at': now + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)}
+        }},
+        upsert=True,
+        return_document=ReturnDocument.AFTER
+    )
+
+    free_scroll_usage = user_doc.get('free_scroll_usage', {})
+    count = free_scroll_usage.get('count', 0)
+    reset_at = free_scroll_usage.get('reset_at')
+
+    # Reset if the time has come
+    if not reset_at or now >= reset_at:
+        new_reset_at = now + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {'free_scroll_usage': {'count': 0, 'reset_at': new_reset_at}}}
+        )
+        count = 0
+        logger.info(f"Reset free scroll limit for user {user_id}. Next reset at {new_reset_at}.")
+
+    if count < config.DAILY_FREE_SCROLLS:
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$inc': {'free_scroll_usage.count': 1}}
+        )
+        logger.info(f"User {user_id} used a free scroll. Total used today: {count + 1}/{config.DAILY_FREE_SCROLLS}.")
+        return True
+    else:
+        logger.warning(f"User {user_id} has reached their free scroll limit for today.")
         return False
 
 # --- Premium Status Check and Notification ---
@@ -1785,6 +1830,7 @@ async def start_cmd(client: Client, message: Message):
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                 'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
                 'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None,
+                'free_scroll_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)},
                 'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
             })
             add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
@@ -2200,9 +2246,12 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     if not user_has_token(user_id):
-        await callback_query.answer("You are low on tokens!", show_alert=True)
-        await send_token_earning_options(client, callback_query.message)
-        return
+        if not check_and_update_free_scrolls(user_id):
+            await callback_query.answer("You are out of free scrolls!", show_alert=True)
+            await send_token_earning_options(client, callback_query.message)
+            return
+        else:
+            await callback_query.answer("You are using a free scroll!", show_alert=True)
 
     if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ Too many category changes. Wait 1 min. ⏳", show_alert=True)
@@ -2435,7 +2484,13 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             return
 
         create_tracked_task(check_premium_status_and_notify(client, user_id))
-
+        if not user_has_token(user_id):
+            if not check_and_update_free_scrolls(user_id):
+                await callback_query.answer("You are out of free scrolls!", show_alert=True)
+                await send_token_earning_options(client, callback_query.message)
+                return
+            else:
+                await callback_query.answer("You are using a free scroll!", show_alert=True)
         try:
             if await is_rate_limited(user_id):
                 await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
