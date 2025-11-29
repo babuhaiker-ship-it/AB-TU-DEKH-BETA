@@ -18,7 +18,13 @@ import re
 import html
 import urllib.parse
 from shortzy import Shortzy
-
+from fastapi import FastAPI, Request, HTTPException, Response
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+import uvicorn
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 
 # --- Logging Setup ---
@@ -60,6 +66,8 @@ class BotConfig:
     FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
+    WEB_DOMAIN = os.environ.get("RENDER_EXTERNAL_URL")
+
 
 try:
     config = BotConfig()
@@ -130,6 +138,104 @@ app = Client(
     bot_token=config.BOT_TOKEN
 )
 
+# --- FastAPI Setup ---
+fast_app = FastAPI()
+fast_app.mount("/static", StaticFiles(directory="web/static"), name="static")
+templates = Jinja2Templates(directory="web/templates")
+
+# --- Web Access Token Management ---
+web_access_tokens = {} # In-memory store for tokens: {token: {'user_id': int, 'expires_at': datetime}}
+WEB_TOKEN_EXPIRY_SECONDS = 3600 # 1 hour for web access tokens
+
+def is_web_token_valid(token: str) -> dict | None:
+    """Checks if a web access token is valid and not expired."""
+    token_data = web_access_tokens.get(token)
+    if not token_data:
+        return None
+    if datetime.utcnow() > token_data['expires_at']:
+        del web_access_tokens[token] # Clean up expired token
+        return None
+    return token_data
+
+# --- FastAPI Routes ---
+@fast_app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request, token: str = None):
+    """Serves the main video player page and validates the access token."""
+    if not token or not is_web_token_valid(token):
+        return HTMLResponse(content="<h1>Invalid or expired access token.</h1>", status_code=403)
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@fast_app.get("/api/videos")
+async def get_videos(token: str = None):
+    """Provides a list of saved video UUIDs for the authenticated user."""
+    token_data = is_web_token_valid(token)
+    if not token_data:
+        raise HTTPException(status_code=403, detail="Invalid or expired access token.")
+
+    user_id = token_data['user_id']
+    user_doc = users_collection.find_one({'user_id': user_id})
+    if not user_doc or not user_doc.get('bookmarked_videos'):
+        return []
+
+    # Return the list of bookmarked video objects (which contain the UUID)
+    return user_doc.get('bookmarked_videos', [])
+
+@fast_app.get("/stream/{video_uuid}")
+async def stream_video(video_uuid: str, request: Request, token: str = None):
+    """Streams a video file from Telegram, supporting byte range requests."""
+    token_data = is_web_token_valid(token)
+    if not token_data:
+        raise HTTPException(status_code=403, detail="Invalid or expired access token.")
+
+    video_info = media_collection.find_one({'uuid': video_uuid})
+    if not video_info:
+        raise HTTPException(status_code=404, detail="Video not found.")
+
+    range_header = request.headers.get('range')
+    file_id = video_info['file_id']
+
+    # Using get_file to get file size, as file_size is not always stored
+    try:
+        file_properties = await app.get_file(file_id)
+        file_size = file_properties.file_size
+    except Exception as e:
+        logger.error(f"Failed to get file properties for streaming: {e}")
+        raise HTTPException(status_code=500, detail="Could not retrieve file information from Telegram.")
+
+
+    headers = {
+        'Content-Type': 'video/mp4',
+        'Accept-Ranges': 'bytes',
+        'Content-Length': str(file_size),
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'Range, Origin, X-Requested-With, Content-Type, Accept',
+    }
+
+    if range_header:
+        start_str, end_str = range_header.replace('bytes=', '').split('-')
+        start = int(start_str)
+        end = int(end_str) if end_str else file_size - 1
+
+        if start >= file_size or end >= file_size:
+            return Response(status_code=416) # Range Not Satisfiable
+
+        headers['Content-Range'] = f'bytes {start}-{end}/{file_size}'
+        headers['Content-Length'] = str(end - start + 1)
+        status_code = 206 # Partial Content
+
+        async def generator():
+            # Using Pyrogram's stream_media for efficient chunking
+            async for chunk in app.stream_media(file_id, offset=start, limit=end - start + 1):
+                yield chunk
+
+        return StreamingResponse(generator(), status_code=status_code, headers=headers)
+
+    # If no range header, stream the whole file
+    async def full_generator():
+        async for chunk in app.stream_media(file_id):
+            yield chunk
+
+    return StreamingResponse(full_generator(), headers=headers)
 
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
@@ -1557,6 +1663,40 @@ async def handle_error(client: Client, message: Message, error: Exception):
 
 
 # --- Handlers ---
+
+@app.on_message(filters.command("webui") & filters.private)
+async def webui_cmd(client: Client, message: Message):
+    """Generates a secure, time-limited link to the web interface."""
+    user_id = message.from_user.id
+
+    if not config.WEB_DOMAIN:
+        await message.reply("The web interface is not configured. Please contact an admin.")
+        return
+
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    if not user_can_access_video(user_id):
+        await send_token_earning_options(client, message)
+        return
+
+    # Generate a secure, single-use token
+    token = str(uuid.uuid4())
+    expires_at = datetime.utcnow() + timedelta(seconds=WEB_TOKEN_EXPIRY_SECONDS)
+    web_access_tokens[token] = {'user_id': user_id, 'expires_at': expires_at}
+
+    web_link = f"{config.WEB_DOMAIN}/?token={token}"
+
+    reply_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎬 Open Video Player", url=web_link)]]
+    )
+    await message.reply(
+        "Click the button below to open your saved videos in the web player.\n\n"
+        f"<i>This link will expire in {int(WEB_TOKEN_EXPIRY_SECONDS / 60)} minutes.</i>",
+        reply_markup=reply_markup
+    )
+
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -4630,29 +4770,47 @@ async def health_check():
 
 async def main():
     """
-    Main function to start the bot and background tasks.
+    Main function to start the bot, web server, and background tasks.
     """
-    logger.info("Starting the bot...")
-    # Start the Pyrogram client
-    await app.start()
-    logger.info("Pyrogram client started.")
-    # If this is the first run, save the session string
-    SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
-    # Load admins and run background tasks
-    await load_admins_from_db()
-    await load_data_channel_id()
-    await load_force_sub_channels()
-    await health_check()
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    create_tracked_task(cleanup_expired_menus())
-    logger.info("Background tasks initiated. Bot is now fully operational.")
-    # Keep the bot running
-    await asyncio.Event().wait()
+    try:
+        logger.info("Starting the bot and web server...")
+        # Start the Pyrogram client
+        await app.start()
+        logger.info("Pyrogram client started.")
+        # If this is the first run, save the session string
+        SESSION_STRING = get_session_string()
+        if not SESSION_STRING:
+            logger.info("Saving session string to DB for future runs...")
+            new_session_string = await app.export_session_string()
+            set_session_string(new_session_string)
+        # Load admins and run background tasks
+        await load_admins_from_db()
+        await load_data_channel_id()
+        await load_force_sub_channels()
+        await health_check()
+        create_tracked_task(cleanup_expired_data())
+        create_tracked_task(verify_and_cleanup_media())
+        create_tracked_task(cleanup_expired_menus())
+
+        # --- Start FastAPI server ---
+        # Render provides a PORT environment variable. Default to 8080 if not set.
+        port = int(os.environ.get("PORT", 8080))
+        config = uvicorn.Config(fast_app, host="0.0.0.0", port=port, log_level="info")
+        server = uvicorn.Server(config)
+        # Running the server in a tracked task
+        create_tracked_task(server.serve())
+        logger.info(f"FastAPI server started on http://0.0.0.0:{port}")
+
+        logger.info("Background tasks initiated. Bot is now fully operational.")
+        # Keep the main task running to keep the event loop alive
+        await asyncio.Event().wait()
+    finally:
+        logger.info("Shutting down...")
+        if app.is_initialized:
+            await app.stop()
+        for task in active_tasks:
+            task.cancel()
+
 
 if __name__ == "__main__":
     try:
@@ -4661,9 +4819,3 @@ if __name__ == "__main__":
         logger.info("Bot stopped manually.")
     except Exception as e:
         logger.critical(f"Bot stopped due to a critical error: {e}", exc_info=True)
-    finally:
-        # Graceful shutdown
-        if app.is_initialized:
-            app.stop()
-        for task in active_tasks:
-            task.cancel()
