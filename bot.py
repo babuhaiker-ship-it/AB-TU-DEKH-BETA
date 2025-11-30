@@ -4,6 +4,8 @@ import uuid
 import base64
 import logging
 from datetime import datetime, timedelta
+import uvicorn
+from fastapi import FastAPI
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo
@@ -30,16 +32,18 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration #demo ---
 class BotConfig:
-    BOT_TOKEN = '8336714943:AAEDF5NRMs4MKIlu__ZoEi8VVfz0xwCIJFA'
-    API_ID = 29800015
-    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@SpicyNyraa_bot'
-    MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
-    MONGO_DB_NAME = 'spicybot'
+    BOT_TOKEN = os.environ.get('BOT_TOKEN', '8336714943:AAEDF5NRMs4MKIlu__ZoEi8VVfz0xwCIJFA')
+    API_ID = int(os.environ.get('API_ID', 29800015))
+    API_HASH = os.environ.get('API_HASH', 'c8f37108be31ab9ea2818bfe533fbb6f')
+    BOT_USERNAME = os.environ.get('BOT_USERNAME', '@SpicyNyraa_bot')
+    MONGO_URI = os.environ.get('MONGO_URI', 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0')
+    MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME', 'spicybot')
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
-    OWNER_ID = 6612030110 # The main owner ID, cannot be removed
-    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
+    BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/SpicyNyraaSupport_bot') # MODIFIED: Added https://
+    OWNER_ID = int(os.environ.get('OWNER_ID', 6612030110)) # The main owner ID, cannot be removed
+    TUTORIAL_LINK_2 = os.environ.get('TUTORIAL_LINK_2', 'https://t.me/urlshortenertutorial')
+    PORT = int(os.environ.get('PORT', 8080))
+    WEB_SERVER = os.environ.get('WEB_SERVER', True)
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 2
     REFERRAL_BONUS = 1
@@ -4628,31 +4632,52 @@ async def health_check():
 
 
 
+web_app = FastAPI()
+
+
+@web_app.get("/")
+async def root():
+    return {"status": "alive"}
+
+
 async def main():
     """
-    Main function to start the bot and background tasks.
+    Main function to start the bot, its background tasks, and the web server.
     """
-    logger.info("Starting the bot...")
-    # Start the Pyrogram client
-    await app.start()
-    logger.info("Pyrogram client started.")
-    # If this is the first run, save the session string
-    SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
-    # Load admins and run background tasks
-    await load_admins_from_db()
-    await load_data_channel_id()
-    await load_force_sub_channels()
-    await health_check()
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    create_tracked_task(cleanup_expired_menus())
-    logger.info("Background tasks initiated. Bot is now fully operational.")
-    # Keep the bot running
-    await asyncio.Event().wait()
+    async def run_bot_and_tasks():
+        logger.info("Starting the bot client and tasks...")
+        await app.start()
+        logger.info("Pyrogram client started.")
+        # If this is the first run, save the session string
+        SESSION_STRING = get_session_string()
+        if not SESSION_STRING:
+            logger.info("Saving session string to DB for future runs...")
+            new_session_string = await app.export_session_string()
+            set_session_string(new_session_string)
+        # Load admins and run background tasks
+        await load_admins_from_db()
+        await load_data_channel_id()
+        await load_force_sub_channels()
+        await health_check()
+        create_tracked_task(cleanup_expired_data())
+        create_tracked_task(verify_and_cleanup_media())
+        create_tracked_task(cleanup_expired_menus())
+        logger.info("Background tasks initiated. Bot is now fully operational.")
+        await asyncio.Event().wait()
+
+    async def run_web_server():
+        config = uvicorn.Config(web_app, host="0.0.0.0", port=BotConfig.PORT, log_level="info")
+        server = uvicorn.Server(config)
+        logger.info(f"Starting web server on http://0.0.0.0:{BotConfig.PORT}")
+        await server.serve()
+
+    if BotConfig.WEB_SERVER:
+        await asyncio.gather(
+            run_bot_and_tasks(),
+            run_web_server()
+        )
+    else:
+        await run_bot_and_tasks()
 
 if __name__ == "__main__":
     try:
