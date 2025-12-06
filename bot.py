@@ -1881,8 +1881,7 @@ async def start_cmd(client: Client, message: Message):
                 'free_scroll_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)},
                 'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
             })
-            add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
-            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
+            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_SCROLLS} free scrolls.")
 
             # Handle referral for the newly created user
             if deep_link_arg:
@@ -1906,7 +1905,7 @@ async def start_cmd(client: Client, message: Message):
             # Prepare custom force-sub message based on user state
             custom_text = None
             if is_new_user:
-                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received {config.NEW_USER_TOKENS} free token 🎁 to start your journey!\n\n"
+                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received {config.NEW_USER_SCROLLS} free scrolls 🎁 to start your journey!\n\n"
                 part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
                 custom_text = part1 + part2
 
@@ -2000,7 +1999,7 @@ async def start_cmd(client: Client, message: Message):
         elif is_new_user: # New user, already joined, no deep link
             await message.reply(
                 f"🎉 Congratulations {first_name_safe}!\n"
-                f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
+                f"You got {config.NEW_USER_SCROLLS} free scrolls 🎁 to start your journey!\n\n"
                 f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
                 reply_markup=await get_main_keyboard(user_id)
             )
@@ -4923,6 +4922,20 @@ async def verify_and_cleanup_media():
 
         await asyncio.sleep(6 * 3600)
 
+
+async def keep_alive():
+    """Sends a message every 2 minutes to keep the bot alive on Render."""
+    while True:
+        try:
+            logger.info("Keep-alive: sending status message.")
+            sent_message = await app.send_message(config.OWNER_ID, "Bot is running...")
+            await sent_message.delete()
+            logger.info("Keep-alive: status message sent and deleted.")
+        except Exception as e:
+            logger.error(f"Keep-alive task failed: {e}", exc_info=True)
+        await asyncio.sleep(120) # Sleep for 2 minutes
+
+
 async def health_check():
     try:
         me = await app.get_me()
@@ -4977,6 +4990,7 @@ async def startup_event():
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
+    create_tracked_task(keep_alive())
     logger.info("Background tasks initiated. Bot is now fully operational.")
 
 
