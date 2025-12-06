@@ -1,1 +1,4 @@
+spicynyraa_session.session
+*.session
+playwright_output.log
 bot.log
