@@ -22,8 +22,8 @@ from shortzy import Shortzy
 # --- Mini App / Web Server Imports ---
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from motor.motor_asyncio import AsyncIOMotorClient
 import hmac
 import hashlib
@@ -72,7 +72,7 @@ class BotConfig:
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
-    MINI_APP_URL = "https://niggabitchass.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
+    MINI_APP_URL = "/" # Set to root, we will serve the frontend from here
 
 try:
     config = BotConfig()
@@ -155,27 +155,19 @@ app = Client(
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
 
-# ==================================================
-# ADD THIS ENTIRE BLOCK TO FIX THE LOADING SCREEN
-# ==================================================
-# Configure CORS to allow the frontend to communicate with the backend
-origins = [
-    config.MINI_APP_URL,  # Your frontend URL
-    # You can add other URLs for local testing if needed
-    # "http://localhost",
-    # "http://localhost:8080",
-]
+# --- NEW: Serve Frontend ---
+@fastapi_app.get("/")
+async def root():
+    return FileResponse('web/index.html')
 
-fastapi_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allows all headers
-)
-# ==================================================
-# END OF BLOCK TO ADD
-# ==================================================
+@fastapi_app.get("/style.css")
+async def style():
+    return FileResponse('web/style.css')
+
+@fastapi_app.get("/script.js")
+async def script():
+    return FileResponse('web/script.js')
+
 
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
@@ -4963,43 +4955,54 @@ async def health_check():
     except Exception as e:
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
-@fastapi_app.on_event("startup")
-async def startup_event():
-    """
-    This function runs when the FastAPI server starts.
-    It initializes and starts the Pyrogram client in the background.
-    """
-    logger.info("FastAPI server is starting up...")
 
-    # Start the Pyrogram client
+async def main():
+    """Starts both the Pyrogram client and the FastAPI server, and handles graceful shutdown."""
+
+    # Configure the Uvicorn server
+    port = int(os.environ.get("PORT", 8080))
+    server_config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(server_config)
+
+    # Start Pyrogram and load initial data
     await app.start()
     logger.info("Pyrogram client started.")
-
-    # If this is the first run, save the session string
-    SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
-
-    # Load admins and run background tasks
     await load_admins_from_db()
-    await load_data_channel_id() # NEW: Load data channel ID
-    await load_force_sub_channels() # NEW: Load force sub channels
-    await health_check()
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    create_tracked_task(cleanup_expired_menus())
-    create_tracked_task(keep_alive())
-    logger.info("Background tasks initiated. Bot is now fully operational.")
+    await load_data_channel_id()
+    await load_force_sub_channels()
 
+    # Start background tasks and keep references to them
+    bg_tasks = {
+        asyncio.create_task(cleanup_expired_data()),
+        asyncio.create_task(verify_and_cleanup_media()),
+        asyncio.create_task(cleanup_expired_menus()),
+        asyncio.create_task(keep_alive())
+    }
+    logger.info("Background tasks initiated.")
 
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    """
-    This function runs when the FastAPI server is shutting down.
-    It gracefully stops the Pyrogram client.
-    """
-    logger.info("FastAPI server is shutting down...")
-    await app.stop()
-    logger.info("Pyrogram client stopped.")
+    # This is the main application loop. We run the server and wait for it to shut down.
+    # Uvicorn will handle signals like Ctrl+C and stop server.serve().
+    # We use a try/finally to ensure cleanup happens.
+    try:
+        logger.info(f"Starting web server on port {port}")
+        await server.serve()
+    finally:
+        logger.info("Shutdown signal received. Cleaning up...")
+
+        # Cancel all background tasks
+        for task in bg_tasks:
+            task.cancel()
+
+        # Wait for all tasks to acknowledge cancellation
+        await asyncio.gather(*bg_tasks, return_exceptions=True)
+
+        # Stop the Pyrogram client
+        await app.stop()
+        logger.info("Pyrogram client stopped.")
+        logger.info("Cleanup complete.")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Application shut down by user.")
