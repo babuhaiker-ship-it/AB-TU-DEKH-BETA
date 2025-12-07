@@ -19,7 +19,24 @@ function hideLoading() {
     loading.style.display = 'none';
 }
 
+function showError(message) {
+    const errorDisplay = document.getElementById('error-display');
+    if (errorDisplay) {
+        errorDisplay.innerText = message;
+        errorDisplay.style.display = 'block';
+    }
+    // Hide category selector and loading indicators
+    if (categorySelector) categorySelector.style.display = 'none';
+    if (loading) loading.style.display = 'none';
+}
+
 async function fetchWithAuth(url) {
+    if (!window.Telegram.WebApp.initData) {
+        console.error("Authentication data not available. Make sure you are running the app inside Telegram.");
+        showError("Authentication failed. Please open this app through your Telegram client.");
+        throw new Error("Missing Telegram Init Data");
+    }
+
     const headers = {
         'X-Telegram-Init-Data': window.Telegram.WebApp.initData
     };

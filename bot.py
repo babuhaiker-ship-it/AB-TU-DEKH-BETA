@@ -1635,6 +1635,8 @@ async def verify_telegram_init_data(request: Request) -> dict:
         logger.info(f"API call verified for user_id: {user_id}")
         return {"user_id": user_id}
 
+    except HTTPException:
+        raise # Re-raise HTTPException to prevent it from being caught by the generic exception handler
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Bad Request: Invalid JSON in user data")
     except Exception as e:
