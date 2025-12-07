@@ -203,18 +203,39 @@ async def load_data_channel_id():
     """Loads the data channel ID from the database."""
     global DATA_CHANNEL_ID
     data_doc = data_channel_collection.find_one({'_id': 'data_channel'})
-    if data_doc:
-        DATA_CHANNEL_ID = data_doc.get('channel_id')
-        logger.info(f"Loaded data channel ID: {DATA_CHANNEL_ID}")
+    if data_doc and 'channel_id' in data_doc:
+        try:
+            # Ensure the channel_id is an integer
+            DATA_CHANNEL_ID = int(data_doc['channel_id'])
+            logger.info(f"Loaded data channel ID: {DATA_CHANNEL_ID}")
+        except (ValueError, TypeError):
+            logger.error(f"Invalid channel_id format in data_channel collection: {data_doc['channel_id']}. It must be an integer.")
+            DATA_CHANNEL_ID = None
     else:
         DATA_CHANNEL_ID = None
         logger.warning("No data channel ID found in DB.")
 
 async def load_force_sub_channels():
-    """Loads force subscribe channels from the database."""
+    """Loads force subscribe channels from the database, ensuring IDs are integers."""
     global FORCE_SUB_CHANNELS
-    FORCE_SUB_CHANNELS = list(force_sub_channels_collection.find({}))
-    logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} force subscribe channels.")
+
+    raw_channels = list(force_sub_channels_collection.find({}))
+    processed_channels = []
+
+    for channel_info in raw_channels:
+        channel_id = channel_info.get('channel_id')
+        if channel_id:
+            try:
+                # Ensure the channel_id is an integer
+                channel_info['channel_id'] = int(channel_id)
+                processed_channels.append(channel_info)
+            except (ValueError, TypeError):
+                logger.error(f"Invalid channel_id format for force sub channel: {channel_id}. Skipping.")
+        else:
+            logger.warning(f"Force sub channel document is missing 'channel_id'. Skipping: {channel_info}")
+
+    FORCE_SUB_CHANNELS = processed_channels
+    logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} valid force subscribe channels.")
 
 def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
@@ -4923,31 +4944,49 @@ async def keep_alive():
 
 
 async def health_check():
+    """
+    Performs a health check on startup to ensure the bot can access configured channels.
+    It now uses get_chat to validate the channel before checking membership.
+    """
     try:
         me = await app.get_me()
-        logger.info(f"Bot username: {me.username}")
+        logger.info(f"Health Check: Bot username: {me.username}")
 
+        # --- Data Channel Check ---
         if DATA_CHANNEL_ID:
             try:
-                member = await app.get_chat_member(DATA_CHANNEL_ID, me.id)
-                logger.info(f"Bot status in data channel ({DATA_CHANNEL_ID}): {member.status}")
+                # First, try to get the chat to ensure it's resolvable
+                chat = await app.get_chat(DATA_CHANNEL_ID)
+                logger.info(f"Health Check: Successfully resolved data channel '{chat.title}' ({chat.id}).")
+                # Now, check membership status
+                member = await app.get_chat_member(chat.id, me.id)
+                logger.info(f"Health Check: Bot status in data channel: {member.status}")
             except Exception as e:
-                logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
+                logger.error(f"Health check FAILED for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
         else:
-            logger.warning("No data channel configured. Skipping data channel health check.")
+            logger.warning("Health Check: No data channel configured. Skipping check.")
 
+        # --- Force Subscribe Channels Check ---
         if FORCE_SUB_CHANNELS:
+            logger.info(f"Health Check: Checking {len(FORCE_SUB_CHANNELS)} force subscribe channels.")
             for channel_info in FORCE_SUB_CHANNELS:
+                channel_id = channel_info.get('channel_id')
+                if not channel_id:
+                    continue
                 try:
-                    force_sub_member = await app.get_chat_member(channel_info['channel_id'], me.id)
-                    logger.info(f"Bot status in force subscribe channel ({channel_info['channel_id']}): {force_sub_member.status}")
+                    # First, try to get the chat to ensure it's resolvable
+                    chat = await app.get_chat(channel_id)
+                    logger.info(f"Health Check: Successfully resolved force sub channel '{chat.title}' ({chat.id}).")
+                    # Now, check membership status
+                    member = await app.get_chat_member(chat.id, me.id)
+                    logger.info(f"Health Check: Bot status in force sub channel {chat.id}: {member.status}")
                 except Exception as e:
-                    logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: {e}", exc_info=True)
+                    logger.error(f"Health check FAILED for force subscribe channel {channel_id}: {e}", exc_info=True)
         else:
-            logger.warning("No force subscribe channels configured. Skipping force sub health check.")
+            logger.warning("Health Check: No force subscribe channels configured. Skipping checks.")
 
     except Exception as e:
-        logger.error(f"Overall health check failed: {e}", exc_info=True)
+        logger.critical(f"Overall health check failed, which might indicate a problem with bot credentials or connection: {e}", exc_info=True)
 
 
 # --- FastAPI Lifespan Events ---
