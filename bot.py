@@ -1637,6 +1637,8 @@ async def verify_telegram_init_data(request: Request) -> dict:
 
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Bad Request: Invalid JSON in user data")
+    except HTTPException:
+        raise  # Re-raise HTTPException to let FastAPI handle it
     except Exception as e:
         logger.error(f"An unexpected error occurred during initData verification: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal Server Error")
