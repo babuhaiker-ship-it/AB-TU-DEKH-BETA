@@ -3,6 +3,7 @@ import asyncio
 import uuid
 import base64
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -154,8 +155,45 @@ app = Client(
     session_string=session_string if session_string else None
 )
 
-# --- NEW: FastAPI App Initialization ---
-fastapi_app = FastAPI()
+# --- NEW: FastAPI Lifespan and Initialization ---
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Handles startup and shutdown events for the application."""
+    global session_string
+    logger.info("Application startup...")
+
+    await app.start()
+    logger.info("Pyrogram client started.")
+
+    if not session_string:
+        new_session_string = await app.export_session_string()
+        set_session_string(new_session_string)
+        logger.info("A new session string was generated and saved to the database.")
+
+    await load_admins_from_db()
+    await load_data_channel_id()
+    await load_force_sub_channels()
+
+    bg_tasks = {
+        asyncio.create_task(cleanup_expired_data()),
+        asyncio.create_task(verify_and_cleanup_media()),
+        asyncio.create_task(cleanup_expired_menus()),
+        asyncio.create_task(keep_alive())
+    }
+    logger.info("Background tasks started.")
+
+    yield
+
+    logger.info("Application shutdown...")
+    for task in bg_tasks:
+        task.cancel()
+    await asyncio.gather(*bg_tasks, return_exceptions=True)
+    await app.stop()
+    logger.info("Pyrogram client stopped.")
+    logger.info("Cleanup complete.")
+
+
+fastapi_app = FastAPI(lifespan=lifespan)
 
 # --- NEW: Serve Frontend ---
 fastapi_app.mount("/", StaticFiles(directory="web", html=True), name="web")
@@ -4950,60 +4988,6 @@ async def health_check():
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
 
-# --- FastAPI Lifespan Events ---
-bg_tasks = set()
-
-@fastapi_app.on_event("startup")
-async def startup_event():
-    """Handles application startup logic."""
-    logger.info("Application startup...")
-
-    # Start Pyrogram client
-    await app.start()
-    logger.info("Pyrogram client started.")
-
-    # Session String Management
-    global session_string
-    if not session_string:
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
-        logger.info("A new session string was generated and saved to the database.")
-
-    # Load initial data from DB
-    await load_admins_from_db()
-    await load_data_channel_id()
-    await load_force_sub_channels()
-
-    # Start background tasks
-    bg_tasks.add(asyncio.create_task(cleanup_expired_data()))
-    bg_tasks.add(asyncio.create_task(verify_and_cleanup_media()))
-    bg_tasks.add(asyncio.create_task(cleanup_expired_menus()))
-    bg_tasks.add(asyncio.create_task(keep_alive()))
-    logger.info(f"{len(bg_tasks)} background tasks initiated.")
-
-    # Perform a health check on startup
-    await health_check()
-
-
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    """Handles application shutdown logic."""
-    logger.info("Application shutdown...")
-
-    # Cancel all background tasks
-    for task in bg_tasks:
-        task.cancel()
-    await asyncio.gather(*bg_tasks, return_exceptions=True)
-    logger.info("Background tasks cancelled.")
-
-    # Stop the Pyrogram client
-    await app.stop()
-    logger.info("Pyrogram client stopped.")
-
-    logger.info("Cleanup complete.")
-
-
-# --- Main Entry Point for Uvicorn ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
