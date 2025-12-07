@@ -1,0 +1,5 @@
+{
+  "name": "Tele-Tok Video Feed",
+  "description": "A Telegram Mini App that provides a TikTok-style vertical video feed, integrating with a Python backend for video streaming, categories, and bookmarking.",
+  "requestFramePermissions": []
+}
