@@ -154,11 +154,51 @@ app = Client(
 )
 
 # --- NEW: FastAPI App Initialization ---
-fastapi_app = FastAPI()
+from contextlib import asynccontextmanager
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """
+    Handle startup and shutdown events for the FastAPI application.
+    """
+    logger.info("FastAPI application starting up...")
 
+    # --- Pyrogram Client Startup ---
+    logger.info("Starting Pyrogram client...")
+    await app.start()
 
+    # --- Session String Management ---
+    new_session_string = await app.export_session_string()
+    if session_string != new_session_string:
+        set_session_string(new_session_string)
 
+    # --- Load Initial Data ---
+    await load_admins_from_db()
+    await load_data_channel_id()
+    await load_force_sub_channels()
+
+    # --- Start Background Tasks ---
+    create_tracked_task(cleanup_expired_data())
+    create_tracked_task(cleanup_expired_menus())
+    create_tracked_task(verify_and_cleanup_media())
+    create_tracked_task(keep_alive())
+    create_tracked_task(health_check())
+
+    yield
+
+    # --- Pyrogram Client Shutdown ---
+    logger.info("FastAPI application shutting down...")
+    logger.info("Stopping Pyrogram client...")
+    await app.stop()
+
+    # --- Cancel All Background Tasks ---
+    for task in list(active_tasks):
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*active_tasks, return_exceptions=True)
+    logger.info("All background tasks cancelled.")
+
+fastapi_app = FastAPI(lifespan=lifespan)
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
 
@@ -4947,6 +4987,3 @@ async def health_check():
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
