@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  bot:
+    build: ./bot
+    container_name: telegram_bot
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    container_name: react_site
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    depends_on:
+      - bot

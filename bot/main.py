@@ -23,7 +23,6 @@ from shortzy import Shortzy
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from motor.motor_asyncio import AsyncIOMotorClient
 import hmac
 import hashlib
@@ -157,8 +156,6 @@ app = Client(
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
 
-# --- NEW: Serve Frontend ---
-fastapi_app.mount("/", StaticFiles(directory="web", html=True), name="web")
 
 
 
@@ -4950,62 +4947,6 @@ async def health_check():
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
 
-async def main():
-    """Starts both the Pyrogram client and the FastAPI server, and handles graceful shutdown."""
-
-    # Configure the Uvicorn server
-    port = int(os.environ.get("PORT", 8080))
-    server_config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(server_config)
-
-    # Start Pyrogram and load initial data
-    await app.start()
-    logger.info("Pyrogram client started.")
-
-    # --- Session String Management ---
-    # After starting, get the session string. If it wasn't loaded from the DB,
-    # this will be a new one that we need to save.
-    if not session_string:
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
-        logger.info("A new session string was generated and saved to the database.")
-
-    await load_admins_from_db()
-    await load_data_channel_id()
-    await load_force_sub_channels()
-
-    # Start background tasks and keep references to them
-    bg_tasks = {
-        asyncio.create_task(cleanup_expired_data()),
-        asyncio.create_task(verify_and_cleanup_media()),
-        asyncio.create_task(cleanup_expired_menus()),
-        asyncio.create_task(keep_alive())
-    }
-    logger.info("Background tasks initiated.")
-
-    # This is the main application loop. We run the server and wait for it to shut down.
-    # Uvicorn will handle signals like Ctrl+C and stop server.serve().
-    # We use a try/finally to ensure cleanup happens.
-    try:
-        logger.info(f"Starting web server on port {port}")
-        await server.serve()
-    finally:
-        logger.info("Shutdown signal received. Cleaning up...")
-
-        # Cancel all background tasks
-        for task in bg_tasks:
-            task.cancel()
-
-        # Wait for all tasks to acknowledge cancellation
-        await asyncio.gather(*bg_tasks, return_exceptions=True)
-
-        # Stop the Pyrogram client
-        await app.stop()
-        logger.info("Pyrogram client stopped.")
-        logger.info("Cleanup complete.")
-
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Application shut down by user.")
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
