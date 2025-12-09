@@ -1,0 +1,44 @@
+# This file configures the services for deployment on Render.
+# See https://render.com/docs/blueprint-spec for a full reference.
+
+services:
+  # ---------------------
+  # Bot Service (Backend)
+  # ---------------------
+  # This defines the Pyrogram bot and its FastAPI backend.
+  # It's a "Private Service" because it only needs to be accessible
+  # by the frontend service, not the public internet.
+  - type: pserv
+    name: bot
+    # Use Docker to build and run this service.
+    env: docker
+    # The context and Dockerfile are in the 'bot' directory.
+    dockerContext: ./bot
+    dockerfilePath: ./bot/Dockerfile
+    # Environment variables required by the bot.
+    envVars:
+      # The MONGO_URI is a sensitive value. 'sync: false' tells Render
+      # that this value should be set manually as a secret in the
+      # Render dashboard instead of being stored in this file.
+      - key: MONGO_URI
+        sync: false
+
+  # -----------------------
+  # Web Service (Frontend)
+  # -----------------------
+  # This defines the React frontend, served by NGINX.
+  # This is a public "Web Service" that users will access.
+  - type: web
+    name: web
+    env: docker
+    # The context and Dockerfile are in the 'web' directory.
+    dockerContext: ./web
+    dockerfilePath: ./web/Dockerfile
+    # Environment variables required by the frontend container.
+    envVars:
+      # This sets the API_HOST environment variable inside the NGINX container.
+      # The value 'bot' is the name of our backend service defined above.
+      # Render's internal DNS will resolve 'bot' to the private IP address
+      # of the bot service, allowing the NGINX reverse proxy to connect.
+      - key: API_HOST
+        value: bot
