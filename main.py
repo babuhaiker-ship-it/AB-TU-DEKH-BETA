@@ -1,4 +1,3 @@
-import os
 import asyncio
 import uuid
 import base64
@@ -20,7 +19,6 @@ import urllib.parse
 from shortzy import Shortzy
 
 # --- Mini App / Web Server Imports ---
-import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import FileResponse, JSONResponse
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -38,48 +36,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Configuration #demo ---
-class BotConfig:
-    BOT_TOKEN = '8336714943:AAEDF5NRMs4MKIlu__ZoEi8VVfz0xwCIJFA'
-    API_ID = 29800015
-    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@SpicyNyraa_bot'
-    MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
-    MONGO_DB_NAME = 'spicybot'
-    # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
-    OWNER_ID = 6612030110 # The main owner ID, cannot be removed
-    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
-    NEW_USER_TOKENS = 2
-    REFERRAL_BONUS = 1
-    REFRESH_BONUS = 1
-    PREMIUM_TRIAL_PRICE_INR = 69
-    PREMIUM_MONTH_PRICE_INR = 199
-    FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
-    # REMOVED: FORCE_SUB_CHANNEL_ID = -1002622483638
-    # REMOVED: FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
-    # REMOVED: FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
-    # REMOVED: FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
-    MENU_EXPIRY_MINUTES = 30
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
-    # --- New Feature Configuration ---
-    NEW_USER_SCROLLS = 500 # Number of free scrolls for new users
-    DAILY_FREE_SCROLLS = 5 # Number of free video scrolls for users without a token
-    FREE_SCROLL_RESET_HOURS = 1 # Hours after which the free scroll limit resets
-    FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
-    FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
-    TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
-    # --- Mini App Configuration ---
-    MINI_APP_URL = os.environ.get("RENDER_EXTERNAL_URL", "/") # Use Render URL in prod
-
+# --- Configuration ---
+# All sensitive data and settings are imported from the config.py file.
 try:
-    config = BotConfig()
-    # UPDATED: Removed force sub channel checks
-    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME]):
-        raise ValueError("One or more essential configuration variables are not set. Please check all config variables.")
+    import config
+    logger.info("Configuration file loaded successfully.")
+    # Simple validation to ensure essential variables are not placeholders
+    if 'your_' in config.BOT_TOKEN or '12345' in str(config.API_ID):
+        logger.warning("Configuration variables in config.py appear to be placeholders. Please update them.")
+except ImportError:
+    logger.error("Could not import config.py. Please make sure the file exists and is correctly formatted.")
+    # Exit if the config file is missing, as the bot cannot run without it.
+    exit()
 except Exception as e:
-    raise RuntimeError(f"Failed to load bot configuration: {e}")
+    logger.error(f"An error occurred while loading the configuration: {e}")
+    exit()
+
 
 # --- Batch Add Constants ---
 BATCH_UPLOAD_LIMIT = 20
