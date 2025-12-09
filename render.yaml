@@ -15,4 +15,4 @@ services:
         fromService:
           type: pserv
           name: bot
-          property: url
+          property: hostport  # ← Changed from 'url' to 'hostport'
