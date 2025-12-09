@@ -1906,9 +1906,11 @@ async def start_cmd(client: Client, message: Message):
             # Prepare custom force-sub message based on user state
             custom_text = None
             if is_new_user:
-                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received {config.NEW_USER_TOKENS} free token 🎁 to start your journey!\n\n"
-                part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
-                custom_text = part1 + part2
+                custom_text = (
+                    f"🎉 Congratulations, {first_name_safe}! You've received {config.NEW_USER_TOKENS} free tokens as a welcome gift! 🎁\n\n"
+                    "To claim your reward and start watching, simply join our channel below.\n\n"
+                    "Once you've joined, tap the **🔄 Try Again** button to unlock your access! 👇"
+                )
 
             await send_force_subscribe_message(client, user_id, custom_text=custom_text)
             return
