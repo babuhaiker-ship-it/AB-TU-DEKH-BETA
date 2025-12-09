@@ -1,0 +1,18 @@
+services:
+  - type: pserv
+    name: bot
+    runtime: docker
+    dockerfilePath: ./bot/Dockerfile
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.2
+  - type: web
+    name: web
+    runtime: docker
+    dockerfilePath: ./web/Dockerfile
+    envVars:
+      - key: API_URL
+        fromService:
+          type: pserv
+          name: bot
+          property: url
