@@ -30,6 +30,7 @@ import hashlib
 from urllib.parse import unquote, parse_qs
 import json
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
 
 # --- Logging Setup ---
@@ -152,8 +153,45 @@ app = Client(
     bot_token=config.BOT_TOKEN
 )
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """
+    Handles startup and shutdown events for the FastAPI application.
+    """
+    logger.info("FastAPI server is starting up...")
+
+    # Start the Pyrogram client
+    await app.start()
+    logger.info("Pyrogram client started.")
+
+    # If this is the first run, save the session string
+    SESSION_STRING = get_session_string()
+    if not SESSION_STRING:
+        logger.info("Saving session string to DB for future runs...")
+        new_session_string = await app.export_session_string()
+        set_session_string(new_session_string)
+
+    # Load admins and run background tasks
+    await load_admins_from_db()
+    await load_data_channel_id()
+    await load_force_sub_channels()
+    await health_check()
+    create_tracked_task(cleanup_expired_data())
+    create_tracked_task(verify_and_cleanup_media())
+    create_tracked_task(cleanup_expired_menus())
+    logger.info("Background tasks initiated. Bot is now fully operational.")
+
+    yield
+
+    # Shutdown logic
+    logger.info("FastAPI server is shutting down...")
+    await app.stop()
+    logger.info("Pyrogram client stopped.")
+
+
 # --- NEW: FastAPI App Initialization ---
-fastapi_app = FastAPI()
+fastapi_app = FastAPI(lifespan=lifespan)
 
 # ==================================================
 # ADD THIS ENTIRE BLOCK TO FIX THE LOADING SCREEN
@@ -4952,42 +4990,3 @@ async def health_check():
     except Exception as e:
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
-@fastapi_app.on_event("startup")
-async def startup_event():
-    """
-    This function runs when the FastAPI server starts.
-    It initializes and starts the Pyrogram client in the background.
-    """
-    logger.info("FastAPI server is starting up...")
-
-    # Start the Pyrogram client
-    await app.start()
-    logger.info("Pyrogram client started.")
-
-    # If this is the first run, save the session string
-    SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
-
-    # Load admins and run background tasks
-    await load_admins_from_db()
-    await load_data_channel_id() # NEW: Load data channel ID
-    await load_force_sub_channels() # NEW: Load force sub channels
-    await health_check()
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    create_tracked_task(cleanup_expired_menus())
-    logger.info("Background tasks initiated. Bot is now fully operational.")
-
-
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    """
-    This function runs when the FastAPI server is shutting down.
-    It gracefully stops the Pyrogram client.
-    """
-    logger.info("FastAPI server is shutting down...")
-    await app.stop()
-    logger.info("Pyrogram client stopped.")
