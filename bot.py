@@ -52,7 +52,6 @@ class BotConfig:
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
-    NEW_USER_TOKENS = 2
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
@@ -1876,13 +1875,13 @@ async def start_cmd(client: Client, message: Message):
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                 'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
                 'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None,
+                # Grant free scrolls by initializing the 'used' counter to 0
                 'new_user_scrolls_used': 0, 'has_claimed_special_token': False,
                 'has_seen_free_scroll_popup': False,
                 'free_scroll_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)},
                 'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
             })
-            add_token(user_id, config.NEW_USER_TOKENS * 86400, is_admin_granted=False)
-            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_TOKENS} token.")
+            logger.info(f"New user registered: {user_id}")
 
             # Handle referral for the newly created user
             if deep_link_arg:
@@ -1906,8 +1905,8 @@ async def start_cmd(client: Client, message: Message):
             # Prepare custom force-sub message based on user state
             custom_text = None
             if is_new_user:
-                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received {config.NEW_USER_TOKENS} free token 🎁 to start your journey!\n\n"
-                part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
+                part1 = f"🎉 Congratulations {first_name_safe}! 🎉\n\nYou've just received {config.NEW_USER_SCROLLS} free scrolls! 🎁\n\n"
+                part2 = "To claim them, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
                 custom_text = part1 + part2
 
             await send_force_subscribe_message(client, user_id, custom_text=custom_text)
@@ -2000,7 +1999,7 @@ async def start_cmd(client: Client, message: Message):
         elif is_new_user: # New user, already joined, no deep link
             await message.reply(
                 f"🎉 Congratulations {first_name_safe}!\n"
-                f"You got {config.NEW_USER_TOKENS} token 🎁 to start your journey!\n\n"
+                f"You've received {config.NEW_USER_SCROLLS} free scrolls to start your journey! 🎁\n\n"
                 f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
                 reply_markup=await get_main_keyboard(user_id)
             )
