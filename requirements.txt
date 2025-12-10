@@ -1,0 +1,9 @@
+pyrogram
+TgCrypto
+pymongo
+fastapi
+uvicorn[standard]
+motor
+aiohttp
+shortzy
+pydantic
