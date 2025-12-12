@@ -4017,7 +4017,7 @@ async def set_fsub_cmd(client: Client, message: Message):
     buttons = []
     if FORCE_SUB_CHANNELS:
         for channel_info in FORCE_SUB_CHANNELS:
-            buttons.append([InlineKeyboardButton(f"🔗 {html.escape(channel_info.get('name', f'Channel {channel_info[\"channel_id\"]}'))}", callback_data=f"viewfsub_{channel_info['channel_id']}")])
+            buttons.append([InlineKeyboardButton(f"🔗 {html.escape(channel_info.get('name', 'Channel ' + str(channel_info['channel_id'])))}", callback_data=f"viewfsub_{channel_info['channel_id']}")])
     
     buttons.append([InlineKeyboardButton("➕ Add New Channel", callback_data="addfsub_step1")])
     
