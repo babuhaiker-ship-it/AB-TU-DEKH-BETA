@@ -52,7 +52,7 @@ class BotConfig:
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
-    NEW_USER_TOKENS = 2
+    NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
@@ -65,9 +65,9 @@ class BotConfig:
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
-    NEW_USER_SCROLLS = 500 # Number of free scrolls for new users
-    DAILY_FREE_SCROLLS = 5 # Number of free video scrolls for users without a token
-    FREE_SCROLL_RESET_HOURS = 1 # Hours after which the free scroll limit resets
+    NEW_USER_SCROLLS = 100 # Number of free scrolls for new users
+    DAILY_FREE_SCROLLS = 10 # Number of free video scrolls for users without a token
+    FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
     FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
