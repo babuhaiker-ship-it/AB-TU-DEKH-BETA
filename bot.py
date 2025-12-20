@@ -1999,7 +1999,7 @@ async def start_cmd(client: Client, message: Message):
         elif is_new_user: # New user, already joined, no deep link
             await message.reply(
                 f"🎉 Congratulations {first_name_safe}!\n"
-                f"You got {config.NEW_USER_SCROLLS} free scrolls 🎁 to start your journey!\n\n"
+                f"You got free scrolls 🎁 to start your journey!\n\n"
                 f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
                 reply_markup=await get_main_keyboard(user_id)
             )
