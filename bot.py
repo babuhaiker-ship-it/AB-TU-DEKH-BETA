@@ -72,7 +72,7 @@ class BotConfig:
     FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
-    MINI_APP_URL = "https://niggabitchass.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
+    MINI_APP_URL = "https://niggabitchass-14ai9w96j-godfatherpys-projects.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
 
 try:
     config = BotConfig()
