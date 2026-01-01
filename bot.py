@@ -53,7 +53,7 @@ class BotConfig:
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
-    REFERRAL_BONUS = 1
+    REFERRAL_BONUS = 2
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 199
@@ -67,9 +67,9 @@ class BotConfig:
     # --- New Feature Configuration ---
     NEW_USER_SCROLLS = 100 # Number of free scrolls for new users
     DAILY_FREE_SCROLLS = 10 # Number of free video scrolls for users without a token
-    FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
-    FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
-    FREE_LIMIT_RESET_HOURS = 24  # Hours after which the free batch limit resets
+    FREE_SCROLL_RESET_HOURS = 3 # Hours after which the free scroll limit resets
+    FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
+    FREE_LIMIT_RESET_HOURS = 6  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
     MINI_APP_URL = "https://niggabitchass-14ai9w96j-godfatherpys-projects.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
