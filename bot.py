@@ -2080,7 +2080,8 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
     """Handles navigation for single shared videos."""
     await callback_query.answer(
-        "No more videos in this link. Click on 'Watch More' to explore other categories.",
+        "✨ You've watched all the videos from this menu! ✨\n\n"
+        "To watch more videos like this, click 'Watch More'.",
         show_alert=True
     )
 
@@ -2573,6 +2574,18 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 # No need to delete message here, it will be handled by cleanup_expired_menus or next send_and_replace_message
                 return
 
+            # --- MODIFICATION: Check for last video ---
+            if action == "next":
+                _, current_pos, total_videos = get_video_and_position(current_uuid, category, is_saved, user_id)
+                if total_videos > 0 and current_pos >= total_videos:
+                    await callback_query.answer(
+                        "✨ You've watched all the videos from this menu! ✨\n\n"
+                        "To watch more videos like this, click 'Watch More'.",
+                        show_alert=True
+                    )
+                    return
+            # --- END MODIFICATION ---
+
             video = None
             if is_saved:
                 if action == "next":
@@ -2580,8 +2593,8 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 elif action == "prev":
                     video = get_previous_saved_video_chronological(user_id, current_uuid, category)
 
-                if not video:
-                    await callback_query.answer("No more saved videos in this category. Looping to the beginning/end. ❤️", show_alert=True)
+                if not video: # This should not be hit if the check above is correct, but as a fallback.
+                    await callback_query.answer("No more saved videos in this category. ❤️", show_alert=True)
                     return
 
             else: # Not a saved video, use regular chronological navigation based on sequence_number
@@ -2595,7 +2608,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 elif action == "prev":
                     video = get_previous_video_chronological(current_uuid, category)
 
-                if not video: # This case should ideally not be hit with looping logic
+                if not video: # This case should ideally not be hit with looping logic, but as a fallback.
                     await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
                     return
 
@@ -2663,10 +2676,23 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
 
         video_uuids = batch_doc['video_uuids']
         total_videos = len(video_uuids)
+
+        # --- MODIFICATION: Check for last video ---
+        if action == "next_batch" and current_index >= total_videos - 1:
+            await callback_query.answer(
+                "✨ You've watched all the videos from this menu! ✨\n\n"
+                "To watch more videos like this, click 'Watch More'.",
+                show_alert=True
+            )
+            return
+        # --- END MODIFICATION ---
+
         if action == "next_batch":
-            new_index = (current_index + 1) % total_videos
+            new_index = (current_index + 1)
+            if new_index >= total_videos: new_index = 0 # Loop fallback
         else: # prev_batch
             new_index = (current_index - 1 + total_videos) % total_videos
+
 
         next_video_uuid = video_uuids[new_index]
         video = get_video_by_uuid(next_video_uuid)
