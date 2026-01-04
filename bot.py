@@ -48,7 +48,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    HOST = "http://38.109.11.123"  # Replace with your actual host URL
+    HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
@@ -151,7 +151,6 @@ app = Client(
     name="spicynyraa_session",  # A name for the session file
     api_id=config.API_ID,
     api_hash=config.API_HASH,
-    in_memory=True,
     bot_token=config.BOT_TOKEN
 )
 
@@ -3201,8 +3200,24 @@ async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
         return
 
+    file_size = video.get('file_size')
+    if not file_size:
+        try:
+            # Fetch the message to get the video's file_size
+            message = await client.get_messages(DATA_CHANNEL_ID, video['message_id'])
+            if message.video:
+                file_size = message.video.file_size
+                # Update the database with the file_size
+                media_collection.update_one({'uuid': video_uuid}, {'$set': {'file_size': file_size}})
+            else:
+                raise ValueError("Message does not contain a video.")
+        except Exception as e:
+            logger.error(f"Could not retrieve file_size for video {video_uuid}: {e}")
+            await callback_query.answer("Could not generate web link. Please try again.", show_alert=True)
+            return
+
     # Generate the secure web link
-    stream_link = streamer.get_stream_link(video['file_unique_id'], video.get('custom_caption', 'video.mp4'), video['file_size'])
+    stream_link = streamer.get_stream_link(video['file_unique_id'], video.get('custom_caption', 'video.mp4'), file_size)
     viewer_url = f"{config.HOST}/web/viewer?url={urllib.parse.quote(stream_link)}"
 
     reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now", url=viewer_url)]])
@@ -5098,7 +5113,7 @@ async def run_pyrogram_client():
     await load_admins_from_db()
     await load_data_channel_id()
     await load_force_sub_channels()
-    # await health_check() # Health check is still commented out
+    await health_check()
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
