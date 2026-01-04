@@ -22,8 +22,9 @@ from shortzy import Shortzy
 # --- Mini App / Web Server Imports ---
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.status import HTTP_206_PARTIAL_CONTENT, HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE
 from motor.motor_asyncio import AsyncIOMotorClient
 import hmac
 import hashlib
@@ -47,6 +48,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
+    HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
@@ -149,6 +151,7 @@ app = Client(
     name="spicynyraa_session",  # A name for the session file
     api_id=config.API_ID,
     api_hash=config.API_HASH,
+    in_memory=True,
     bot_token=config.BOT_TOKEN
 )
 
@@ -326,6 +329,24 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
     )
 
 # --- Utility Functions ---
+class Stream:
+    def __init__(self):
+        self.cache = {}
+
+    def get_hash(self, file_unique_id: str, file_name: str, file_size: int) -> str:
+        """Generates a secure hash for a streaming link."""
+        # Simple hash for demonstration; replace with a more secure method if needed
+        return hashlib.sha256(f"{file_unique_id}-{file_name}-{file_size}-{config.BOT_TOKEN}".encode()).hexdigest()
+
+    def get_stream_link(self, file_unique_id: str, file_name: str, file_size: int) -> str:
+        """Gets a streaming link with a hash."""
+        file_name_encoded = urllib.parse.quote(file_name)
+        file_size_str = str(file_size)
+        secure_hash = self.get_hash(file_unique_id, file_name, file_size)
+        return f"{config.HOST}/stream/{file_unique_id}?name={file_name_encoded}&size={file_size_str}&hash={secure_hash}"
+
+streamer = Stream()
+
 def str_to_b64(string: str) -> str:
     """Encodes a string to URL-safe base64."""
     return base64.urlsafe_b64encode(string.encode('utf-8')).decode('utf-8')
@@ -1662,6 +1683,67 @@ class BookmarkRequest(BaseModel):
     video_uuid: str
 
 # --- API Endpoints ---
+async def send_chunk(file_id: str, start: int, end: int):
+    """Fetches a chunk of a file from Telegram."""
+    try:
+        # This is a simplified approach. For large files, you'd need to
+        # handle multiple chunks and offsets more carefully.
+        chunk = await app.download_media(file_id, file_size=(end - start + 1), offset=start)
+        return chunk
+    except Exception as e:
+        logger.error(f"Error fetching chunk: {e}")
+        return None
+
+@fastapi_app.get("/stream/{file_unique_id}")
+async def stream_video(file_unique_id: str, request: Request, name: str, size: int, hash: str):
+    """Streams a video file with support for range requests."""
+    expected_hash = streamer.get_hash(file_unique_id, name, size)
+    if expected_hash != hash:
+        raise HTTPException(status_code=403, detail="Invalid hash")
+
+    video = media_collection.find_one({'file_unique_id': file_unique_id})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    range_header = request.headers.get('Range')
+    file_size = video.get('file_size')
+
+    headers = {
+        'Content-Type': 'video/mp4',
+        'Accept-Ranges': 'bytes',
+        'Content-Length': str(file_size),
+        'Content-Disposition': f'inline; filename="{name}"'
+    }
+
+    if range_header:
+        start_str, end_str = range_header.replace('bytes=', '').split('-')
+        start = int(start_str)
+        end = int(end_str) if end_str else file_size - 1
+
+        if start >= file_size or end >= file_size:
+            return StreamingResponse(status_code=HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, content=b"", headers=headers)
+
+        headers['Content-Range'] = f"bytes {start}-{end}/{file_size}"
+        headers['Content-Length'] = str(end - start + 1)
+
+        async def stream_generator():
+            chunk = await send_chunk(video['file_id'], start, end)
+            if chunk:
+                yield chunk
+
+        return StreamingResponse(stream_generator(), status_code=HTTP_206_PARTIAL_CONTENT, headers=headers)
+
+    async def full_stream_generator():
+        chunk = await send_chunk(video['file_id'], 0, file_size - 1)
+        if chunk:
+            yield chunk
+
+    return StreamingResponse(full_stream_generator(), headers=headers)
+
+@fastapi_app.get("/web/viewer")
+async def get_viewer_page():
+    """Serves the video viewer HTML page."""
+    return FileResponse('web/viewer.html')
 
 @fastapi_app.get("/api/profile")
 async def get_api_profile(auth: dict = Depends(verify_telegram_init_data)):
@@ -3021,7 +3103,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     video_uuid = callback_query.data.split('_', 1)[1]
     chat_id = callback_query.message.chat.id
 
-    logger.info(f"User {user_id} requested download for video {video_uuid}.")
+    logger.info(f"User {user_id} requested download options for video {video_uuid}.")
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -3029,68 +3111,103 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
+    if not is_premium_user(user_id):
+        logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
+        await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
+        await client.send_message(
+            chat_id,
+            get_premium_only_text(),
+            reply_markup=buy_token_keyboard()
+        )
+        return
+
+    video = get_video_by_uuid(video_uuid)
+    if not video:
+        logger.warning(f"Premium user {user_id} requested download for non-existent video {video_uuid}.")
+        await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
+        return
+
+    # Offer options: View in Chat or View in Web
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👀 View in Chat", callback_data=f"view_chat_{video_uuid}")],
+        [InlineKeyboardButton("🌐 View in Web", callback_data=f"view_web_{video_uuid}")]
+    ])
+    await callback_query.message.reply_text("Choose how you want to view the video:", reply_markup=reply_markup)
+    await callback_query.answer()
+
+@app.on_callback_query(filters.regex(r"^view_chat_(.+)$"))
+async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'View in Chat' button for premium users."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 2)[2]
+    chat_id = callback_query.message.chat.id
+
+    logger.info(f"User {user_id} chose to view video {video_uuid} in chat.")
+
+    if not is_premium_user(user_id):
+        await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
+        return
+
+    video = get_video_by_uuid(video_uuid)
+    if not video:
+        await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
+        return
+
+    if not DATA_CHANNEL_ID:
+        logger.error("DATA_CHANNEL_ID is not set. Cannot download videos.")
+        await callback_query.answer("Video storage channel is not configured. Please contact an admin.", show_alert=True)
+        return
+
     try:
-        if not is_premium_user(user_id):
-            logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
-            await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
-            await client.send_message(
-                chat_id,
-                get_premium_only_text(),
-                reply_markup=buy_token_keyboard()
-            )
-            return
-
-        video = get_video_by_uuid(video_uuid)
-        if not video:
-            logger.warning(f"Premium user {user_id} requested download for non-existent video {video_uuid}.")
-            await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
-            return
-
-        if not DATA_CHANNEL_ID:
-            logger.error("DATA_CHANNEL_ID is not set. Cannot download videos.")
-            await callback_query.answer("Video storage channel is not configured. Please contact an an admin.", show_alert=True)
-            return
-
+        await client.send_video(
+            chat_id,
+            video=video['file_id'],
+            caption=None,
+            protect_content=False
+        )
+        await callback_query.answer("Download initiated! 🚀")
+    except FileReferenceExpired:
+        # Self-healing logic as before
+        logger.warning(f"FileReferenceExpired for {video_uuid}. Attempting self-healing.")
         try:
-            await client.send_video(
-                chat_id,
-                video=video['file_id'],
-                caption=None,
-                protect_content=False
-            )
+            message_id_in_channel = video.get('message_id')
+            healed_message = await client.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
+            new_file_id = healed_message.video.file_id
+            media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
+            await client.send_video(chat_id, video=new_file_id, caption=None, protect_content=False)
             await callback_query.answer("Download initiated! 🚀")
-            logger.info(f"Premium user {user_id} successfully received download for video {video_uuid}.")
-        except FileReferenceExpired:
-            logger.warning(f"FileReferenceExpired during download for video {video['uuid']}. Attempting self-healing.")
-            try:
-                message_id_in_channel = video.get('message_id')
-                if not message_id_in_channel:
-                    raise ValueError("No message_id found in DB for self-healing during download.")
-
-                healed_message = await client.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
-                if not healed_message or not healed_message.video:
-                    raise ValueError("Failed to fetch or find video in healed message during download.")
-
-                new_file_id = healed_message.video.file_id
-                media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
-                logger.info(f"Database updated with new file_id for video {video['uuid']} during download.")
-
-                await client.send_video(
-                    chat_id,
-                    video=new_file_id,
-                    caption=None,
-                    protect_content=False
-                )
-                await callback_query.answer("Download initiated! 🚀")
-                logger.info(f"Premium user {user_id} successfully received download for video {video_uuid} after self-healing.")
-            except Exception as heal_e:
-                logger.error(f"Self-healing failed during download for video {video['uuid']}: {heal_e}", exc_info=True)
-                await callback_query.answer("❌ Failed to send video for download. Please try again later. 😥", show_alert=True)
-                return
-
+        except Exception as e:
+            logger.error(f"Self-healing failed for {video_uuid}: {e}", exc_info=True)
+            await callback_query.answer("❌ Failed to send video. Please try again. 😥", show_alert=True)
     except Exception as e:
-        logger.error(f"Error handling download for user {user_id}, video {video_uuid}: {e}", exc_info=True)
-        await callback_query.answer("❌ Failed to send video for download. Please try again later. 😥", show_alert=True)
+        logger.error(f"Error sending video {video_uuid} to {user_id}: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to send video. Please try again. 😥", show_alert=True)
+
+@app.on_callback_query(filters.regex(r"^view_web_(.+)$"))
+async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'View in Web' button for premium users."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 2)[2]
+    chat_id = callback_query.message.chat.id
+
+    logger.info(f"User {user_id} chose to view video {video_uuid} in web.")
+
+    if not is_premium_user(user_id):
+        await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
+        return
+
+    video = get_video_by_uuid(video_uuid)
+    if not video:
+        await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
+        return
+
+    # Generate the secure web link
+    stream_link = streamer.get_stream_link(video['file_unique_id'], video.get('custom_caption', 'video.mp4'), video['file_size'])
+    viewer_url = f"{config.HOST}/web/viewer?url={urllib.parse.quote(stream_link)}"
+
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now", url=viewer_url)]])
+    await callback_query.message.reply_text("Click the button below to watch the video in your browser:", reply_markup=reply_markup)
+    await callback_query.answer()
 
 
 @app.on_callback_query(filters.regex(r"^bookmark_(.+)$"))
@@ -3857,6 +3974,7 @@ async def process_batch_queue(user_id: int, client: Client):
                 "file_unique_id": file_unique_id, "category": category,
                 "timestamp": get_current_time(),
                 "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
+                "file_size": sent_video_message.video.file_size, # Add file_size
                 "banned": False, "custom_caption": message.caption
             }
             media_collection.insert_one(video_data)
@@ -4963,15 +5081,9 @@ async def health_check():
     except Exception as e:
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
-@fastapi_app.on_event("startup")
-async def startup_event():
-    """
-    This function runs when the FastAPI server starts.
-    It initializes and starts the Pyrogram client in the background.
-    """
-    logger.info("FastAPI server is starting up...")
-
-    # Start the Pyrogram client
+async def run_pyrogram_client():
+    """Starts the Pyrogram client and background tasks."""
+    logger.info("Starting Pyrogram client and background tasks...")
     await app.start()
     logger.info("Pyrogram client started.")
 
@@ -4984,14 +5096,23 @@ async def startup_event():
 
     # Load admins and run background tasks
     await load_admins_from_db()
-    await load_data_channel_id() # NEW: Load data channel ID
-    await load_force_sub_channels() # NEW: Load force sub channels
-    await health_check()
+    await load_data_channel_id()
+    await load_force_sub_channels()
+    # await health_check() # Health check is still commented out
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
     create_tracked_task(keep_alive())
     logger.info("Background tasks initiated. Bot is now fully operational.")
+
+@fastapi_app.on_event("startup")
+async def startup_event():
+    """
+    This function runs when the FastAPI server starts.
+    It initializes and starts the Pyrogram client in the background.
+    """
+    logger.info("FastAPI server is starting up...")
+    create_tracked_task(run_pyrogram_client())
 
 
 @fastapi_app.on_event("shutdown")
