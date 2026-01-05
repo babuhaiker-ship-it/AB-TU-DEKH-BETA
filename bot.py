@@ -50,7 +50,7 @@ class BotConfig:
     MONGO_DB_NAME = 'spicybot'
     HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
+    BUY_BOT_URL = 't.me/Spicynyra' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
