@@ -50,7 +50,7 @@ class BotConfig:
     MONGO_DB_NAME = 'spicybot'
     HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 't.me/Spicynyra' # MODIFIED: Added https://
+    BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
     TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
@@ -335,7 +335,7 @@ class Stream:
     def get_hash(self, file_unique_id: str, file_name: str, file_size: int) -> str:
         """Generates a secure hash for a streaming link."""
         # Simple hash for demonstration; replace with a more secure method if needed
-        return hashlib.sha256(f"{file_unique_id}-{file_name}-{file_size}-{config.BOT_TOKEN}".encode()).hexdigest()
+        return hashlib.sha256(f"{file_unique_id}-{file_name}-{file_size}-{config.BOT_TOKEN}".encode()).hexdigest()[:16]
 
     def get_stream_link(self, file_unique_id: str, file_name: str, file_size: int) -> str:
         """Gets a streaming link with a hash."""
@@ -3145,6 +3145,10 @@ async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
 
     if not is_premium_user(user_id):
         await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
+        return
+
+    if "localhost" in config.HOST or "127.0.0.1" in config.HOST:
+        await callback_query.answer("Bot is not configured for public web streaming.", show_alert=True)
         return
 
     video = get_video_by_uuid(video_uuid)
