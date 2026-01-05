@@ -3217,7 +3217,8 @@ async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
             return
 
     # Generate the secure web link
-    stream_link = streamer.get_stream_link(video['file_unique_id'], video.get('custom_caption', 'video.mp4'), file_size)
+    caption = video.get('custom_caption') or "video.mp4"
+    stream_link = streamer.get_stream_link(video['file_unique_id'], caption, file_size)
     viewer_url = f"{config.HOST}/web/viewer?url={urllib.parse.quote(stream_link)}"
 
     reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now", url=viewer_url)]])
