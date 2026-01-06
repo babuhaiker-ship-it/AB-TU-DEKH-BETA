@@ -22,7 +22,7 @@ from shortzy import Shortzy
 # --- Mini App / Web Server Imports ---
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends
-from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse, FileResponse
+from fastapi.responses import RedirectResponse, JSONResponse, StreamingResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.status import HTTP_206_PARTIAL_CONTENT, HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -1763,10 +1763,41 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
 
     return StreamingResponse(full_stream_generator(), headers=headers)
 
-@fastapi_app.get("/web/viewer")
-async def get_viewer_page():
-    """Serves the video viewer HTML page."""
-    return FileResponse('web/viewer.html')
+@fastapi_app.get("/watch/{video_uuid}", response_class=HTMLResponse)
+async def watch_video(video_uuid: str):
+    """Serves a dynamic HTML page with the video stream URL embedded."""
+    if "localhost" in config.HOST or "127.0.0.1" in config.HOST:
+        return HTMLResponse(content="<h1>Feature not available in local development.</h1>", status_code=503)
+
+    video = media_collection.find_one({'uuid': video_uuid})
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    file_size = video.get('file_size')
+    if not file_size:
+        try:
+            message = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
+            if message.video:
+                file_size = message.video.file_size
+                media_collection.update_one({'uuid': video_uuid}, {'$set': {'file_size': file_size}})
+            else:
+                raise ValueError("Message does not contain a video.")
+        except Exception as e:
+            logger.error(f"Could not retrieve file_size for video {video_uuid}: {e}")
+            raise HTTPException(status_code=500, detail="Could not retrieve video details.")
+
+    caption = video.get('custom_caption') or "video.mp4"
+    stream_link = streamer.get_stream_link(video['file_unique_id'], caption, file_size)
+
+    try:
+        with open('web/viewer.html', 'r') as f:
+            html_content = f.read()
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="Viewer page not found.")
+
+    html_content = html_content.replace("{{STREAM_URL}}", stream_link)
+    return HTMLResponse(content=html_content)
+
 
 @fastapi_app.get("/api/profile")
 async def get_api_profile(auth: dict = Depends(verify_telegram_init_data)):
@@ -3241,9 +3272,7 @@ async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
             return
 
     # Generate the secure web link
-    caption = video.get('custom_caption') or "video.mp4"
-    stream_link = streamer.get_stream_link(video['file_unique_id'], caption, file_size)
-    viewer_url = f"{config.HOST}/web/viewer?url={urllib.parse.quote(stream_link)}"
+    viewer_url = f"{config.HOST}/watch/{video_uuid}"
 
     reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now", url=viewer_url)]])
     await callback_query.message.reply_text("Click the button below to watch the video in your browser:", reply_markup=reply_markup)
@@ -5103,6 +5132,8 @@ async def health_check():
             try:
                 member = await app.get_chat_member(DATA_CHANNEL_ID, me.id)
                 logger.info(f"Bot status in data channel ({DATA_CHANNEL_ID}): {member.status}")
+            except PeerIdInvalid:
+                logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: PeerIdInvalid. The bot may have been removed from the channel.")
             except Exception as e:
                 logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
         else:
@@ -5113,6 +5144,8 @@ async def health_check():
                 try:
                     force_sub_member = await app.get_chat_member(channel_info['channel_id'], me.id)
                     logger.info(f"Bot status in force subscribe channel ({channel_info['channel_id']}): {force_sub_member.status}")
+                except PeerIdInvalid:
+                    logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: PeerIdInvalid. The bot may have been removed from the channel.")
                 except Exception as e:
                     logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: {e}", exc_info=True)
         else:

@@ -24,18 +24,8 @@
 </head>
 <body>
     <video controls autoplay>
-        <source src="" type="video/mp4">
+        <source src="{{STREAM_URL}}" type="video/mp4">
         Your browser does not support the video tag.
     </video>
-    <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const video = document.querySelector('video');
-            const params = new URLSearchParams(window.location.search);
-            const videoUrl = params.get('url');
-            if (videoUrl) {
-                video.src = decodeURIComponent(videoUrl);
-            }
-        });
-    </script>
 </body>
 </html>
