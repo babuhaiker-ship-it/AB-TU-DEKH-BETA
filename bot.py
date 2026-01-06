@@ -1682,15 +1682,28 @@ class BookmarkRequest(BaseModel):
     video_uuid: str
 
 # --- API Endpoints ---
-async def send_chunk(file_id: str, start: int, end: int):
-    """Fetches a chunk of a file from Telegram."""
+async def send_chunk(video_doc: dict, start: int, end: int):
+    """Fetches a chunk of a file from Telegram, with self-healing for expired links."""
     try:
-        # This is a simplified approach. For large files, you'd need to
-        # handle multiple chunks and offsets more carefully.
-        chunk = await app.download_media(file_id, file_size=(end - start + 1), offset=start)
+        chunk = await app.download_media(video_doc['file_id'], file_size=(end - start + 1), offset=start)
         return chunk
+    except FileReferenceExpired:
+        logger.warning(f"FileReferenceExpired for video {video_doc['uuid']}. Attempting self-healing.")
+        try:
+            message = await app.get_messages(DATA_CHANNEL_ID, video_doc['message_id'])
+            if message.video:
+                new_file_id = message.video.file_id
+                media_collection.update_one({'uuid': video_doc['uuid']}, {'$set': {'file_id': new_file_id}})
+                # Retry download with new file_id
+                chunk = await app.download_media(new_file_id, file_size=(end - start + 1), offset=start)
+                return chunk
+            else:
+                raise ValueError("Message does not contain a video.")
+        except Exception as e:
+            logger.error(f"Self-healing failed for video {video_doc['uuid']}: {e}")
+            return None
     except Exception as e:
-        logger.error(f"Error fetching chunk: {e}")
+        logger.error(f"Error fetching chunk for video {video_doc['uuid']}: {e}")
         return None
 
 @fastapi_app.get("/stream/{file_unique_id}")
@@ -1706,6 +1719,17 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
 
     range_header = request.headers.get('Range')
     file_size = video.get('file_size')
+    if not file_size:
+        try:
+            message = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
+            if message.video:
+                file_size = message.video.file_size
+                media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_size': file_size}})
+            else:
+                raise ValueError("Message does not contain a video.")
+        except Exception as e:
+            logger.error(f"Could not retrieve file_size for video {video['uuid']}: {e}")
+            raise HTTPException(status_code=500, detail="Could not retrieve video details.")
 
     headers = {
         'Content-Type': 'video/mp4',
@@ -1726,14 +1750,14 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
         headers['Content-Length'] = str(end - start + 1)
 
         async def stream_generator():
-            chunk = await send_chunk(video['file_id'], start, end)
+            chunk = await send_chunk(video, start, end)
             if chunk:
                 yield chunk
 
         return StreamingResponse(stream_generator(), status_code=HTTP_206_PARTIAL_CONTENT, headers=headers)
 
     async def full_stream_generator():
-        chunk = await send_chunk(video['file_id'], 0, file_size - 1)
+        chunk = await send_chunk(video, 0, file_size - 1)
         if chunk:
             yield chunk
 
@@ -3145,10 +3169,6 @@ async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
 
     if not is_premium_user(user_id):
         await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
-        return
-
-    if "localhost" in config.HOST or "127.0.0.1" in config.HOST:
-        await callback_query.answer("Bot is not configured for public web streaming.", show_alert=True)
         return
 
     video = get_video_by_uuid(video_uuid)
