@@ -3275,7 +3275,7 @@ async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
     viewer_url = f"{config.HOST}/watch/{video_uuid}"
 
     reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now", url=viewer_url)]])
-    await callback_query.message.reply_text("Click the button below to watch the video in your browser:", reply_markup=reply_markup)
+    await callback_query.message.reply_text(f"Click the button below to watch the video in your browser:\n\n`{viewer_url}`", reply_markup=reply_markup)
     await callback_query.answer()
 
 
