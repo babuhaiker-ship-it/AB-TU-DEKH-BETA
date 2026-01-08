@@ -48,7 +48,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    HOST = "http://38.109.11.123"  # Replace with your actual host URL
+    HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
@@ -60,6 +60,10 @@ class BotConfig:
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 199
     FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
+    # REMOVED: FORCE_SUB_CHANNEL_ID = -1002622483638
+    # REMOVED: FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
+    # REMOVED: FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
+    # REMOVED: FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
@@ -3185,63 +3189,13 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
         await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
         return
 
-    # Offer options: View in Chat or View in Web
+    # Per the user's request, both buttons will now open the web viewer.
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👀 View in Chat", callback_data=f"view_chat_{video_uuid}")],
+        [InlineKeyboardButton("👀 View in Chat", callback_data=f"view_web_{video_uuid}")],
         [InlineKeyboardButton("🌐 View in Web", callback_data=f"view_web_{video_uuid}")]
     ])
     await callback_query.message.reply_text("Choose how you want to view the video:", reply_markup=reply_markup)
     await callback_query.answer()
-
-
-@app.on_callback_query(filters.regex(r"^view_chat_(.+)$"))
-async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
-    """Handles 'View in Chat' button for premium users."""
-    user_id = callback_query.from_user.id
-    video_uuid = callback_query.data.split('_', 2)[2]
-    chat_id = callback_query.message.chat.id
-
-    logger.info(f"User {user_id} chose to view video {video_uuid} in chat.")
-
-    if not is_premium_user(user_id):
-        await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
-        return
-
-
-    video = get_video_by_uuid(video_uuid)
-    if not video:
-        await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
-        return
-
-    if not DATA_CHANNEL_ID:
-        logger.error("DATA_CHANNEL_ID is not set. Cannot download videos.")
-        await callback_query.answer("Video storage channel is not configured. Please contact an admin.", show_alert=True)
-        return
-
-    try:
-        await client.send_video(
-            chat_id,
-            video=video['file_id'],
-            caption=None,
-            protect_content=False
-        )
-        await callback_query.answer("Download initiated! 🚀")
-    except FileReferenceExpired:
-        # Self-healing logic as before
-        logger.warning(f"FileReferenceExpired for {video_uuid}. Attempting self-healing.")
-        try:
-            message_id_in_channel = video.get('message_id')
-            healed_message = await client.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
-            new_file_id = healed_message.video.file_id
-            media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
-            await client.send_video(chat_id, video=new_file_id, caption=None, protect_content=False)
-            await callback_query.answer("Download initiated! 🚀")
-        except Exception as e:
-            logger.error(f"Self-healing failed for {video_uuid}: {e}", exc_info=True)
-            await callback_query.answer("❌ Failed to send video. Please try again. 😥", show_alert=True)
-    except Exception as e:
-        logger.error(f"Error sending video {video_uuid} to {user_id}: {e}", exc_info=True)
-        await callback_query.answer("❌ Failed to send video. Please try again. 😥", show_alert=True)
 
 
 @app.on_callback_query(filters.regex(r"^view_web_(.+)$"))
