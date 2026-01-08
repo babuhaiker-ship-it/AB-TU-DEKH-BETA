@@ -3202,6 +3202,7 @@ async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
         return
 
+
     video = get_video_by_uuid(video_uuid)
     if not video:
         await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
