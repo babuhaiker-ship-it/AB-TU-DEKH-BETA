@@ -3175,6 +3175,14 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
         )
         return
 
+    if "localhost" in config.HOST or "127.0.0.1" in config.HOST:
+        logger.error(f"FATAL: HOST variable is set to '{config.HOST}'. Web features require a public URL.")
+        await callback_query.answer(
+            "⚠️ This feature is temporarily misconfigured.\nPlease contact the administrator.",
+            show_alert=True
+        )
+        return
+
     video = get_video_by_uuid(video_uuid)
     if not video:
         logger.warning(f"Premium user {user_id} requested download for non-existent video {video_uuid}.")
@@ -3188,6 +3196,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     ])
     await callback_query.message.reply_text("Choose how you want to view the video:", reply_markup=reply_markup)
     await callback_query.answer()
+
 
 @app.on_callback_query(filters.regex(r"^view_chat_(.+)$"))
 async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
@@ -3237,6 +3246,7 @@ async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
     except Exception as e:
         logger.error(f"Error sending video {video_uuid} to {user_id}: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to send video. Please try again. 😥", show_alert=True)
+
 
 @app.on_callback_query(filters.regex(r"^view_web_(.+)$"))
 async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
