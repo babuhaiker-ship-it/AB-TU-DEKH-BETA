@@ -48,7 +48,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    HOST = "http://38.109.11.123"  # Replace with your actual host URL
+    HOST = "https://ab-tu-dekh-beta-gmi3.onrender.com/"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
@@ -74,7 +74,7 @@ class BotConfig:
     FREE_LIMIT_RESET_HOURS = 6  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
-    MINI_APP_URL = "https://niggabitchass-14ai9w96j-godfatherpys-projects.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
+    MINI_APP_URL = "https://ab-tu-dekh-beta-gmi3.onrender.com/" # IMPORTANT: Replace with your actual frontend URL
 
 try:
     config = BotConfig()
