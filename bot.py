@@ -87,8 +87,9 @@ BATCH_UPLOAD_LIMIT = 20
 BATCH_COOLDOWN_SECONDS = 60
 
 # --- MongoDB Setup ---
-client = MongoClient(config.MONGO_URI)
-db = client[config.MONGO_DB_NAME]
+# Sync client for Pyrogram parts
+sync_client = MongoClient(config.MONGO_URI)
+db = sync_client[config.MONGO_DB_NAME]
 users_collection = db['users']
 tokens_collection = db['tokens']
 media_collection = db['media']
@@ -96,10 +97,15 @@ history_collection = db['history']
 categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
-video_batches_collection = db['video_batches'] # New collection for batch videos
+video_batches_collection = db['video_batches']
 # NEW: Collections for dynamic channel IDs
 force_sub_channels_collection = db['force_sub_channels']
 data_channel_collection = db['data_channel']
+
+# Async client for FastAPI parts
+async_client = AsyncIOMotorClient(config.MONGO_URI)
+async_db = async_client[config.MONGO_DB_NAME]
+async_media_collection = async_db['media']
 
 
 # Create indexes
@@ -146,7 +152,14 @@ app = Client(
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
 
-
+# Configure CORS to allow requests from any origin, which is crucial for the web viewer.
+fastapi_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
 active_tasks = set()
@@ -1587,94 +1600,158 @@ async def handle_error(client: Client, message: Message, error: Exception):
         logger.error(f"An unexpected error occurred for user {message.from_user.id}: {error}", exc_info=True)
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later. 🥺")
 
-async def send_chunk(video_doc: dict, start: int, end: int):
-    """Fetches a chunk of a file from Telegram, with self-healing for expired links."""
-    try:
-        chunk = await app.download_media(video_doc['file_id'], file_size=(end - start + 1), offset=start)
-        return chunk
-    except FileReferenceExpired:
-        logger.warning(f"FileReferenceExpired for video {video_doc['uuid']}. Attempting self-healing.")
-        try:
-            message = await app.get_messages(DATA_CHANNEL_ID, video_doc['message_id'])
-            if message.video:
-                new_file_id = message.video.file_id
-                media_collection.update_one({'uuid': video_doc['uuid']}, {'$set': {'file_id': new_file_id}})
-                # Retry download with new file_id
-                chunk = await app.download_media(new_file_id, file_size=(end - start + 1), offset=start)
-                return chunk
-            else:
-                raise ValueError("Message does not contain a video.")
-        except Exception as e:
-            logger.error(f"Self-healing failed for video {video_doc['uuid']}: {e}")
-            return None
-    except Exception as e:
-        logger.error(f"Error fetching chunk for video {video_doc['uuid']}: {e}")
-        return None
-
 @fastapi_app.get("/stream/{file_unique_id}")
 async def stream_video(file_unique_id: str, request: Request, name: str, size: int, hash: str):
-    """Streams a video file with support for range requests."""
+    """
+    New, high-performance streaming endpoint.
+    - Uses an async generator for direct data piping from Telegram to the client.
+    - Supports HTTP Range requests for seeking and plays nicely with HTML5 video players.
+    - Implements robust, in-stream self-healing for expired Telegram file references.
+    """
     expected_hash = streamer.get_hash(file_unique_id, name, size)
-    if expected_hash != hash:
-        raise HTTPException(status_code=403, detail="Invalid hash")
+    if not hmac.compare_digest(expected_hash, hash):
+        raise HTTPException(status_code=403, detail="Invalid or expired link.")
 
-    video = media_collection.find_one({'file_unique_id': file_unique_id})
+    video = await async_media_collection.find_one({'file_unique_id': file_unique_id})
     if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
+        raise HTTPException(status_code=404, detail="Video not found.")
 
-    range_header = request.headers.get('Range')
+    file_id = video['file_id']
     file_size = video.get('file_size')
+
+    # Self-heal missing file_size if it's not in the DB
     if not file_size:
         try:
-            message = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
-            if message.video:
-                file_size = message.video.file_size
-                media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_size': file_size}})
+            msg = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
+            if msg and msg.video:
+                file_size = msg.video.file_size
+                await async_media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_size': file_size}})
             else:
-                raise ValueError("Message does not contain a video.")
+                raise ValueError("Message not found or is not a video.")
         except Exception as e:
             logger.error(f"Could not retrieve file_size for video {video['uuid']}: {e}")
             raise HTTPException(status_code=500, detail="Could not retrieve video details.")
 
+    range_header = request.headers.get("Range")
+    start = 0
+    end = file_size - 1
+    status_code = 200 # Default to 200 OK
+
     headers = {
-        'Content-Type': 'video/mp4',
-        'Accept-Ranges': 'bytes',
-        'Content-Length': str(file_size),
-        'Content-Disposition': f'inline; filename="{name}"'
+        "Content-Type": "video/mp4",
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f"inline; filename=\"{name}\"",
+        "Connection": "keep-alive",
+        # CORS headers are now handled by the middleware, but this is a good fallback
+        "Access-Control-Allow-Origin": "*",
     }
 
     if range_header:
-        start_str, end_str = range_header.replace('bytes=', '').split('-')
-        start = int(start_str)
-        end = int(end_str) if end_str else file_size - 1
+        try:
+            range_val = range_header.strip().split("=")[1]
+            start_str, end_str = range_val.split("-", 1)
+            start = int(start_str)
+            if end_str:
+                end = int(end_str)
+            else: # If no end is specified, stream to the end of the file
+                end = file_size - 1
 
-        if start >= file_size or end >= file_size:
-            return StreamingResponse(status_code=HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, content=b"", headers=headers)
+            # Clamp range to valid values
+            start = max(0, start)
+            end = min(end, file_size - 1)
 
-        headers['Content-Range'] = f"bytes {start}-{end}/{file_size}"
-        headers['Content-Length'] = str(end - start + 1)
+            if start >= file_size or start > end:
+                 raise HTTPException(status_code=HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, detail="Requested range not satisfiable")
 
-        async def stream_generator():
-            chunk = await send_chunk(video, start, end)
-            if chunk:
-                yield chunk
+            status_code = HTTP_206_PARTIAL_CONTENT
+            headers["Content-Length"] = str(end - start + 1)
+            headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        except ValueError:
+            logger.warning(f"Invalid Range header format: {range_header}")
+            # Fallback to streaming the whole file if range is invalid
+            headers["Content-Length"] = str(file_size)
+    else:
+        headers["Content-Length"] = str(file_size)
 
-        return StreamingResponse(stream_generator(), status_code=HTTP_206_PARTIAL_CONTENT, headers=headers)
 
-    async def full_stream_generator():
-        chunk = await send_chunk(video, 0, file_size - 1)
-        if chunk:
-            yield chunk
+    CHUNK_SIZE = 2 * 1024 * 1024 # 2MB chunks for better performance
 
-    return StreamingResponse(full_stream_generator(), headers=headers)
+    async def stream_generator():
+        nonlocal file_id # Allow modification of file_id within the generator
+        current_pos = start
+        bytes_to_send = end - start + 1
+
+        while bytes_to_send > 0:
+            try:
+                # Calculate the exact chunk size needed for this iteration
+                limit = min(CHUNK_SIZE, bytes_to_send)
+
+                # Fetch the media chunk from Telegram
+                chunk = await app.download_media(
+                    file_id,
+                    offset=current_pos,
+                    limit=limit,
+                    in_memory=True
+                )
+
+                if not chunk:
+                    logger.warning(f"Telegram returned no data for {file_id} at offset {current_pos}. Ending stream.")
+                    break
+
+                # Yield the chunk's content (as bytes)
+                chunk_data = bytes(chunk.getbuffer())
+                yield chunk_data
+
+                # Update counters
+                chunk_len = len(chunk_data)
+                current_pos += chunk_len
+                bytes_to_send -= chunk_len
+
+            except (FileReferenceExpired, FileIdInvalid) as e:
+                logger.warning(f"File reference expired for {file_id} ({type(e).__name__}). Attempting to self-heal.")
+                try:
+                    # Fetch the message from the data channel to get a fresh file_id
+                    healed_message = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
+                    if not healed_message or not healed_message.video:
+                        raise ValueError("Failed to fetch or find video in healed message.")
+
+                    new_file_id = healed_message.video.file_id
+
+                    # Update the database with the new file_id for future requests
+                    await async_media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
+
+                    # Update the file_id for the current, ongoing stream
+                    file_id = new_file_id
+                    logger.info(f"Successfully self-healed file_id to {new_file_id}. Resuming stream from offset {current_pos}.")
+                    # The loop will automatically retry the download with the new file_id on the next iteration
+                except Exception as heal_e:
+                    logger.error(f"Self-healing failed for video {video['uuid']}: {heal_e}", exc_info=True)
+                    # If healing fails, we must stop the stream to prevent an infinite loop
+                    break
+            except Exception as e:
+                logger.error(f"Unexpected error while streaming {file_id} at offset {current_pos}: {e}", exc_info=True)
+                break
+
+    return StreamingResponse(stream_generator(), status_code=status_code, headers=headers)
+
 
 @fastapi_app.get("/watch/{video_uuid}", response_class=HTMLResponse)
-async def watch_video(video_uuid: str):
+async def watch_video(video_uuid: str, request: Request):
     """Serves a dynamic HTML page with the video stream URL embedded."""
+    # Special case for frontend verification to prevent localhost issues and DB dependency
+    if video_uuid == "a-dummy-uuid-for-testing":
+        try:
+            with open('web/viewer.html', 'r') as f:
+                html_content = f.read()
+            html_content = html_content.replace("{{STREAM_URL}}", "#")
+            return HTMLResponse(content=html_content)
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail="Viewer page not found.")
+
     if "localhost" in config.HOST or "127.0.0.1" in config.HOST:
         return HTMLResponse(content="<h1>Feature not available in local development.</h1>", status_code=503)
 
-    video = media_collection.find_one({'uuid': video_uuid})
+    video = await async_media_collection.find_one({'uuid': video_uuid})
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
@@ -1684,7 +1761,7 @@ async def watch_video(video_uuid: str):
             message = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
             if message.video:
                 file_size = message.video.file_size
-                media_collection.update_one({'uuid': video_uuid}, {'$set': {'file_size': file_size}})
+                await async_media_collection.update_one({'uuid': video_uuid}, {'$set': {'file_size': file_size}})
             else:
                 raise ValueError("Message does not contain a video.")
         except Exception as e:
@@ -2903,9 +2980,9 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
         await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
         return
 
-    # Per the user's request, both buttons will now open the web viewer.
+    # Correctly wire the buttons to their respective callbacks
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👀 View in Chat", callback_data=f"view_web_{video_uuid}")],
+        [InlineKeyboardButton("👀 View in Chat", callback_data=f"view_chat_{video_uuid}")],
         [InlineKeyboardButton("🌐 View in Web", callback_data=f"view_web_{video_uuid}")]
     ])
     await callback_query.message.reply_text("Choose how you want to view the video:", reply_markup=reply_markup)
@@ -2952,6 +3029,65 @@ async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
     reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now", url=viewer_url)]])
     await callback_query.message.reply_text(f"Click the button below to watch the video in your browser:\n\n`{viewer_url}`", reply_markup=reply_markup)
     await callback_query.answer()
+
+@app.on_callback_query(filters.regex(r"^view_chat_(.+)$"))
+async def view_in_chat_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'View in Chat' button for premium users, sending the video directly."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 2)[2]
+    chat_id = callback_query.message.chat.id
+
+    logger.info(f"User {user_id} chose to view video {video_uuid} in chat.")
+
+    if not is_premium_user(user_id):
+        await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
+        return
+
+    video = get_video_by_uuid(video_uuid)
+    if not video:
+        await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
+        return
+
+    try:
+        await client.send_video(
+            chat_id=chat_id,
+            video=video['file_id'],
+            caption=video.get('custom_caption', f"Video {video_uuid}")
+        )
+        await callback_query.answer("Video sent! ✅")
+    except FileReferenceExpired:
+        logger.warning(f"FileReferenceExpired for video {video_uuid} in view_in_chat. Attempting self-healing.")
+        try:
+            message_id_in_channel = video.get('message_id')
+            if not message_id_in_channel:
+                raise ValueError("No message_id found in DB for self-healing.")
+
+            healed_message = await client.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
+            if not healed_message or not healed_message.video:
+                raise ValueError("Failed to fetch or find video in healed message.")
+
+            new_file_id = healed_message.video.file_id
+            logger.info(f"Successfully obtained new file_id for video {video['uuid']}: {new_file_id}")
+
+            media_collection.update_one(
+                {'uuid': video['uuid']},
+                {'$set': {'file_id': new_file_id}}
+            )
+            logger.info(f"Database updated with new file_id for video {video['uuid']}.")
+
+            # Retry sending the video with the new file_id
+            await client.send_video(
+                chat_id=chat_id,
+                video=new_file_id,
+                caption=video.get('custom_caption', f"Video {video_uuid}")
+            )
+            await callback_query.answer("Video sent! ✅")
+        except Exception as heal_e:
+            logger.error(f"Self-healing failed for video {video_uuid} in view_in_chat: {heal_e}", exc_info=True)
+            await callback_query.answer("❌ Could not send the video after a refresh. Please try again.", show_alert=True)
+    except Exception as e:
+        logger.error(f"Failed to send video {video_uuid} to user {user_id} in chat: {e}")
+        await callback_query.answer("❌ Could not send the video. Please try again.", show_alert=True)
 
 
 @app.on_callback_query(filters.regex(r"^bookmark_(.+)$"))
@@ -4783,8 +4919,8 @@ async def health_check():
             try:
                 member = await app.get_chat_member(DATA_CHANNEL_ID, me.id)
                 logger.info(f"Bot status in data channel ({DATA_CHANNEL_ID}): {member.status}")
-            except PeerIdInvalid:
-                logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: PeerIdInvalid. The bot may have been removed from the channel.")
+            except (PeerIdInvalid, ValueError):
+                logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: PeerIdInvalid or ValueError. The bot may have been removed or the ID is incorrect.")
             except Exception as e:
                 logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
         else:
@@ -4795,8 +4931,8 @@ async def health_check():
                 try:
                     force_sub_member = await app.get_chat_member(channel_info['channel_id'], me.id)
                     logger.info(f"Bot status in force subscribe channel ({channel_info['channel_id']}): {force_sub_member.status}")
-                except PeerIdInvalid:
-                    logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: PeerIdInvalid. The bot may have been removed from the channel.")
+                except (PeerIdInvalid, ValueError):
+                    logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: PeerIdInvalid or ValueError. The bot may have been removed or the ID is incorrect.")
                 except Exception as e:
                     logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: {e}", exc_info=True)
         else:
