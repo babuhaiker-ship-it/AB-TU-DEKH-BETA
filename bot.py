@@ -4,7 +4,8 @@ import uuid
 import base64
 import logging
 from datetime import datetime, timedelta
-from pyrogram import Client, filters
+from pyrogram import Client, filters, raw
+from pyrogram.file_id import FileId
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo
 )
@@ -48,7 +49,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    HOST = "https://ab-tu-dekh-beta-xa7c.onrender.com"  # Replace with your actual host URL
+    HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
@@ -1600,11 +1601,84 @@ async def handle_error(client: Client, message: Message, error: Exception):
         logger.error(f"An unexpected error occurred for user {message.from_user.id}: {error}", exc_info=True)
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later. 🥺")
 
+async def get_chunk_generator(client, file_id_str, start_offset, end_offset):
+    """
+    A low-level async generator to fetch and yield video chunks using raw Pyrogram functions.
+    Includes self-healing for expired file references.
+    """
+    decoded_file_id = FileId.decode(file_id_str)
+
+    # Prepare the initial location for fetching
+    location = raw.types.InputDocumentFileLocation(
+        id=decoded_file_id.media_id,
+        access_hash=decoded_file_id.access_hash,
+        file_reference=decoded_file_id.file_reference,
+        thumb_size=""
+    )
+
+    current_pos = start_offset
+    CHUNK_SIZE = 1024 * 1024  # 1 MB
+
+    while current_pos <= end_offset:
+        try:
+            chunk = await client.invoke(
+                raw.functions.upload.GetFile(
+                    location=location,
+                    offset=current_pos,
+                    limit=CHUNK_SIZE,
+                    precise=True
+                )
+            )
+
+            if not chunk.bytes:
+                break
+
+            yield chunk.bytes
+            current_pos += len(chunk.bytes)
+
+        except raw.errors.FileReferenceExpired:
+            logger.warning(f"File reference expired for {file_id_str}. Attempting to self-heal.")
+
+            # Find the video in the database to get its message_id
+            video_doc = await async_media_collection.find_one({'file_id': file_id_str})
+            if not video_doc:
+                logger.error(f"Could not find video with file_id {file_id_str} for self-healing.")
+                break
+
+            try:
+                # Fetch the message to get a fresh file reference
+                healed_message = await app.get_messages(DATA_CHANNEL_ID, video_doc['message_id'])
+                if not healed_message or not healed_message.video:
+                    raise ValueError("Failed to fetch or find video in healed message.")
+
+                new_file_id_str = healed_message.video.file_id
+                new_decoded_file_id = FileId.decode(new_file_id_str)
+
+                # Update the database for future requests
+                await async_media_collection.update_one(
+                    {'uuid': video_doc['uuid']},
+                    {'$set': {'file_id': new_file_id_str}}
+                )
+
+                # Update the location for the current stream
+                location.access_hash = new_decoded_file_id.access_hash
+                location.file_reference = new_decoded_file_id.file_reference
+
+                logger.info(f"Successfully self-healed file reference. Resuming stream from offset {current_pos}.")
+
+            except Exception as heal_e:
+                logger.error(f"Self-healing failed for video {video_doc['uuid']}: {heal_e}", exc_info=True)
+                break
+        except Exception as e:
+            logger.error(f"Unexpected error while streaming {file_id_str} at offset {current_pos}: {e}", exc_info=True)
+            break
+
+
 @fastapi_app.get("/stream/{file_unique_id}")
 async def stream_video(file_unique_id: str, request: Request, name: str, size: int, hash: str):
     """
-    New, high-performance streaming endpoint.
-    - Uses an async generator for direct data piping from Telegram to the client.
+    High-performance streaming endpoint using low-level raw Pyrogram functions.
+    - Uses the `get_chunk_generator` for direct data piping from Telegram to the client.
     - Supports HTTP Range requests for seeking and plays nicely with HTML5 video players.
     - Implements robust, in-stream self-healing for expired Telegram file references.
     """
@@ -1616,7 +1690,7 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
     if not video:
         raise HTTPException(status_code=404, detail="Video not found.")
 
-    file_id = video['file_id']
+    file_id_str = video['file_id']
     file_size = video.get('file_size')
 
     # Self-heal missing file_size if it's not in the DB
@@ -1642,7 +1716,6 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
         "Accept-Ranges": "bytes",
         "Content-Disposition": f"inline; filename=\"{name}\"",
         "Connection": "keep-alive",
-        # CORS headers are now handled by the middleware, but this is a good fallback
         "Access-Control-Allow-Origin": "*",
     }
 
@@ -1666,73 +1739,19 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
             status_code = HTTP_206_PARTIAL_CONTENT
             headers["Content-Length"] = str(end - start + 1)
             headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
-        except ValueError:
+        except (ValueError, IndexError):
             logger.warning(f"Invalid Range header format: {range_header}")
             # Fallback to streaming the whole file if range is invalid
             headers["Content-Length"] = str(file_size)
     else:
         headers["Content-Length"] = str(file_size)
 
-
-    CHUNK_SIZE = 2 * 1024 * 1024 # 2MB chunks for better performance
-
-    async def stream_generator():
-        nonlocal file_id # Allow modification of file_id within the generator
-        current_pos = start
-        bytes_to_send = end - start + 1
-
-        while bytes_to_send > 0:
-            try:
-                # Calculate the exact chunk size needed for this iteration
-                limit = min(CHUNK_SIZE, bytes_to_send)
-
-                # Fetch the media chunk from Telegram
-                chunk = await app.download_media(
-                    file_id,
-                    offset=current_pos,
-                    limit=limit,
-                    in_memory=True
-                )
-
-                if not chunk:
-                    logger.warning(f"Telegram returned no data for {file_id} at offset {current_pos}. Ending stream.")
-                    break
-
-                # Yield the chunk's content (as bytes)
-                chunk_data = bytes(chunk.getbuffer())
-                yield chunk_data
-
-                # Update counters
-                chunk_len = len(chunk_data)
-                current_pos += chunk_len
-                bytes_to_send -= chunk_len
-
-            except (FileReferenceExpired, FileIdInvalid) as e:
-                logger.warning(f"File reference expired for {file_id} ({type(e).__name__}). Attempting to self-heal.")
-                try:
-                    # Fetch the message from the data channel to get a fresh file_id
-                    healed_message = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
-                    if not healed_message or not healed_message.video:
-                        raise ValueError("Failed to fetch or find video in healed message.")
-
-                    new_file_id = healed_message.video.file_id
-
-                    # Update the database with the new file_id for future requests
-                    await async_media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
-
-                    # Update the file_id for the current, ongoing stream
-                    file_id = new_file_id
-                    logger.info(f"Successfully self-healed file_id to {new_file_id}. Resuming stream from offset {current_pos}.")
-                    # The loop will automatically retry the download with the new file_id on the next iteration
-                except Exception as heal_e:
-                    logger.error(f"Self-healing failed for video {video['uuid']}: {heal_e}", exc_info=True)
-                    # If healing fails, we must stop the stream to prevent an infinite loop
-                    break
-            except Exception as e:
-                logger.error(f"Unexpected error while streaming {file_id} at offset {current_pos}: {e}", exc_info=True)
-                break
-
-    return StreamingResponse(stream_generator(), status_code=status_code, headers=headers)
+    # Use the new low-level generator for streaming
+    return StreamingResponse(
+        get_chunk_generator(app, file_id_str, start, end),
+        status_code=status_code,
+        headers=headers
+    )
 
 
 @fastapi_app.get("/watch/{video_uuid}", response_class=HTMLResponse)
