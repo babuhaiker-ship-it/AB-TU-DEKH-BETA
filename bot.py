@@ -50,7 +50,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    HOST = "https://ab-tu-dekh-beta-xa7c.onrender.com"  # Replace with your actual host URL
+    HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
@@ -3104,11 +3104,10 @@ async def view_in_web_callback(client: Client, callback_query: CallbackQuery):
     # Generate the secure web link
     viewer_url = f"{config.HOST}/watch/{video_uuid}"
 
-    # Shorten the URL to avoid Telegram's 64-byte limit
-    shortened_url = await get_shortener_config_and_shorten_url(viewer_url)
-
-    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 Watch Now", url=shortened_url)]])
-    await callback_query.message.reply_text(f"Click the button below to watch the video in your browser:\n\n`{shortened_url}`", reply_markup=reply_markup)
+    # Send the URL as plain text to avoid the ButtonUrlInvalid error.
+    await callback_query.message.reply_text(
+        f"Click the link below to watch the video in your browser:\n\n{viewer_url}"
+    )
     await callback_query.answer()
 
 @app.on_callback_query(filters.regex(r"^view_chat_(.+)$"))
