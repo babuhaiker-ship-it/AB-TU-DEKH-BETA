@@ -1603,12 +1603,13 @@ async def handle_error(client: Client, message: Message, error: Exception):
 
 async def get_chunk_generator(client, file_id_str, start_offset, end_offset):
     """
-    A low-level async generator to fetch and yield video chunks using raw Pyrogram functions.
-    Includes self-healing for expired file references.
+    A low-level async generator to fetch and yield video chunks, respecting Telegram's 4096-byte alignment.
+    - Aligns the initial download offset to a multiple of 4096.
+    - Trims leading bytes from the first chunk to match the exact requested start_offset.
+    - Includes self-healing for expired file references.
     """
     decoded_file_id = FileId.decode(file_id_str)
 
-    # Prepare the initial location for fetching
     location = raw.types.InputDocumentFileLocation(
         id=decoded_file_id.media_id,
         access_hash=decoded_file_id.access_hash,
@@ -1616,8 +1617,19 @@ async def get_chunk_generator(client, file_id_str, start_offset, end_offset):
         thumb_size=""
     )
 
-    current_pos = start_offset
-    CHUNK_SIZE = 1024 * 1024  # 1 MB
+    # --- MTProto 4096-byte alignment logic ---
+    CHUNK_SIZE = 1024 * 1024  # 1 MB, which is a multiple of 4096.
+
+    # Calculate the aligned offset (floor to the nearest 4096 boundary)
+    aligned_offset = (start_offset // 4096) * 4096
+
+    # Calculate how many bytes to skip from the first chunk
+    bytes_to_skip = start_offset - aligned_offset
+
+    # The actual position we are requesting from Telegram's servers
+    current_pos = aligned_offset
+
+    is_first_chunk = True
 
     while current_pos <= end_offset:
         try:
@@ -1625,28 +1637,36 @@ async def get_chunk_generator(client, file_id_str, start_offset, end_offset):
                 raw.functions.upload.GetFile(
                     location=location,
                     offset=current_pos,
-                    limit=CHUNK_SIZE,
-                    precise=True
+                    limit=CHUNK_SIZE
+                    # `precise` is not needed when offset is aligned
                 )
             )
 
             if not chunk.bytes:
-                break
+                break # End of file
+
+            # This is the actual length of the data received from Telegram
+            received_length = len(chunk.bytes)
+
+            # Update the position for the *next* request *before* we modify the chunk
+            current_pos += received_length
+
+            # If this is the first chunk, trim the leading bytes that the client didn't ask for.
+            if is_first_chunk:
+                chunk.bytes = chunk.bytes[bytes_to_skip:]
+                is_first_chunk = False
 
             yield chunk.bytes
-            current_pos += len(chunk.bytes)
 
         except FileReferenceExpired:
             logger.warning(f"File reference expired for {file_id_str}. Attempting to self-heal.")
 
-            # Find the video in the database to get its message_id
             video_doc = await async_media_collection.find_one({'file_id': file_id_str})
             if not video_doc:
                 logger.error(f"Could not find video with file_id {file_id_str} for self-healing.")
                 break
 
             try:
-                # Fetch the message to get a fresh file reference
                 healed_message = await app.get_messages(DATA_CHANNEL_ID, video_doc['message_id'])
                 if not healed_message or not healed_message.video:
                     raise ValueError("Failed to fetch or find video in healed message.")
@@ -1654,13 +1674,11 @@ async def get_chunk_generator(client, file_id_str, start_offset, end_offset):
                 new_file_id_str = healed_message.video.file_id
                 new_decoded_file_id = FileId.decode(new_file_id_str)
 
-                # Update the database for future requests
                 await async_media_collection.update_one(
                     {'uuid': video_doc['uuid']},
                     {'$set': {'file_id': new_file_id_str}}
                 )
 
-                # Update the location for the current stream
                 location.access_hash = new_decoded_file_id.access_hash
                 location.file_reference = new_decoded_file_id.file_reference
 
@@ -1677,10 +1695,10 @@ async def get_chunk_generator(client, file_id_str, start_offset, end_offset):
 @fastapi_app.get("/stream/{file_unique_id}")
 async def stream_video(file_unique_id: str, request: Request, name: str, size: int, hash: str):
     """
-    High-performance streaming endpoint using low-level raw Pyrogram functions.
-    - Uses the `get_chunk_generator` for direct data piping from Telegram to the client.
-    - Supports HTTP Range requests for seeking and plays nicely with HTML5 video players.
-    - Implements robust, in-stream self-healing for expired Telegram file references.
+    High-performance streaming endpoint compliant with Telegram's MTProto alignment requirements.
+    - Pre-emptively refreshes expired file references before streaming begins.
+    - Correctly handles HTTP Range requests for seeking.
+    - Passes precise byte ranges to a generator that handles 4096-byte alignment.
     """
     expected_hash = streamer.get_hash(file_unique_id, name, size)
     if not hmac.compare_digest(expected_hash, hash):
@@ -1693,23 +1711,41 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
     file_id_str = video['file_id']
     file_size = video.get('file_size')
 
-    # Self-heal missing file_size if it's not in the DB
+    # --- Pre-emptive Self-Healing ---
+    # 1. Heal missing file_size
     if not file_size:
         try:
             msg = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
             if msg and msg.video:
                 file_size = msg.video.file_size
                 await async_media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_size': file_size}})
-            else:
-                raise ValueError("Message not found or is not a video.")
+            else: raise ValueError("Message not found or is not a video.")
         except Exception as e:
-            logger.error(f"Could not retrieve file_size for video {video['uuid']}: {e}")
+            logger.error(f"Could not retrieve file_size for {video['uuid']}: {e}")
             raise HTTPException(status_code=500, detail="Could not retrieve video details.")
+
+    # 2. Heal expired file reference before starting the stream
+    try:
+        await app.invoke(raw.functions.upload.GetFile(location=FileId.decode(file_id_str).document_location, offset=0, limit=1))
+    except FileReferenceExpired:
+        logger.warning(f"Pre-emptive self-healing: File reference expired for {file_id_str}.")
+        try:
+            healed_message = await app.get_messages(DATA_CHANNEL_ID, video['message_id'])
+            if not healed_message or not healed_message.video:
+                raise ValueError("Failed to fetch or find video in healed message.")
+
+            new_file_id_str = healed_message.video.file_id
+            await async_media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id_str}})
+            file_id_str = new_file_id_str # Use the new file_id for the current stream
+            logger.info("Pre-emptive self-healing successful.")
+        except Exception as heal_e:
+            logger.error(f"Pre-emptive self-healing failed for {video['uuid']}: {heal_e}")
+            raise HTTPException(status_code=500, detail="Could not refresh video source.")
 
     range_header = request.headers.get("Range")
     start = 0
     end = file_size - 1
-    status_code = 200 # Default to 200 OK
+    status_code = 200
 
     headers = {
         "Content-Type": "video/mp4",
@@ -1726,10 +1762,7 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
             start = int(start_str)
             if end_str:
                 end = int(end_str)
-            else: # If no end is specified, stream to the end of the file
-                end = file_size - 1
 
-            # Clamp range to valid values
             start = max(0, start)
             end = min(end, file_size - 1)
 
@@ -1737,16 +1770,15 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
                  raise HTTPException(status_code=HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE, detail="Requested range not satisfiable")
 
             status_code = HTTP_206_PARTIAL_CONTENT
+            # The Content-Length MUST be the length of the range requested by the browser
             headers["Content-Length"] = str(end - start + 1)
             headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
         except (ValueError, IndexError):
-            logger.warning(f"Invalid Range header format: {range_header}")
-            # Fallback to streaming the whole file if range is invalid
+            logger.warning(f"Invalid Range header: {range_header}. Streaming entire file.")
             headers["Content-Length"] = str(file_size)
     else:
         headers["Content-Length"] = str(file_size)
 
-    # Use the new low-level generator for streaming
     return StreamingResponse(
         get_chunk_generator(app, file_id_str, start, end),
         status_code=status_code,
