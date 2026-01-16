@@ -3,29 +3,212 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Video Viewer</title>
+    <title>{{ file_name }}</title>
+
+    <!-- Plyr.io CSS from CDN -->
+    <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css" />
+
     <style>
+        :root {
+            --plyr-color-main: #7367f0;
+            --background-color: #0f0f0f;
+            --text-color: #ffffff;
+            --button-bg-color: #2a2a2a;
+            --button-hover-bg-color: #3a3a3a;
+            --warning-bg-color: #ffc107;
+            --warning-text-color: #000;
+        }
+
         body, html {
             margin: 0;
             padding: 0;
-            width: 100%;
             height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
             display: flex;
+            flex-direction: column;
             justify-content: center;
             align-items: center;
-            background-color: #000;
         }
-        video {
+
+        .container {
             width: 100%;
             max-width: 1200px;
+            padding: 1rem;
+            box-sizing: border-box;
+        }
+
+        #player {
+            width: 100%;
             height: auto;
+        }
+
+        .info-bar {
+            width: 100%;
+            max-width: 1200px;
+            padding: 1rem;
+            box-sizing: border-box;
+            text-align: center;
+        }
+
+        .action-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .btn {
+            background-color: var(--button-bg-color);
+            color: var(--text-color);
+            border: none;
+            padding: 12px 24px;
+            font-size: 1rem;
+            font-weight: 500;
+            border-radius: 8px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background-color 0.2s ease;
+        }
+
+        .btn:hover {
+            background-color: var(--button-hover-bg-color);
+        }
+
+        .mkv-warning {
+            display: none; /* Hidden by default */
+            background-color: var(--warning-bg-color);
+            color: var(--warning-text-color);
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }
+
+        .mkv-warning p {
+            margin: 0 0 1rem 0;
+            font-weight: 500;
+        }
+
+        .vlc-btn {
+            background-color: #ff6f00;
+            color: white;
+            font-weight: bold;
         }
     </style>
 </head>
 <body>
-    <video controls autoplay>
-        <source src="{{STREAM_URL}}" type="video/mp4">
-        Your browser does not support the video tag.
-    </video>
+
+    <div class="container">
+        <div id="mkv-warning" class="mkv-warning">
+            <p><strong>Browser Support for MKV is Limited.</strong><br>If you experience issues, please use a dedicated media player.</p>
+            <a id="vlc-link" href="#" class="btn vlc-btn">Open in VLC</a>
+        </div>
+
+        <video id="player" playsinline controls>
+            <source src="{{ stream_url }}" type="video/mp4" />
+        </video>
+    </div>
+
+    <div class="info-bar">
+        <h2>{{ file_name }}</h2>
+        <p>File Size: {{ file_size }} MB</p>
+        <div class="action-buttons">
+            <a id="download-btn" href="{{ stream_url }}" download class="btn">Download</a>
+            <button id="copy-link-btn" class="btn">Copy Stream Link</button>
+        </div>
+    </div>
+
+    <!-- Plyr.io JS from CDN -->
+    <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // --- Configuration ---
+            const fileName = "{{ file_name }}";
+            const streamUrl = "{{ stream_url }}";
+            const playerElement = document.getElementById('player');
+
+            // --- Initialize Plyr ---
+            const player = new Plyr(playerElement, {
+                title: fileName,
+                controls: ['play-large', 'play', 'progress', 'current-time', 'mute', 'volume', 'captions', 'settings', 'pip', 'airplay', 'fullscreen'],
+            });
+
+            // --- Stream Resilience Logic ---
+            let stallHandled = false;
+            let lastKnownTime = 0;
+
+            const handleStreamInterruption = () => {
+                if (stallHandled) return; // Prevent multiple reloads for one event
+                stallHandled = true;
+
+                console.warn('Stream interrupted. Attempting to reload...');
+                lastKnownTime = player.currentTime;
+
+                // Reload the source after a short delay
+                setTimeout(() => {
+                    player.source = {
+                        type: 'video',
+                        sources: [{
+                            src: streamUrl,
+                            type: 'video/mp4',
+                        }],
+                    };
+
+                    // Once the player is ready to play the new source, seek to the last known time
+                    player.once('canplay', () => {
+                        console.log(`Resuming from ${lastKnownTime}s.`);
+                        player.currentTime = lastKnownTime;
+                        player.play();
+                    });
+
+                    // Reset the flag after a cooldown to allow for future recoveries
+                    setTimeout(() => { stallHandled = false; }, 5000);
+                }, 1000);
+            };
+
+            player.on('stalled', handleStreamInterruption);
+            player.on('waiting', () => {
+                // A 'waiting' event can also indicate a stall.
+                if (player.currentTime > 0) handleStreamInterruption();
+            });
+            player.on('error', (event) => {
+                const error = event.detail.plyr.media.error;
+                if (error && error.code === 4) { // MEDIA_ERR_SRC_NOT_SUPPORTED
+                   console.error('Media source not supported. Attempting reload.');
+                   handleStreamInterruption();
+                }
+            });
+
+
+            // --- MKV File Logic ---
+            if (fileName.toLowerCase().endsWith('.mkv')) {
+                const mkvWarningBanner = document.getElementById('mkv-warning');
+                const vlcLink = document.getElementById('vlc-link');
+
+                // 1. Show the warning banner
+                mkvWarningBanner.style.display = 'block';
+
+                // 2. Create the vlc:// deep link
+                const streamUrlNoHttp = streamUrl.replace(/^https?:\/\//, '');
+                vlcLink.href = `vlc://${streamUrlNoHttp}`;
+            }
+
+            // --- Action Button Logic ---
+            const copyLinkBtn = document.getElementById('copy-link-btn');
+            copyLinkBtn.addEventListener('click', () => {
+                navigator.clipboard.writeText(streamUrl).then(() => {
+                    copyLinkBtn.textContent = 'Copied!';
+                    setTimeout(() => {
+                        copyLinkBtn.textContent = 'Copy Stream Link';
+                    }, 2000);
+                }).catch(err => {
+                    console.error('Failed to copy link: ', err);
+                    copyLinkBtn.textContent = 'Error!';
+                });
+            });
+        });
+    </script>
 </body>
 </html>

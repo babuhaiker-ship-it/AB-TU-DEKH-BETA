@@ -32,6 +32,7 @@ import hashlib
 from urllib.parse import unquote, parse_qs
 import json
 from pydantic import BaseModel
+from contextlib import asynccontextmanager
 
 
 # --- Logging Setup ---
@@ -107,6 +108,9 @@ data_channel_collection = db['data_channel']
 async_client = AsyncIOMotorClient(config.MONGO_URI)
 async_db = async_client[config.MONGO_DB_NAME]
 async_media_collection = async_db['media']
+async_settings_collection = async_db['settings']
+async_force_sub_channels_collection = async_db['force_sub_channels']
+async_data_channel_collection = async_db['data_channel']
 
 
 # Create indexes
@@ -151,7 +155,17 @@ app = Client(
 )
 
 # --- NEW: FastAPI App Initialization ---
-fastapi_app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Handles startup and shutdown events for the FastAPI app."""
+    logger.info("FastAPI server is starting up...")
+    create_tracked_task(run_pyrogram_client())
+    yield
+    logger.info("FastAPI server is shutting down...")
+    await app.stop()
+    logger.info("Pyrogram client stopped.")
+
+fastapi_app = FastAPI(lifespan=lifespan)
 
 # Configure CORS to allow requests from any origin, which is crucial for the web viewer.
 fastapi_app.add_middleware(
@@ -191,18 +205,18 @@ DATA_CHANNEL_ID = None
 FORCE_SUB_CHANNELS = [] # List of {'channel_id': int, 'link': str, 'name': str}
 
 async def load_admins_from_db():
-    """Loads admin list from DB and ensures owner is always included."""
+    """Loads admin list from DB asynchronously and ensures owner is always included."""
     global BOT_ADMINS
-    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    settings_doc = await async_settings_collection.find_one({'_id': 'bot_settings'})
     db_admins = settings_doc.get('admins', []) if settings_doc else []
     BOT_ADMINS = set(db_admins)
     BOT_ADMINS.add(config.OWNER_ID) # Ensure owner is always an admin
     logger.info(f"Loaded admins from DB. Current admins: {BOT_ADMINS}")
 
 async def load_data_channel_id():
-    """Loads the data channel ID from the database."""
+    """Loads the data channel ID from the database asynchronously."""
     global DATA_CHANNEL_ID
-    data_doc = data_channel_collection.find_one({'_id': 'data_channel'})
+    data_doc = await async_data_channel_collection.find_one({'_id': 'data_channel'})
     if data_doc:
         DATA_CHANNEL_ID = data_doc.get('channel_id')
         logger.info(f"Loaded data channel ID: {DATA_CHANNEL_ID}")
@@ -211,9 +225,10 @@ async def load_data_channel_id():
         logger.warning("No data channel ID found in DB.")
 
 async def load_force_sub_channels():
-    """Loads force subscribe channels from the database."""
+    """Loads force subscribe channels from the database asynchronously."""
     global FORCE_SUB_CHANNELS
-    FORCE_SUB_CHANNELS = list(force_sub_channels_collection.find({}))
+    cursor = async_force_sub_channels_collection.find({})
+    FORCE_SUB_CHANNELS = await cursor.to_list(length=None) # Get all documents
     logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} force subscribe channels.")
 
 def is_admin(user_id: int) -> bool:
@@ -1788,13 +1803,19 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
 
 @fastapi_app.get("/watch/{video_uuid}", response_class=HTMLResponse)
 async def watch_video(video_uuid: str, request: Request):
-    """Serves a dynamic HTML page with the video stream URL embedded."""
-    # Special case for frontend verification to prevent localhost issues and DB dependency
+    """
+    Serves a dynamic HTML page with video details embedded.
+    This simulates a Jinja2-like template rendering by replacing placeholders.
+    """
+    # Special case for frontend verification
     if video_uuid == "a-dummy-uuid-for-testing":
         try:
             with open('web/viewer.html', 'r') as f:
                 html_content = f.read()
-            html_content = html_content.replace("{{STREAM_URL}}", "#")
+            # Replace all placeholders for a clean test render
+            html_content = html_content.replace("{{ stream_url }}", "#")
+            html_content = html_content.replace("{{ file_name }}", "Test Video")
+            html_content = html_content.replace("{{ file_size }}", "N/A")
             return HTMLResponse(content=html_content)
         except FileNotFoundError:
             raise HTTPException(status_code=500, detail="Viewer page not found.")
@@ -1819,8 +1840,10 @@ async def watch_video(video_uuid: str, request: Request):
             logger.error(f"Could not retrieve file_size for video {video_uuid}: {e}")
             raise HTTPException(status_code=500, detail="Could not retrieve video details.")
 
-    caption = video.get('custom_caption') or "video.mp4"
-    stream_link = streamer.get_stream_link(video['file_unique_id'], caption, file_size)
+    # Prepare data for the template
+    file_name = video.get('custom_caption') or "video.mp4"
+    stream_url = streamer.get_stream_link(video['file_unique_id'], file_name, file_size)
+    file_size_mb = f"{file_size / 1024 / 1024:.2f}" if file_size else "N/A"
 
     try:
         with open('web/viewer.html', 'r') as f:
@@ -1828,7 +1851,11 @@ async def watch_video(video_uuid: str, request: Request):
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="Viewer page not found.")
 
-    html_content = html_content.replace("{{STREAM_URL}}", stream_link)
+    # Manually "render" the template by replacing placeholders
+    html_content = html_content.replace("{{ stream_url }}", stream_url)
+    html_content = html_content.replace("{{ file_name }}", html.escape(file_name))
+    html_content = html_content.replace("{{ file_size }}", file_size_mb)
+
     return HTMLResponse(content=html_content)
 
 
@@ -4965,35 +4992,44 @@ async def keep_alive():
 
 
 async def health_check():
+    """
+    Performs a health check on the bot's core dependencies (Pyrogram client, DB channels).
+    Includes robust error handling to prevent startup crashes.
+    """
     try:
+        # Check if the bot client itself is connected and can make API calls
         me = await app.get_me()
-        logger.info(f"Bot username: {me.username}")
+        logger.info(f"Health Check: Bot client is up. Username: {me.username}")
 
+        # Check Data Channel
         if DATA_CHANNEL_ID:
             try:
                 member = await app.get_chat_member(DATA_CHANNEL_ID, me.id)
-                logger.info(f"Bot status in data channel ({DATA_CHANNEL_ID}): {member.status}")
+                logger.info(f"Health Check: Bot status in data channel ({DATA_CHANNEL_ID}): {member.status}")
             except (PeerIdInvalid, ValueError):
-                logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: PeerIdInvalid or ValueError. The bot may have been removed or the ID is incorrect.")
+                logger.warning(f"Health Check Warning: Data channel ID {DATA_CHANNEL_ID} is invalid or the bot was removed. Please check the configuration.")
             except Exception as e:
-                logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
+                logger.error(f"Health Check Error: An unexpected error occurred while checking data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
         else:
-            logger.warning("No data channel configured. Skipping data channel health check.")
+            logger.warning("Health Check: No data channel configured. Skipping data channel check.")
 
+        # Check Force Subscribe Channels
         if FORCE_SUB_CHANNELS:
             for channel_info in FORCE_SUB_CHANNELS:
+                channel_id = channel_info['channel_id']
                 try:
-                    force_sub_member = await app.get_chat_member(channel_info['channel_id'], me.id)
-                    logger.info(f"Bot status in force subscribe channel ({channel_info['channel_id']}): {force_sub_member.status}")
+                    member = await app.get_chat_member(channel_id, me.id)
+                    logger.info(f"Health Check: Bot status in force-sub channel ({channel_id}): {member.status}")
                 except (PeerIdInvalid, ValueError):
-                    logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: PeerIdInvalid or ValueError. The bot may have been removed or the ID is incorrect.")
+                    logger.warning(f"Health Check Warning: Force-sub channel ID {channel_id} is invalid or the bot was removed. Please check the configuration.")
                 except Exception as e:
-                    logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: {e}", exc_info=True)
+                    logger.error(f"Health Check Error: An unexpected error occurred while checking force-sub channel {channel_id}: {e}", exc_info=True)
         else:
-            logger.warning("No force subscribe channels configured. Skipping force sub health check.")
+            logger.warning("Health Check: No force-sub channels configured. Skipping force-sub channel check.")
 
     except Exception as e:
-        logger.error(f"Overall health check failed: {e}", exc_info=True)
+        # This catches errors if app.get_me() fails, indicating a major problem with the client connection
+        logger.critical(f"CRITICAL HEALTH CHECK FAILURE: Could not connect to Telegram or get bot info. Error: {e}", exc_info=True)
 
 async def run_pyrogram_client():
     """Starts the Pyrogram client and background tasks."""
@@ -5019,25 +5055,6 @@ async def run_pyrogram_client():
     create_tracked_task(keep_alive())
     logger.info("Background tasks initiated. Bot is now fully operational.")
 
-@fastapi_app.on_event("startup")
-async def startup_event():
-    """
-    This function runs when the FastAPI server starts.
-    It initializes and starts the Pyrogram client in the background.
-    """
-    logger.info("FastAPI server is starting up...")
-    create_tracked_task(run_pyrogram_client())
-
-
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    """
-    This function runs when the FastAPI server is shutting down.
-    It gracefully stops the Pyrogram client.
-    """
-    logger.info("FastAPI server is shutting down...")
-    await app.stop()
-    logger.info("Pyrogram client stopped.")
 
 if __name__ == "__main__":
     # This block allows running the bot directly with `python bot.py`
