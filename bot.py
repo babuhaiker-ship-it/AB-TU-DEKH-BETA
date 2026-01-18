@@ -50,7 +50,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    HOST = "https://ab-tu-dekh-beta-xa7c.onrender.com"  # Replace with your actual host URL
+    HOST = "https://ab-tu-dekh-beta-607h.onrender.com"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
