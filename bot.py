@@ -50,7 +50,7 @@ class BotConfig:
     BOT_USERNAME = '@SpicyNyraa_bot'
     MONGO_URI = 'mongodb+srv://Pyasipriya:00pEcao9sYhNC5VQ@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
     MONGO_DB_NAME = 'spicybot'
-    HOST = "https://ab-tu-dekh-beta-xa7c.onrender.com"  # Replace with your actual host URL
+    HOST = "http://localhost:8000"  # Replace with your actual host URL
     # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
@@ -1741,7 +1741,14 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
 
     # 2. Heal expired file reference before starting the stream
     try:
-        await app.invoke(raw.functions.upload.GetFile(location=FileId.decode(file_id_str).document_location, offset=0, limit=1))
+        decoded_file_id = FileId.decode(file_id_str)
+        location = raw.types.InputDocumentFileLocation(
+            id=decoded_file_id.media_id,
+            access_hash=decoded_file_id.access_hash,
+            file_reference=decoded_file_id.file_reference,
+            thumb_size=""
+        )
+        await app.invoke(raw.functions.upload.GetFile(location=location, offset=0, limit=1))
     except FileReferenceExpired:
         logger.warning(f"Pre-emptive self-healing: File reference expired for {file_id_str}.")
         try:
