@@ -214,22 +214,47 @@ async def load_admins_from_db():
     logger.info(f"Loaded admins from DB. Current admins: {BOT_ADMINS}")
 
 async def load_data_channel_id():
-    """Loads the data channel ID from the database asynchronously."""
+    """
+    Loads the data channel ID from the database asynchronously and pre-resolves it.
+    """
     global DATA_CHANNEL_ID
     data_doc = await async_data_channel_collection.find_one({'_id': 'data_channel'})
     if data_doc:
-        DATA_CHANNEL_ID = data_doc.get('channel_id')
-        logger.info(f"Loaded data channel ID: {DATA_CHANNEL_ID}")
+        channel_id = data_doc.get('channel_id')
+        if channel_id:
+            try:
+                await app.get_chat(channel_id)
+                DATA_CHANNEL_ID = channel_id
+                logger.info(f"Loaded and resolved data channel ID: {DATA_CHANNEL_ID}")
+            except Exception as e:
+                DATA_CHANNEL_ID = None
+                logger.error(f"Failed to resolve data channel ID {channel_id}: {e}. It might be invalid or the bot was removed.")
+        else:
+            DATA_CHANNEL_ID = None
+            logger.warning("Data channel document found but 'channel_id' is missing or null.")
     else:
         DATA_CHANNEL_ID = None
         logger.warning("No data channel ID found in DB.")
 
 async def load_force_sub_channels():
-    """Loads force subscribe channels from the database asynchronously."""
+    """
+    Loads force subscribe channels from the database asynchronously and pre-resolves them.
+    """
     global FORCE_SUB_CHANNELS
     cursor = async_force_sub_channels_collection.find({})
-    FORCE_SUB_CHANNELS = await cursor.to_list(length=None) # Get all documents
-    logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} force subscribe channels.")
+    db_channels = await cursor.to_list(length=None)
+    resolved_channels = []
+    for channel_info in db_channels:
+        channel_id = channel_info.get('channel_id')
+        if channel_id:
+            try:
+                await app.get_chat(channel_id)
+                resolved_channels.append(channel_info)
+                logger.info(f"Loaded and resolved force-sub channel: {channel_info.get('name')} ({channel_id})")
+            except Exception as e:
+                logger.error(f"Failed to resolve force-sub channel ID {channel_id} ({channel_info.get('name')}). It will be skipped. Error: {e}")
+    FORCE_SUB_CHANNELS = resolved_channels
+    logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} valid force subscribe channels.")
 
 def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
@@ -1748,7 +1773,7 @@ async def stream_video(file_unique_id: str, request: Request, name: str, size: i
             file_reference=decoded_file_id.file_reference,
             thumb_size=""
         )
-        await app.invoke(raw.functions.upload.GetFile(location=location, offset=0, limit=1))
+        await app.invoke(raw.functions.upload.GetFile(location=location, offset=0, limit=4096))
     except FileReferenceExpired:
         logger.warning(f"Pre-emptive self-healing: File reference expired for {file_id_str}.")
         try:
