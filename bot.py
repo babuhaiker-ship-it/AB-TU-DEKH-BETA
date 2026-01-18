@@ -100,6 +100,7 @@ video_batches_collection = db['video_batches'] # New collection for batch videos
 # NEW: Collections for dynamic channel IDs
 force_sub_channels_collection = db['force_sub_channels']
 data_channel_collection = db['data_channel']
+shortener_logs_collection = db['shortener_logs'] # New collection for token stats
 
 
 # --- NEW: Async MongoDB Client for FastAPI ---
@@ -389,6 +390,7 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
 
         if shortened_url and (shortened_url.startswith("http://") or shortened_url.startswith("https://")):
             logger.info(f"URL shortened successfully (Shortzy) to: {shortened_url}")
+            shortener_logs_collection.insert_one({'timestamp': datetime.utcnow()})
             return shortened_url
         else:
             logger.warning(f"Shortzy returned an invalid or non-URL string: {shortened_url}. Returning original URL.")
@@ -4172,6 +4174,89 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"Admin {user_id} failed to set batch category: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
+@app.on_message(filters.command("viewtoken") & filters.private & admin_only)
+async def view_token_cmd(client: Client, message: Message):
+    """Admin command to view users with the most tokens."""
+    try:
+        await view_token_page(client, message)
+    except Exception as e:
+        logger.error(f"Error in /viewtoken command: {e}", exc_info=True)
+        await message.reply("An error occurred while fetching token stats.")
+
+async def view_token_page(client: Client, message_or_query, page: int = 0):
+    """Helper function to display a page of the token leaderboard."""
+    now = datetime.utcnow()
+    pipeline = [
+        {"$unwind": "$tokens"},
+        {"$match": {"tokens.expires_at": {"$gt": now}}},
+        {"$group": {"_id": "$user_id", "token_count": {"$sum": 1}}},
+        {"$sort": {"token_count": -1}}
+    ]
+    all_users = list(tokens_collection.aggregate(pipeline))
+
+    total_users = len(all_users)
+    if total_users == 0:
+        text = "No users with active tokens found."
+        if isinstance(message_or_query, Message):
+            await message_or_query.reply(text)
+        else: # CallbackQuery
+            await message_or_query.answer(text, show_alert=True)
+        return
+
+    start_index = page * 10
+    end_index = start_index + 10
+    users_on_page = all_users[start_index:end_index]
+
+    text = "👑 **Top Users by Token Count** 👑\n\n"
+
+    # Fetch user info in a single query
+    user_ids = [user_data['_id'] for user_data in users_on_page]
+    user_info_map = {user['user_id']: user for user in users_collection.find({"user_id": {"$in": user_ids}})}
+
+    for i, user_data in enumerate(users_on_page):
+        user_id = user_data['_id']
+        token_count = user_data['token_count']
+        rank = start_index + i + 1
+
+        user_info = user_info_map.get(user_id)
+        username = f"@{user_info['username']}" if user_info and user_info.get('username') else "N/A"
+
+        text += f"**{rank}.** `{user_id}` ({username}) - **{token_count}** tokens\n"
+
+    total_pages = (total_users + 9) // 10
+    text += f"\nPage {page + 1} of {total_pages}"
+
+    buttons = []
+    row = []
+    if page > 0:
+        row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"viewtoken_{page - 1}"))
+    if end_index < total_users:
+        row.append(InlineKeyboardButton("➡️ Next", callback_data=f"viewtoken_{page + 1}"))
+    if row:
+        buttons.append(row)
+
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if isinstance(message_or_query, Message):
+        await message_or_query.reply(text, reply_markup=reply_markup)
+    else: # CallbackQuery
+        await message_or_query.message.edit_text(text, reply_markup=reply_markup)
+        await message_or_query.answer()
+
+@app.on_callback_query(filters.regex(r"^viewtoken_(\d+)$"))
+async def view_token_callback(client: Client, callback_query: CallbackQuery):
+    """Callback for /viewtoken pagination."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("Not authorized.", show_alert=True)
+        return
+
+    page = int(callback_query.data.split("_")[1])
+    try:
+        await view_token_page(client, callback_query, page)
+    except Exception as e:
+        logger.error(f"Error in viewtoken callback: {e}", exc_info=True)
+        await callback_query.answer("An error occurred.", show_alert=True)
+
 @app.on_message(filters.command("stats") & filters.private & admin_only)
 async def stats_cmd(client: Client, message: Message):
     """Admin command to display bot statistics, including category video counts."""
@@ -4201,6 +4286,18 @@ async def stats_cmd(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Admin {user_id} failed to retrieve stats: {e}", exc_info=True)
         await message.reply("❌ An error occurred while fetching stats. Please try again. 🐛")
+
+@app.on_message(filters.command("token_stats") & filters.private & admin_only)
+async def token_stats_cmd(client: Client, message: Message):
+    """Admin command to show URL shortener usage statistics."""
+    try:
+        one_day_ago = datetime.utcnow() - timedelta(days=1)
+        count = shortener_logs_collection.count_documents({'timestamp': {'$gte': one_day_ago}})
+        await message.reply(f"📊 **Token Generation Stats**\n\n"
+                            f"The URL shortener has been used **{count}** times in the last 24 hours.")
+    except Exception as e:
+        logger.error(f"Error in /token_stats command: {e}", exc_info=True)
+        await message.reply("An error occurred while fetching token generation stats.")
 
 # --- New Admin Commands ---
 
@@ -4953,10 +5050,8 @@ async def keep_alive():
     """Sends a message every 2 minutes to keep the bot alive on Render."""
     while True:
         try:
-            logger.info("Keep-alive: sending status message.")
             sent_message = await app.send_message(config.OWNER_ID, "Bot is running...")
             await sent_message.delete()
-            logger.info("Keep-alive: status message sent and deleted.")
         except Exception as e:
             logger.error(f"Keep-alive task failed: {e}", exc_info=True)
         await asyncio.sleep(120) # Sleep for 2 minutes
