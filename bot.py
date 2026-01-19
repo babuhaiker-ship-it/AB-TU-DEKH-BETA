@@ -316,8 +316,9 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
     text_to_send = custom_text
     if not text_to_send:
         text_to_send = (
-            "<b>⚠️ You must join our channels to use this bot.</b>\n\n"
-            "Please join the channels below and then try again. Once you join, click the '🔄 Try Again' button or send /start again."
+            "<b>Almost there! 🚀</b>\n\n"
+            "To use the bot, please join our partner channels below. It helps us keep the service free!\n\n"
+            "Tap '🔄 Try Again' after you've joined."
         )
 
     await client.send_message(
@@ -494,9 +495,10 @@ async def send_free_limit_reached_message(client: Client, chat_id: int):
     ad_url = await get_shortener_config_and_shorten_url(long_url)
 
     text = (
-        "🛑 **You’ve reached the end of today’s free stream...** 🛑\n\n"
-        "The rest of our private collection is still waiting for you. 🤫\n\n"
-        "Unlock full, uninterrupted access and keep the vibe going. ✨"
+        "<b>Your Daily Free Pass has expired!</b>\n\n"
+        "But the fun doesn't have to stop. Get a new pass to continue watching.\n\n"
+        "✨ <b>Unlock 24-Hour Access:</b> Complete a quick task to get a free token.\n"
+        "💎 <b>Go Premium:</b> Enjoy unlimited, ad-free access."
     )
     reply_markup = generate_token_earning_keyboard(ad_url)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
@@ -916,6 +918,24 @@ def get_next_saved_video_chronological(user_id: int, current_uuid: str, category
 
     return get_video_by_uuid(next_video_uuid)
 
+def get_random_video(category: str, current_uuid: str) -> dict | None:
+    """
+    Retrieves a random video from the specified category, ensuring it's not the same as the current one.
+    """
+    # This pipeline gets one random document from the collection.
+    # It's generally faster than fetching all and using random.choice for large collections.
+    pipeline = [
+        {'$match': {'category': category, 'uuid': {'$ne': current_uuid}}},
+        {'$sample': {'size': 1}}
+    ]
+    random_videos = list(media_collection.aggregate(pipeline))
+    if random_videos:
+        return random_videos[0]
+
+    # Fallback in case the only video is the current one or something goes wrong
+    return media_collection.find_one({'category': category})
+
+
 def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
     """
     Retrieves the previous saved video for a user in a specific category,
@@ -1171,14 +1191,15 @@ async def send_and_replace_message(
                 video_data['uuid'], video_data.get('category'), is_saved_from_markup, chat_id
             )
 
-        custom_caption = video_data.get('custom_caption')
-        category_caption = f"Category: {html.escape(video_data['category'])}" if video_data.get('category') else ""
+        custom_caption = video_data.get('custom_caption', '')
 
         position_caption = ""
         if total_videos > 0 and current_position > 0:
-            position_caption = f"#{current_position} of {total_videos}\n"
+            position_caption = f"Video {current_position} of {total_videos}"
 
-        caption_text = f"{position_caption}{custom_caption or category_caption}".strip()
+        # Combine position and custom caption, handling cases where one might be empty.
+        caption_parts = [part for part in [position_caption, custom_caption] if part]
+        caption_text = " | ".join(caption_parts)
 
     # --- Delete Old Message if Forced ---
     if force_new_message and message_id_to_edit_or_delete:
@@ -1336,12 +1357,12 @@ async def send_and_replace_message(
 
 # --- Keyboards ---
 async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
-    """Main keyboard for the bot."""
+    """Main keyboard for the bot. Emphasizes the Mini App."""
     buttons = [
-        [KeyboardButton("📱 Open App"), KeyboardButton("🎞️ Get Video")],
+        [KeyboardButton("📱 Open App")],
+        [KeyboardButton("🎞️ Get Video"), KeyboardButton("🔖 Saved Videos")],
         [KeyboardButton("👤 Profile"), KeyboardButton("🔗 Refer & Earn")],
-        [KeyboardButton("💰 Buy Token"), KeyboardButton("🔄 Refresh Token")],
-        [KeyboardButton("🔖 Saved Videos")]
+        [KeyboardButton("💰 Buy Premium"), KeyboardButton("🔄 Get Free Token")]
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -1404,10 +1425,13 @@ def video_nav_keyboard(
             InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
         ])
     else:
-        buttons.append([
+        nav_row = [
             InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
-        ])
+        ]
+        if not is_saved: # Add random button only for regular navigation
+             nav_row.append(InlineKeyboardButton("🔀 Random", callback_data=f"random|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"))
+        nav_row.append(InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"))
+        buttons.append(nav_row)
 
     # --- Action Row (Bookmark/Share/Download) ---
     row_2_buttons = []
@@ -1428,7 +1452,7 @@ def video_nav_keyboard(
     elif is_saved:
         row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
     else: # Regular navigation
-        row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
+        row_3_buttons.append(InlineKeyboardButton("⬅️ Back to Categories", callback_data="change_cat"))
 
     if row_3_buttons:
         buttons.append(row_3_buttons)
@@ -1907,8 +1931,8 @@ async def start_cmd(client: Client, message: Message):
             # Prepare custom force-sub message based on user state
             custom_text = None
             if is_new_user:
-                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received free scrolls 🎁 to start your journey!\n\n"
-                part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
+                part1 = f"<b>Welcome, {first_name_safe}! Just one more step.</b>\n\n"
+                part2 = "To unlock your content, please join our channels below. This helps us keep the bot running!\n\nOnce you've joined, tap '🔄 Try Again' to start watching. ✨"
                 custom_text = part1 + part2
 
             await send_force_subscribe_message(client, user_id, custom_text=custom_text)
@@ -1999,14 +2023,21 @@ async def start_cmd(client: Client, message: Message):
             finally:
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
+            welcome_text = (
+                f"Hey {first_name_safe}, welcome! 🎉\n\n"
+                "I've given you some free credits to get started.\n\n"
+                "Tap <b>📱 Open App</b> below for the best experience! It's faster and easier to browse everything. 😉"
+            )
             await message.reply(
-                f"🎉 Congratulations {first_name_safe}!\n"
-                f"You got free scrolls 🎁 to start your journey!\n\n"
-                f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
+                welcome_text,
                 reply_markup=await get_main_keyboard(user_id)
             )
         else: # Existing user, no deep link
-            await message.reply(f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in.", reply_markup=await get_main_keyboard(user_id))
+            welcome_back_text = (
+                f"👋 Welcome back, {first_name_safe}!\n\n"
+                "Tap <b>📱 Open App</b> for the best experience or <b>🎞️ Get Video</b> to browse in the bot."
+            )
+            await message.reply(welcome_back_text, reply_markup=await get_main_keyboard(user_id))
 
     except FloodWait as e:
         await handle_error(client, message, e)
@@ -2503,9 +2534,9 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         clear_active_video_message(user_id)
 
 
-@app.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|(.+)\|(\d+)$")) # Updated regex to capture is_saved flag
+@app.on_callback_query(filters.regex(r"^(next|prev|random)\|(.+)\|(.+)\|(\d+)$")) # Updated regex to capture is_saved flag
 async def navigate_video(client: Client, callback_query: CallbackQuery):
-    """Handles 'Next' and 'Previous' video navigation."""
+    """Handles 'Next', 'Previous', and 'Random' video navigation."""
     user_id = callback_query.from_user.id
 
     # --- Processing Lock to prevent race conditions ---
@@ -2609,6 +2640,8 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                     video = get_next_video_chronological(current_uuid, category)
                 elif action == "prev":
                     video = get_previous_video_chronological(current_uuid, category)
+                elif action == "random":
+                    video = get_random_video(category, current_uuid)
 
                 if not video: # This case should ideally not be hit with looping logic, but as a fallback.
                     await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
@@ -2864,11 +2897,11 @@ async def refer_and_earn_inline_callback(client: Client, callback_query: Callbac
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
 
-@app.on_message(filters.regex("^💰 Buy Token$") & filters.private)
+@app.on_message(filters.regex("^💰 Buy Premium$") & filters.private)
 async def buy_token_btn(client: Client, message: Message):
-    """Handles 'Buy Token' button click."""
+    """Handles 'Buy Premium' button click."""
     user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked Buy Token button.")
+    logger.info(f"User {user_id} clicked Buy Premium button.")
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -2883,9 +2916,9 @@ async def buy_token_btn(client: Client, message: Message):
         logger.error(f"User {user_id} failed to send buy token message: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex("^🔄 Refresh Token$") & filters.private)
+@app.on_message(filters.regex("^🔄 Get Free Token$") & filters.private)
 async def refresh_token_btn(client: Client, message: Message):
-    """Handles 'Refresh Token' button click."""
+    """Handles 'Get Free Token' button click."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested token refresh. Handler entered.")
 
@@ -2928,9 +2961,13 @@ async def refresh_token_btn(client: Client, message: Message):
             disable_preview = True
 
         user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
+        refresh_text = (
+            f"<b>Hi {user_mention_safe}, let's get you a new Free Pass!</b>\n\n"
+            "Complete a quick task to unlock <b>24 hours</b> of access.\n\n"
+            "<tg-spoiler>‼️ For iPhone users, it's best to copy the link and open it in your browser (like Chrome or Safari).</tg-spoiler>"
+        )
         await message.reply_text(
-            f"💡 <b>Information</b>\nHere's how to get your token! 🚀\n\n"
-            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> {config.TOKEN_ACCESS_HOURS} hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for {config.TOKEN_ACCESS_HOURS} hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
+            refresh_text,
             disable_web_page_preview = disable_preview,
             reply_markup=generate_token_earning_keyboard(ad_url)
         )
@@ -2958,8 +2995,11 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             logger.warning(f"Could not get user's first name for special token offer: {e}")
             first_name_safe = "there"
 
-        text = f"Dear {first_name_safe}, you have used all of your free scrolls, but we decided to grant 24 hours of unlimited access. Click the button below to claim it."
-        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Claim", callback_data="claim_special_token")]])
+        text = (
+            f"Hey {first_name_safe}, you're out of free previews!\n\n"
+            "As a special thank you, here's a <b>free 24-hour pass</b> on us. Claim it below to keep watching!"
+        )
+        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Claim Free Pass", callback_data="claim_special_token")]])
         await client.send_message(message.chat.id, text, reply_markup=reply_markup)
         return
 
@@ -2984,11 +3024,11 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url)
 
-        text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
+        text = "<b>Get Access to Continue!</b>\n\nTo watch this content, you can either get a free token or upgrade to Premium for the best experience."
         if is_pending_content:
             text = (
-                "❌ <b>Token Required To View Content!</b>\n\n"
-                "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
+                "<b>Just one more step to watch your video!</b>\n\n"
+                "Get a free token below, then tap '🔄 Refresh' to instantly access your content."
             )
 
         reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content)
