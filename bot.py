@@ -390,7 +390,6 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
 
         if shortened_url and (shortened_url.startswith("http://") or shortened_url.startswith("https://")):
             logger.info(f"URL shortened successfully (Shortzy) to: {shortened_url}")
-            shortener_logs_collection.insert_one({'timestamp': datetime.utcnow()})
             return shortened_url
         else:
             logger.warning(f"Shortzy returned an invalid or non-URL string: {shortened_url}. Returning original URL.")
@@ -490,6 +489,7 @@ async def send_free_limit_reached_message(client: Client, chat_id: int):
     """Sends a message informing the user their free limit is reached."""
     user_id = chat_id  # Assuming private chat
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await get_shortener_config_and_shorten_url(long_url)
 
@@ -1519,6 +1519,35 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         if is_premium_user(user_id):
             logger.info(f"User {user_id} attempted token refresh but already has valid premium access.")
             return False, "💡 You already have active premium access. No need to refresh yet! Enjoy the videos! 🥳"
+
+        # Bypass detection logic
+        settings = settings_collection.find_one({'_id': 'bot_settings'})
+        bypass_limit_seconds = settings.get('bypass_limit_seconds', 0) if settings else 0
+
+        if bypass_limit_seconds > 0:
+            log_entry = shortener_logs_collection.find_one({'ad_code': ad_code, 'user_id': user_id})
+            if log_entry:
+                time_elapsed = (datetime.utcnow() - log_entry['created_at']).total_seconds()
+                if time_elapsed < bypass_limit_seconds:
+                    logger.warning(f"Bypass detected for user {user_id}. Time elapsed: {time_elapsed}s, Limit: {bypass_limit_seconds}s")
+
+                    # Invalidate the current token log
+                    shortener_logs_collection.delete_one({'ad_code': ad_code})
+
+                    # Generate a new token and link
+                    new_ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+                    shortener_logs_collection.insert_one({'ad_code': new_ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
+                    long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{new_ad_code}"
+                    new_ad_url = await get_shortener_config_and_shorten_url(long_url)
+
+                    # Send the bypass message and the new link
+                    await app.send_message(user_id, "Bypass detected! Your access link has been blocked.")
+                    await app.send_message(
+                        user_id,
+                        "Please try again with this new link:",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Try New Link", url=new_ad_url)]])
+                    )
+                    return False, "" # Return False and an empty message as the messages have been sent
 
         decoded = b64_to_str(ad_code)
         if not decoded:
@@ -2914,6 +2943,7 @@ async def refresh_token_btn(client: Client, message: Message):
 
         logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
 
         ad_url = await get_shortener_config_and_shorten_url(long_url)
@@ -2981,6 +3011,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url)
 
@@ -4298,6 +4329,45 @@ async def token_stats_cmd(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Error in /token_stats command: {e}", exc_info=True)
         await message.reply("An error occurred while fetching token generation stats.")
+
+
+@app.on_message(filters.command("bypass_limit") & filters.private & admin_only)
+async def bypass_limit_cmd(client: Client, message: Message):
+    """Admin command to set the minimum time for URL shortener completion."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /bypass_limit command.")
+    try:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.reply("Usage: `/bypass_limit <seconds>`\n\nSet the minimum time in seconds a user should take to complete the shortener. Use 0 to disable.")
+            return
+
+        seconds_str = args[1]
+        if not seconds_str.isdigit():
+            await message.reply("Invalid input. Please provide a non-negative integer for seconds.")
+            return
+
+        seconds = int(seconds_str)
+        if seconds < 0:
+            await message.reply("Invalid input. Please provide a non-negative integer for seconds.")
+            return
+
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'bypass_limit_seconds': seconds}},
+            upsert=True
+        )
+
+        if seconds == 0:
+            await message.reply(f"✅ Bypass detection has been disabled.")
+            logger.info(f"Admin {user_id} disabled bypass detection.")
+        else:
+            await message.reply(f"✅ Bypass limit has been updated to {seconds} seconds.")
+            logger.info(f"Admin {user_id} updated bypass limit to {seconds} seconds.")
+
+    except Exception as e:
+        logger.error(f"Error in /bypass_limit command: {e}", exc_info=True)
+        await message.reply("An error occurred while setting the bypass limit.")
 
 # --- New Admin Commands ---
 
