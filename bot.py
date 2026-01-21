@@ -1394,8 +1394,8 @@ def video_nav_keyboard(
 
     # --- Like/Dislike Row ---
     buttons.append([
-        InlineKeyboardButton("Like 👍", callback_data="like_dislike"),
-        InlineKeyboardButton("Dislike 👎", callback_data="like_dislike")
+        InlineKeyboardButton("Dislike 👎", callback_data="dislike_feedback"),
+        InlineKeyboardButton("Like 👍", callback_data="like_feedback")
     ])
 
     # --- Navigation Row (Previous/Next) ---
@@ -2122,7 +2122,7 @@ async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
         show_alert=True
     )
 
-@app.on_callback_query(filters.regex(r"^like_dislike$"))
+@app.on_callback_query(filters.regex(r"^(like|dislike)_feedback$"))
 async def like_dislike_feedback_callback(client: Client, callback_query: CallbackQuery):
     """Handles the like/dislike button feedback."""
     await callback_query.answer("Thanks for your feedback ✅", show_alert=False)
