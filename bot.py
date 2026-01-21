@@ -194,6 +194,8 @@ batch_add_state = {} # State for /batchadd
 admin_fsub_state = defaultdict(dict)
 admin_data_channel_state = defaultdict(dict)
 
+# --- Maintenance Mode ---
+MAINTENANCE_MODE = False
 
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
@@ -1985,6 +1987,9 @@ async def start_cmd(client: Client, message: Message):
                         create_tracked_task(start_cmd(client, mock_message))
 
                 elif deep_link_type == 'video_share':
+                    if MAINTENANCE_MODE and not is_admin(user_id):
+                        await message.reply("The bot is currently undergoing scheduled maintenance. Please try again later.")
+                        return
                     if not user_can_access_video(user_id):
                         users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
                         await send_token_earning_options(client, message, is_pending_content=True)
@@ -2272,6 +2277,10 @@ async def get_video(client: Client, message: Message):
     chat_id = message.chat.id
     logger.info(f"User {user_id} requested Get Video.")
 
+    if MAINTENANCE_MODE and not is_admin(user_id):
+        await message.reply("The bot is currently undergoing scheduled maintenance. Please try again later.")
+        return
+
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
         return
@@ -2331,6 +2340,10 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     # Changed: Decode category name from callback data
     category_name = b64_to_str(callback_query.data[4:])
     logger.info(f"User {user_id} selected category: {category_name}.")
+
+    if MAINTENANCE_MODE and not is_admin(user_id):
+        await callback_query.answer("The bot is currently undergoing scheduled maintenance. Please try again later.", show_alert=True)
+        return
 
     if not await check_membership(client, user_id):
         await callback_query.answer("You must join our channel first!", show_alert=True)
@@ -2452,6 +2465,10 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
     # Changed: Decode category name from callback data
     selected_category = b64_to_str(callback_query.data[15:])
     logger.info(f"User {user_id} selected saved category: {selected_category}.")
+
+    if MAINTENANCE_MODE and not is_admin(user_id):
+        await callback_query.answer("The bot is currently undergoing scheduled maintenance. Please try again later.", show_alert=True)
+        return
 
     if not await check_membership(client, user_id):
         await callback_query.answer("You must join our channel first!", show_alert=True)
@@ -2575,6 +2592,10 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         is_saved = bool(int(is_saved_flag_str)) # Convert '0' or '1' to boolean
 
         logger.info(f"User {user_id} requested {action} video in category '{category}', is_saved: {is_saved}.")
+
+        if MAINTENANCE_MODE and not is_admin(user_id):
+            await callback_query.answer("The bot is currently undergoing scheduled maintenance. Please try again later.", show_alert=True)
+            return
 
         if not await check_membership(client, user_id):
             await send_force_subscribe_message(client, user_id)
@@ -3226,6 +3247,10 @@ async def saved_videos_btn(client: Client, message: Message):
     user_id = message.from_user.id
     chat_id = message.chat.id
     logger.info(f"User {user_id} clicked Saved Videos button.")
+
+    if MAINTENANCE_MODE and not is_admin(user_id):
+        await message.reply("The bot is currently undergoing scheduled maintenance. Please try again later.")
+        return
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -5091,7 +5116,11 @@ async def cleanup_expired_menus():
             logger.error(f"Error during sleep in cleanup_expired_menus: {e}", exc_info=True)
 
 async def verify_and_cleanup_media():
-    """Periodically verifies if media files still exist in the channel and logs missing/inaccessible entries, but does NOT delete anything."""
+    """
+    Periodically verifies if media files still exist in the channel.
+    If the bot can't access the channel, it will enter maintenance mode and prevent data deletion.
+    """
+    global MAINTENANCE_MODE
     while True:
         logger.info("Starting media verification and cleanup task.")
         if not DATA_CHANNEL_ID:
@@ -5100,13 +5129,16 @@ async def verify_and_cleanup_media():
             continue
 
         try:
+            # Check for channel access first
+            await app.get_chat(DATA_CHANNEL_ID)
+
             all_media = list(media_collection.find({}))
             for media_item in all_media:
                 video_uuid = media_item.get('uuid')
                 message_id_in_channel = media_item.get('message_id')
 
                 if not message_id_in_channel:
-                    logger.warning(f"Media item {video_uuid} has no message_id in channel. (Would delete, but deletion is disabled)")
+                    logger.warning(f"Media item {video_uuid} has no message_id_in_channel. (Would delete, but deletion is disabled)")
                     continue
 
                 try:
@@ -5122,12 +5154,19 @@ async def verify_and_cleanup_media():
                         continue
                     continue
 
-            logger.info("Media verification and cleanup task completed.")
+            MAINTENANCE_MODE = False # If everything passes, ensure maintenance mode is off
+            logger.info("Media verification and cleanup task completed successfully.")
+
+        except (ChatInvalid, ChannelInvalid, PeerIdInvalid, ChatAdminRequired) as e:
+            MAINTENANCE_MODE = True
+            logger.critical(f"Unable to access video channel (ID: {DATA_CHANNEL_ID}): {e}. Entering MAINTENANCE MODE. Video deletion is paused.")
+
         except asyncio.CancelledError:
             logger.info("verify_and_cleanup_media task cancelled gracefully.")
             break
         except Exception as e:
-            logger.error(f"Error in media verification cleanup task: {e}", exc_info=True)
+            MAINTENANCE_MODE = True
+            logger.error(f"An unexpected error occurred in media verification cleanup task: {e}. Entering MAINTENANCE MODE.", exc_info=True)
 
         await asyncio.sleep(6 * 3600)
 
