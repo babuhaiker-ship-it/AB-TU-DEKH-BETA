@@ -200,6 +200,7 @@ active_video_message = {}
 
 # --- Navigation Spam Control ---
 processing_navigation_lock = set()
+default_category_history = {}
 
 # --- Dynamic Admin Management ---
 BOT_ADMINS = set()
@@ -687,10 +688,16 @@ def validate_category_name(name: str) -> tuple[bool, str]:
         return False, "Category name cannot be longer than 64 characters."
     return True, ""
 
-def get_categories() -> list[str]:
-    """Gets all category names."""
+def get_categories(for_admin_use: bool = False) -> list[str]:
+    """
+    Gets all category names.
+    Prepends 'default (all)' for user-facing lists.
+    """
     categories = [c['name'] for c in categories_collection.find({})]
-    return sorted(list(set(categories)))
+    sorted_categories = sorted(list(set(categories)))
+    if not for_admin_use:
+        return ["default (all)"] + sorted_categories
+    return sorted_categories
 
 def add_category(name: str) -> tuple[bool, str]:
     """Adds a new category. Returns (success, message)"""
@@ -714,6 +721,8 @@ def add_category(name: str) -> tuple[bool, str]:
 
 def delete_category(name: str) -> tuple[bool, str, int]:
     """Deletes a category and its associated videos. Returns (success, message, deleted_count)"""
+    if name == "default (all)":
+        return False, "The 'default (all)' category cannot be deleted.", 0
     try:
         if not categories_collection.find_one({'name': name}):
             return False, f"Category '{html.escape(name)}' does not exist."
@@ -955,6 +964,27 @@ def get_previous_saved_video_chronological(user_id: int, current_uuid: str, cate
     return get_video_by_uuid(prev_video_uuid)
 
 
+def get_random_video() -> dict | None:
+    """Retrieves one random video from the entire collection."""
+    pipeline = [{'$sample': {'size': 1}}]
+    random_videos = list(media_collection.aggregate(pipeline))
+    if random_videos:
+        return random_videos[0]
+    return None
+
+def get_random_video_from_different_category(exclude_category: str) -> dict | None:
+    """Retrieves one random video from any category except the excluded one."""
+    pipeline = [
+        {'$match': {'category': {'$ne': exclude_category}}},
+        {'$sample': {'size': 1}}
+    ]
+    random_videos = list(media_collection.aggregate(pipeline))
+    if random_videos:
+        return random_videos[0]
+    # Fallback in case the only videos available are from the excluded category
+    return get_random_video()
+
+
 def save_history(user_id: int, video_uuid: str, category: str):
     """
     Saves a video viewing entry to a user's general history (limited to 100 entries)
@@ -970,12 +1000,13 @@ def save_history(user_id: int, video_uuid: str, category: str):
         )
         logger.info(f"General history saved for user {user_id}, video {video_uuid}. History size limited to 100.")
 
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {f'last_viewed_per_category.{category}': video_uuid}},
-            upsert=True
-        )
-        logger.info(f"Last viewed video for category '{category}' updated to '{video_uuid}' for user {user_id}.")
+        if category != "default (all)":
+            users_collection.update_one(
+                {'user_id': user_id},
+                {'$set': {f'last_viewed_per_category.{category}': video_uuid}},
+                upsert=True
+            )
+            logger.info(f"Last viewed video for category '{category}' updated to '{video_uuid}' for user {user_id}.")
 
     except Exception as e:
         logger.error(f"Error saving history/last viewed for user {user_id}, video {video_uuid}: {e}", exc_info=True)
@@ -1393,7 +1424,13 @@ def video_nav_keyboard(
     buttons = []
 
     # --- Navigation Row (Previous/Next) ---
-    if is_shared_link:
+    if category == "default (all)":
+        nav_buttons = [InlineKeyboardButton("➡️ Next", callback_data=f"next_default|{video_uuid}")]
+        # Disable previous button if there is no history
+        if user_id in default_category_history and default_category_history[user_id]['position'] > 0:
+            nav_buttons.insert(0, InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_default|{video_uuid}"))
+        buttons.append(nav_buttons)
+    elif is_shared_link:
         buttons.append([
             InlineKeyboardButton("⬅️ Previous", callback_data="shared_nav"),
             InlineKeyboardButton("➡️ Next", callback_data="shared_nav")
@@ -2388,8 +2425,20 @@ async def select_category(client: Client, callback_query: CallbackQuery):
                 {'$unset': {f'last_viewed_per_category.{category_name}': ""}}
             )
 
-    if not video:
-        video = get_first_video_by_sequence_number(category_name) # Use sequence number for first video
+    if category_name == "default (all)":
+        video = get_random_video()
+    else:
+        if last_viewed_uuid:
+            video = get_video_by_uuid(last_viewed_uuid)
+            if not video:
+                logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category_name} not found. Falling back to first video.")
+                users_collection.update_one(
+                    {'user_id': user_id},
+                    {'$unset': {f'last_viewed_per_category.{category_name}': ""}}
+                )
+
+        if not video:
+            video = get_first_video_by_sequence_number(category_name)
 
     if not video:
         logger.warning(f"No videos found in category '{category_name}' for user {user_id}.")
@@ -2412,6 +2461,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     )
 
     if sent_success:
+        if category_name == "default (all)":
+            default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
         save_history(user_id, video['uuid'], category_name)
         await callback_query.answer()
         # If the original message was the category selection, delete it
@@ -2672,6 +2723,83 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         # Ensure the lock is always released
         if user_id in processing_navigation_lock:
             processing_navigation_lock.remove(user_id)
+
+
+@app.on_callback_query(filters.regex(r"^(next_default|prev_default)\|(.+)$"))
+async def navigate_default_category(client: Client, callback_query: CallbackQuery):
+    """Handles 'Next' and 'Previous' for the 'default (all)' category."""
+    user_id = callback_query.from_user.id
+    action, current_uuid = callback_query.data.split('|', 1)
+
+    if user_id in processing_navigation_lock:
+        await callback_query.answer("don't spam again", show_alert=True)
+        return
+    processing_navigation_lock.add(user_id)
+
+    try:
+        chat_id = callback_query.message.chat.id
+        logger.info(f"User {user_id} requested {action} in 'default (all)' category.")
+
+        if not await check_membership(client, user_id):
+            await send_force_subscribe_message(client, user_id)
+            return
+
+        if not user_can_access_video(user_id):
+            await callback_query.answer("You need a token to continue browsing.", show_alert=True)
+            await send_token_earning_options(client, callback_query.message)
+            return
+
+        session = default_category_history.get(user_id)
+        if not session:
+            await callback_query.answer("Your session has expired. Please select the category again.", show_alert=True)
+            return
+
+        video = None
+        if action == "next_default":
+            session['position'] += 1
+            if session['position'] >= len(session['videos']):
+                # Fetch a new video from a different category
+                current_video_doc = get_video_by_uuid(current_uuid)
+                current_category = current_video_doc.get('category') if current_video_doc else None
+                new_video = get_random_video_from_different_category(current_category)
+                if new_video:
+                    session['videos'].append(new_video['uuid'])
+                    video = new_video
+                else: # No other videos found, end of the line
+                    await callback_query.answer("No more videos available.", show_alert=True)
+                    session['position'] -= 1 # Revert position
+                    return
+            else:
+                # Get the next video from history
+                video = get_video_by_uuid(session['videos'][session['position']])
+
+        elif action == "prev_default":
+            if session['position'] > 0:
+                session['position'] -= 1
+                video = get_video_by_uuid(session['videos'][session['position']])
+            else:
+                await callback_query.answer("You are at the beginning of your history.", show_alert=True)
+                return
+
+        if not video:
+            await callback_query.answer("The next video is unavailable.", show_alert=True)
+            return
+
+        await send_and_replace_message(
+            client, chat_id, callback_query.message.id, "video", video_data=video,
+            reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+            force_new_message=False
+        )
+        save_history(user_id, video['uuid'], "default (all)")
+        await callback_query.answer()
+
+    except Exception as e:
+        logger.error(f"Error in navigate_default_category for user {user_id}: {e}", exc_info=True)
+        await callback_query.answer("An error occurred.", show_alert=True)
+    finally:
+        if user_id in processing_navigation_lock:
+            processing_navigation_lock.remove(user_id)
+
 
 @app.on_callback_query(filters.regex(r"^(next_batch|prev_batch)\|(.+)\|(\d+)$"))
 async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
@@ -3702,7 +3830,7 @@ async def deletecategory_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested to delete category.")
     try:
-        categories = get_categories()
+        categories = get_categories(for_admin_use=True)
         if not categories:
             logger.warning(f"Admin {user_id} tried to delete category but no categories exist.")
             await message.reply_text("😔 No categories to delete. Add some first! ➕")
@@ -4771,6 +4899,12 @@ async def handle_text_input(client: Client, message: Message):
 
             if current_step == 'await_old_name':
                 old_name = text_input
+
+                if old_name == "default (all)":
+                    await message.reply("❌ The 'default (all)' category cannot be renamed.")
+                    del admin_rename_category_state[user_id]
+                    return
+
                 valid, error = validate_category_name(old_name)
                 if not valid:
                     await message.reply(f"❌ Invalid old category name: {error}. Please try again. 📝")
