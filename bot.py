@@ -2122,9 +2122,14 @@ async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
         show_alert=True
     )
 
-@app.on_callback_query(filters.regex(r"^(like|dislike)_feedback$"))
-async def like_dislike_feedback_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the like/dislike button feedback."""
+@app.on_callback_query(filters.regex(r"^like_feedback$"))
+async def like_feedback_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the like button feedback."""
+    await callback_query.answer("Thanks for your feedback ✅", show_alert=False)
+
+@app.on_callback_query(filters.regex(r"^dislike_feedback$"))
+async def dislike_feedback_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the dislike button feedback."""
     await callback_query.answer("Thanks for your feedback ✅", show_alert=False)
 
 @app.on_callback_query(filters.regex(r"^watch_more$"))
