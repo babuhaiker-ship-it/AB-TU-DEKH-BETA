@@ -1392,6 +1392,12 @@ def video_nav_keyboard(
     """
     buttons = []
 
+    # --- Like/Dislike Row ---
+    buttons.append([
+        InlineKeyboardButton("Like 👍", callback_data="like_dislike"),
+        InlineKeyboardButton("Dislike 👎", callback_data="like_dislike")
+    ])
+
     # --- Navigation Row (Previous/Next) ---
     if is_shared_link:
         buttons.append([
@@ -2115,6 +2121,11 @@ async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
         "To watch more videos like this, click 'Watch More'.",
         show_alert=True
     )
+
+@app.on_callback_query(filters.regex(r"^like_dislike$"))
+async def like_dislike_feedback_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the like/dislike button feedback."""
+    await callback_query.answer("Thanks for your feedback ✅", show_alert=False)
 
 @app.on_callback_query(filters.regex(r"^watch_more$"))
 async def watch_more_callback(client: Client, callback_query: CallbackQuery):
