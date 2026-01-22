@@ -4,7 +4,7 @@ import uuid
 import base64
 import logging
 from datetime import datetime, timedelta
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
@@ -4902,10 +4902,16 @@ async def run_web_server():
     logger.info("Web server started.")
 
 
-async def start_bot():
+async def initial_health_check():
+    """Waits for a few seconds before running the initial health check."""
+    await asyncio.sleep(5) # Wait 5 seconds for the client to be fully ready
+    await health_check()
+
+async def main():
     """
-    Initializes bot state and background tasks after client startup.
+    Initializes and runs the bot, its background tasks, and the web server.
     """
+    await app.start()
     logger.info("Pyrogram client started, running startup tasks...")
 
     # If this is the first run, save the session string
@@ -4915,19 +4921,24 @@ async def start_bot():
         new_session_string = await app.export_session_string()
         set_session_string(new_session_string)
 
-    # Load admins and run background tasks
+    # Load admins and channel info
     await load_admins_from_db()
     await load_data_channel_id()
     await load_force_sub_channels()
-    await health_check()
+
+    # Start background tasks
+    create_tracked_task(initial_health_check())
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
     create_tracked_task(keep_alive())
     create_tracked_task(run_web_server())
+
     logger.info("Background tasks initiated. Bot is now fully operational.")
+    await idle()
+    await app.stop()
 
 
 if __name__ == "__main__":
     logger.info("Starting bot...")
-    app.run(start_bot)
+    asyncio.run(main())
