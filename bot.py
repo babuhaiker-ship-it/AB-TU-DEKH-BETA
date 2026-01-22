@@ -12,6 +12,7 @@ from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodW
 from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
+from aiohttp import web
 from aiohttp import ClientTimeout
 from collections import defaultdict, deque
 import re
@@ -4880,6 +4881,27 @@ async def health_check():
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
 
+# --- NEW: Lightweight Web Server for Deployment ---
+async def handle_health_check(request):
+    """Responds with a 200 OK for health checks."""
+    return web.Response(text="OK", status=200)
+
+async def run_web_server():
+    """Starts a simple aiohttp web server for health checks."""
+    app = web.Application()
+    app.router.add_get("/", handle_health_check)
+
+    port = int(os.environ.get("PORT", 8080))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+
+    logger.info(f"Starting lightweight web server on port {port}...")
+    await site.start()
+    logger.info("Web server started.")
+
+
 async def start_bot():
     """
     Initializes bot state and background tasks after client startup.
@@ -4902,6 +4924,7 @@ async def start_bot():
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
     create_tracked_task(keep_alive())
+    create_tracked_task(run_web_server())
     logger.info("Background tasks initiated. Bot is now fully operational.")
 
 
