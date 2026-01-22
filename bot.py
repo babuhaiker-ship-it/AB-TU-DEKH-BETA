@@ -4930,4 +4930,4 @@ async def start_bot():
 
 if __name__ == "__main__":
     logger.info("Starting bot...")
-    app.run(start_bot())
+    app.run(start_bot)
