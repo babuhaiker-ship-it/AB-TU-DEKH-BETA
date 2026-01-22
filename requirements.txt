@@ -4,4 +4,3 @@ TgCrypto
 pymongo
 aiohttp
 shortzy
-pydantic

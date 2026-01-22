@@ -19,6 +19,35 @@ import re
 import html
 import urllib.parse
 from shortzy import Shortzy
+import signal
+
+
+# --- Graceful Shutdown ---
+shutdown_event = asyncio.Event()
+
+async def shutdown(loop):
+    """Gracefully stop all tasks and services."""
+    logger.info("Initiating graceful shutdown...")
+    shutdown_event.set() # Signal all long-running tasks to stop
+
+    # Stop Pyrogram client
+    if app.is_initialized:
+        await app.stop()
+        logger.info("Pyrogram client stopped.")
+
+    # Stop aiohttp web server
+    if 'web_runner' in globals():
+        await web_runner.cleanup()
+        logger.info("Web server stopped.")
+
+    # Cancel all remaining asyncio tasks
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    for task in tasks:
+        task.cancel()
+
+    await asyncio.gather(*tasks, return_exceptions=True)
+    loop.stop()
+    logger.info("Shutdown complete.")
 
 
 # --- Logging Setup ---
@@ -4844,42 +4873,27 @@ async def verify_and_cleanup_media():
 
 async def keep_alive():
     """Sends a message every 2 minutes to keep the bot alive on Render."""
-    while True:
+    while not shutdown_event.is_set():
         try:
-            sent_message = await app.send_message(config.OWNER_ID, "Bot is running...")
-            await sent_message.delete()
+            logger.info("Keep-alive task running...")
+            # Check if app is connected before sending message
+            if app.is_connected:
+                sent_message = await app.send_message(config.OWNER_ID, "Bot is running...")
+                await sent_message.delete()
+                logger.info("Keep-alive message sent and deleted successfully.")
+            else:
+                logger.warning("Keep-alive: Pyrogram client not connected, skipping message send.")
+        except PeerIdInvalid:
+            logger.error("Keep-alive failed: OWNER_ID is invalid or not resolved yet. Retrying in 2 mins.")
         except Exception as e:
-            logger.error(f"Keep-alive task failed: {e}", exc_info=True)
-        await asyncio.sleep(120) # Sleep for 2 minutes
+            logger.error(f"Keep-alive task failed with an unexpected error: {e}", exc_info=True)
 
-
-async def health_check():
-    try:
-        me = await app.get_me()
-        logger.info(f"Bot username: {me.username}")
-
-        if DATA_CHANNEL_ID:
-            try:
-                member = await app.get_chat_member(DATA_CHANNEL_ID, me.id)
-                logger.info(f"Bot status in data channel ({DATA_CHANNEL_ID}): {member.status}")
-            except Exception as e:
-                logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
-        else:
-            logger.warning("No data channel configured. Skipping data channel health check.")
-
-        if FORCE_SUB_CHANNELS:
-            for channel_info in FORCE_SUB_CHANNELS:
-                try:
-                    force_sub_member = await app.get_chat_member(channel_info['channel_id'], me.id)
-                    logger.info(f"Bot status in force subscribe channel ({channel_info['channel_id']}): {force_sub_member.status}")
-                except Exception as e:
-                    logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: {e}", exc_info=True)
-        else:
-            logger.warning("No force subscribe channels configured. Skipping force sub health check.")
-
-    except Exception as e:
-        logger.error(f"Overall health check failed: {e}", exc_info=True)
-
+        try:
+            # Wait for 2 minutes or until shutdown is triggered
+            await asyncio.wait_for(shutdown_event.wait(), timeout=120)
+            break # Shutdown triggered
+        except asyncio.TimeoutError:
+            continue # Loop continues
 
 # --- NEW: Lightweight Web Server for Deployment ---
 async def handle_health_check(request):
@@ -4888,46 +4902,59 @@ async def handle_health_check(request):
 
 async def run_web_server():
     """Starts a simple aiohttp web server for health checks."""
+    global web_runner
     app = web.Application()
     app.router.add_get("/", handle_health_check)
 
     port = int(os.environ.get("PORT", 8080))
 
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    web_runner = web.AppRunner(app)
+    await web_runner.setup()
+    site = web.TCPSite(web_runner, '0.0.0.0', port)
 
     logger.info(f"Starting lightweight web server on port {port}...")
     await site.start()
     logger.info("Web server started.")
 
 
-async def initial_health_check():
-    """Waits for a few seconds before running the initial health check."""
-    await asyncio.sleep(5) # Wait 5 seconds for the client to be fully ready
-    await health_check()
-
 async def main():
     """
     Initializes and runs the bot, its background tasks, and the web server.
     """
+    # Initialize Pyrogram client
     await app.start()
     logger.info("Pyrogram client started, running startup tasks...")
 
-    # If this is the first run, save the session string
-    SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
+    # Session string management
+    if not get_session_string():
         logger.info("Saving session string to DB for future runs...")
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
+        set_session_string(await app.export_session_string())
 
-    # Load admins and channel info
+    # Load initial data
     await load_admins_from_db()
     await load_data_channel_id()
     await load_force_sub_channels()
 
+    # Proactively resolve channel peers, including OWNER_ID for keep_alive
+    try:
+        all_peers_to_resolve = {config.OWNER_ID}
+        if DATA_CHANNEL_ID:
+            all_peers_to_resolve.add(DATA_CHANNEL_ID)
+        for channel in FORCE_SUB_CHANNELS:
+            all_peers_to_resolve.add(channel['channel_id'])
+
+        for peer_id in all_peers_to_resolve:
+            try:
+                await app.get_chat(peer_id)
+                logger.info(f"Successfully resolved peer ID: {peer_id}")
+            except Exception as e:
+                 logger.error(f"Failed to resolve peer ID {peer_id} on startup: {e}", exc_info=True)
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during peer resolution: {e}", exc_info=True)
+
+
     # Start background tasks
-    create_tracked_task(initial_health_check())
     create_tracked_task(cleanup_expired_data())
     create_tracked_task(verify_and_cleanup_media())
     create_tracked_task(cleanup_expired_menus())
@@ -4935,10 +4962,19 @@ async def main():
     create_tracked_task(run_web_server())
 
     logger.info("Background tasks initiated. Bot is now fully operational.")
-    await idle()
-    await app.stop()
+    await shutdown_event.wait()
 
 
 if __name__ == "__main__":
     logger.info("Starting bot...")
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+
+    # Set up signal handlers for graceful shutdown
+    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown(loop)))
+    loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(shutdown(loop)))
+
+    try:
+        loop.run_until_complete(main())
+    finally:
+        logger.info("Closing event loop.")
+        loop.close()
