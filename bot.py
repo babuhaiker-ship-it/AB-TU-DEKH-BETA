@@ -2307,42 +2307,52 @@ async def get_video(client: Client, message: Message):
     # Reset the popup flag for the new session
     users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
 
-    # No longer checking for tokens here to allow free scrolling access
+    # --- Verification Logic Moved Here ---
+    if not user_has_token(user_id):
+        if not check_and_update_free_scrolls(user_id):
+            await send_token_earning_options(client, message)
+            return
+        else:
+            user_doc = users_collection.find_one({'user_id': user_id})
+            if not user_doc.get('has_seen_free_scroll_popup'):
+                # Using a temporary message for the popup-like notification
+                try:
+                    popup_msg = await message.reply("You are using a free scroll!")
+                    await asyncio.sleep(2)
+                    await popup_msg.delete()
+                except Exception as e:
+                    logger.warning(f"Could not send/delete free scroll popup: {e}")
+                users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
+    # --- End Verification Logic ---
+
     wait_msg = await message.reply("Just a moment...")
-    await wait_msg.delete()
 
-    message_id_to_edit_or_delete = message.id
+    video = get_random_video()
 
-    cats = get_categories()
-    if not cats:
-        if message_id_to_edit_or_delete:
-            try:
-                await client.delete_messages(chat_id, message_id_to_edit_or_delete)
-            except MessageIdInvalid:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete old message {message_id_to_edit_or_delete} for user {user_id}: {e}")
-
-        await message.reply("😔 No categories available. Please ask an admin to add some! 🛠️")
-        logger.info(f"No categories found for user {user_id}.")
+    if not video:
+        await wait_msg.edit_text("😔 No videos available. Please ask an admin to add some! 🛠️")
+        logger.info(f"No videos found for user {user_id} in default category.")
         return
-
-    logger.info(f"User {user_id} prompted to choose category.")
-
-    temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
 
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        message_id_to_edit_or_delete=temp_msg.id,
-        new_message_type="text",
-        text_content="🎬 <b>Choose a Category:</b>",
-        reply_markup=category_keyboard()
+        message_id_to_edit_or_delete=wait_msg.id,
+        new_message_type="video",
+        video_data=video,
+        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id, is_saved=False),
+        force_new_message=True
     )
 
-    if not sent_success:
-        await message.reply(sent_message_or_error)
-        logger.error(f"User {user_id} failed to send category selection message: {sent_message_or_error}")
+    if sent_success:
+        default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
+        save_history(user_id, video['uuid'], "default (all)")
+    else:
+        try:
+             await wait_msg.edit_text(sent_message_or_error)
+        except Exception:
+             await message.reply(sent_message_or_error)
+        logger.error(f"User {user_id} failed to send default video: {sent_message_or_error}")
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
