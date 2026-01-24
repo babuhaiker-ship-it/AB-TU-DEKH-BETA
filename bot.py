@@ -2286,11 +2286,14 @@ async def profile_cmd(client: Client, message: Message):
 
 @app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
 async def get_video(client: Client, message: Message):
-    """Handles the 'Get Video' button request."""
+    """
+    Handles the 'Get Video' button request by immediately showing a random video.
+    """
     user_id = message.from_user.id
     chat_id = message.chat.id
     logger.info(f"User {user_id} requested Get Video.")
 
+    # Prevent opening a new menu if one is already active
     if user_id in active_video_message:
         await message.reply_text(
             "Menu already open, use this.",
@@ -2298,56 +2301,67 @@ async def get_video(client: Client, message: Message):
         )
         return
 
+    # Ensure user is a member of required channels
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
         return
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
+    # Check for rate limiting
     if await is_rate_limited(user_id):
         await handle_error(client, message, FloodWait(10))
         logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
-    # Reset the popup flag for the new session
+    # Reset the free scroll popup flag for this session
     users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
 
-    # No longer checking for tokens here to allow free scrolling access
+    # Check for access (token/premium) and consume a free scroll if necessary
+    if not user_has_token(user_id):
+        if not check_and_update_free_scrolls(user_id):
+            await send_token_earning_options(client, message)
+            return
+        else:
+            # Log that a free scroll was used
+            logger.info(f"User {user_id} is using a free scroll for Get Video.")
+            users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
+
     wait_msg = await message.reply("Just a moment...")
+
+    # Fetch a random video
+    video = get_random_video()
+
     await wait_msg.delete()
 
-    message_id_to_edit_or_delete = message.id
-
-    cats = get_categories()
-    if not cats:
-        if message_id_to_edit_or_delete:
-            try:
-                await client.delete_messages(chat_id, message_id_to_edit_or_delete)
-            except MessageIdInvalid:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete old message {message_id_to_edit_or_delete} for user {user_id}: {e}")
-
-        await message.reply("😔 No categories available. Please ask an admin to add some! 🛠️")
-        logger.info(f"No categories found for user {user_id}.")
+    if not video:
+        await message.reply("😔 No videos available at the moment. Please ask an admin to add some! 🛠️")
+        logger.warning(f"No videos found in database for user {user_id} on Get Video.")
         return
 
-    logger.info(f"User {user_id} prompted to choose category.")
-
-    temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
-
+    # Send the video to the user
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
-        message_id_to_edit_or_delete=temp_msg.id,
-        new_message_type="text",
-        text_content="🎬 <b>Choose a Category:</b>",
-        reply_markup=category_keyboard()
+        message_id_to_edit_or_delete=message.id,
+        new_message_type="video",
+        video_data=video,
+        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+        force_new_message=True
     )
 
-    if not sent_success:
-        await message.reply(sent_message_or_error)
-        logger.error(f"User {user_id} failed to send category selection message: {sent_message_or_error}")
+    if sent_success:
+        # Initialize history for "default (all)" category navigation
+        default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
+        save_history(user_id, video['uuid'], "default (all)")
+    else:
+        # Attempt to notify user of the failure
+        try:
+            await message.reply(sent_message_or_error)
+        except RPCError as e:
+            logger.error(f"Could not reply to original message after send_and_replace_message failed: {e}")
+            await client.send_message(chat_id, sent_message_or_error)
+        logger.error(f"User {user_id} failed to send default video: {sent_message_or_error}")
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
