@@ -62,15 +62,15 @@ class BotConfig:
     # REMOVED: FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     # REMOVED: FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
     # REMOVED: FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
-    MENU_EXPIRY_MINUTES = 30
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
+    MENU_EXPIRY_MINUTES = 10
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 1800 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
-    NEW_USER_SCROLLS = 100 # Number of free scrolls for new users
-    DAILY_FREE_SCROLLS = 10 # Number of free video scrolls for users without a token
-    FREE_SCROLL_RESET_HOURS = 3 # Hours after which the free scroll limit resets
+    NEW_USER_SCROLLS = 20 # Number of free scrolls for new users
+    DAILY_FREE_SCROLLS = 2 # Number of free video scrolls for users without a token
+    FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
     FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
-    FREE_LIMIT_RESET_HOURS = 6  # Hours after which the free batch limit resets
-    TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
+    FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
+    TOKEN_ACCESS_HOURS = 12  # How many hours of access one token provides
     # --- Mini App Configuration ---
     MINI_APP_URL = "https://niggabitchass-14ai9w96j-godfatherpys-projects.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
 
