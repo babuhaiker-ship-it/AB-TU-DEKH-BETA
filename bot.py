@@ -146,12 +146,26 @@ def set_session_string(session_string):
 
 # --- Pyrogram Client Initialization ---
 logger.info("Initializing Pyrogram client...")
-app = Client(
-    name="spicynyraa_session",  # A name for the session file
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
-    bot_token=config.BOT_TOKEN
-)
+SESSION_STRING = get_session_string()
+
+if SESSION_STRING:
+    logger.info("Found session string in DB. Initializing client in memory.")
+    app = Client(
+        name="spicynyraa_memory_session",
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN,
+        session_string=SESSION_STRING,
+        in_memory=True
+    )
+else:
+    logger.info("No session string found in DB. Initializing client with file session.")
+    app = Client(
+        name="spicynyraa_session",
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN
+    )
 
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
@@ -1100,7 +1114,13 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
                     me = await client.get_me()
                     member = await client.get_chat_member(DATA_CHANNEL_ID, me.id)
 
-                    if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER] and member.can_delete_messages:
+                    can_delete = False
+                    if member.status == ChatMemberStatus.ADMINISTRATOR:
+                        can_delete = member.privileges.can_delete_messages
+                    elif member.status == ChatMemberStatus.OWNER:
+                        can_delete = True
+
+                    if can_delete:
                         await client.delete_messages(DATA_CHANNEL_ID, message_id_in_channel)
                         logger.info(f"Successfully deleted message {message_id_in_channel} from channel {DATA_CHANNEL_ID}.")
                     else:
@@ -1392,18 +1412,10 @@ def video_nav_keyboard(
     """
     buttons = []
 
-    # Determine the correct "next" action callback data
-    if is_shared_link:
-        next_action_callback_data = "shared_nav"
-    elif is_batch:
-        next_action_callback_data = f"next_batch|{batch_id}|{batch_index}"
-    else:
-        next_action_callback_data = f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"
-
     # --- Like/Dislike Row ---
     buttons.append([
-        InlineKeyboardButton("Dislike 👎", callback_data=f"feedback|{next_action_callback_data}"),
-        InlineKeyboardButton("Like 👍", callback_data=f"feedback|{next_action_callback_data}")
+        InlineKeyboardButton("Dislike 👎", callback_data="feedback_dislike"),
+        InlineKeyboardButton("Like 👍", callback_data="feedback_like")
     ])
 
     # --- Navigation Row (Previous/Next) ---
@@ -1418,9 +1430,11 @@ def video_nav_keyboard(
             InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
         ])
     else:
+        # Using a shortened UUID (first 8 chars) to prevent callback_data from becoming too long
+        short_uuid = video_uuid[:8]
         buttons.append([
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{short_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
+            InlineKeyboardButton("➡️ Next", callback_data=f"next|{short_uuid}|{str_to_b64(category)}|{int(is_saved)}")
         ])
 
     # --- Action Row (Bookmark/Share/Download) ---
@@ -2133,18 +2147,35 @@ async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
         show_alert=True
     )
 
-@app.on_callback_query(filters.regex(r"^feedback\|(.+)$"))
+@app.on_callback_query(filters.regex(r"^feedback_(like|dislike)$"))
 async def feedback_and_navigate_callback(client: Client, callback_query: CallbackQuery):
     """
-    Handles 'Like' and 'Dislike' buttons. Shows feedback toast, then
-    forwards the request to the appropriate 'next' video handler.
+    Handles 'Like' and 'Dislike' buttons. Shows a feedback toast, then finds the
+    'Next' button on the keyboard and triggers its action programmatically.
     """
     await callback_query.answer("Thanks for your feedback ✅", show_alert=False)
 
-    # The original "next" action is embedded in the callback data after "feedback|"
-    next_action_data = callback_query.data.split('|', 1)[1]
+    # Find the 'Next' button's callback_data from the message keyboard
+    next_action_data = None
+    if callback_query.message.reply_markup:
+        for row in callback_query.message.reply_markup.inline_keyboard:
+            for button in row:
+                # Find a button that represents a "next" action
+                if button.callback_data and (
+                    button.callback_data.startswith("next|")
+                    or button.callback_data.startswith("next_batch|")
+                    or button.callback_data == "shared_nav"
+                ):
+                    next_action_data = button.callback_data
+                    break
+            if next_action_data:
+                break
 
-    # To avoid duplicating logic, we modify the callback_query object in-place
+    if not next_action_data:
+        logger.warning(f"Could not find a 'Next' button for feedback navigation for user {callback_query.from_user.id}")
+        return
+
+    # To avoid duplicating logic, modify the callback_query object in-place
     # and pass it to the existing navigation handlers.
     callback_query.data = next_action_data
 
@@ -2583,31 +2614,35 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         clear_active_video_message(user_id)
 
 
-@app.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|(.+)\|(\d+)$")) # Updated regex to capture is_saved flag
+@app.on_callback_query(filters.regex(r"^(next|prev)\|([a-fA-F0-9\-]+)\|(.+)\|(\d+)$"))
 async def navigate_video(client: Client, callback_query: CallbackQuery):
-    """Handles 'Next' and 'Previous' video navigation."""
+    """Handles 'Next' and 'Previous' video navigation using full or partial UUIDs."""
     user_id = callback_query.from_user.id
 
-    # --- Processing Lock to prevent race conditions ---
     if user_id in processing_navigation_lock:
-        await callback_query.answer("don't spam again", show_alert=True)
+        await callback_query.answer("Don't spam.", show_alert=True)
         return
     processing_navigation_lock.add(user_id)
-    # --- End Processing Lock ---
 
     try:
         chat_id = callback_query.message.chat.id
-        # Parse callback data: action (next/prev), current_uuid, category, is_saved_flag
         parts = callback_query.data.split('|')
         if len(parts) != 4:
             logger.error(f"Invalid callback data for navigate_video: {callback_query.data}")
-            await callback_query.answer("Invalid request. Please try again.", show_alert=True)
+            await callback_query.answer("Invalid request.", show_alert=True)
             return
 
-        action, current_uuid, category_encoded, is_saved_flag_str = parts
-        # Changed: Decode category name from callback data
+        action, uuid_part, category_encoded, is_saved_flag_str = parts
         category = b64_to_str(category_encoded)
-        is_saved = bool(int(is_saved_flag_str)) # Convert '0' or '1' to boolean
+        is_saved = bool(int(is_saved_flag_str))
+
+        # Find the full UUID from the partial one
+        video_doc = media_collection.find_one({"uuid": {"$regex": f"^{uuid_part}"}})
+        if not video_doc:
+            await callback_query.answer("Video not found.", show_alert=True)
+            logger.error(f"Could not find video with partial UUID: {uuid_part}")
+            return
+        current_uuid = video_doc['uuid']
 
         logger.info(f"User {user_id} requested {action} video in category '{category}', is_saved: {is_saved}.")
 
@@ -5102,3 +5137,10 @@ async def shutdown_event():
     logger.info("FastAPI server is shutting down...")
     await app.stop()
     logger.info("Pyrogram client stopped.")
+
+
+if __name__ == "__main__":
+    # This block will only run when the script is executed directly
+    # It starts the Uvicorn server, which in turn runs the FastAPI app.
+    # The `startup_event` handler we defined will then start the Pyrogram client.
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
