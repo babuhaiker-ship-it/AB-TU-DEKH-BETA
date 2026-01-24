@@ -57,7 +57,7 @@ class BotConfig:
     REFRESH_BONUS = 1
     PREMIUM_TRIAL_PRICE_INR = 69
     PREMIUM_MONTH_PRICE_INR = 199
-    FREE_USER_SAVE_LIMIT = 100 # Maximum saved videos for free users
+    FREE_USER_SAVE_LIMIT = 5 # Maximum saved videos for free users
     # REMOVED: FORCE_SUB_CHANNEL_ID = -1002622483638
     # REMOVED: FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
     # REMOVED: FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
