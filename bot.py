@@ -4884,9 +4884,12 @@ async def health_check():
                 await app.get_chat(DATA_CHANNEL_ID)
                 logger.info(f"Successfully resolved data channel: {DATA_CHANNEL_ID}")
                 break  # Success, exit loop
-            except PeerIdInvalid:
-                logger.warning(f"PeerIdInvalid for data channel on attempt {i+1}. Retrying in 2 seconds...")
-                await asyncio.sleep(2)
+            except ValueError as e:
+                if "Peer id invalid" in str(e):
+                    logger.warning(f"PeerIdInvalid for data channel on attempt {i+1}. Retrying in 2 seconds...")
+                    await asyncio.sleep(2)
+                else:
+                    raise e # Re-raise other ValueErrors
             except Exception as e:
                 logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
                 break  # Don't retry on other errors
@@ -4904,9 +4907,12 @@ async def health_check():
                     await app.get_chat(channel_id)
                     logger.info(f"Successfully resolved force-subscribe channel: {channel_id}")
                     break  # Success, exit loop
-                except PeerIdInvalid:
-                    logger.warning(f"PeerIdInvalid for force-sub channel {channel_id} on attempt {i+1}. Retrying in 2 seconds...")
-                    await asyncio.sleep(2)
+                except ValueError as e:
+                    if "Peer id invalid" in str(e):
+                        logger.warning(f"PeerIdInvalid for force-sub channel {channel_id} on attempt {i+1}. Retrying in 2 seconds...")
+                        await asyncio.sleep(2)
+                    else:
+                        raise e
                 except Exception as e:
                     logger.error(f"Health check failed for force subscribe channel {channel_id}: {e}", exc_info=True)
                     break  # Don't retry on other errors
