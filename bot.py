@@ -1340,9 +1340,7 @@ async def send_and_replace_message(
 async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     """Main keyboard for the bot."""
     buttons = [
-        [KeyboardButton("📱 Open App"), KeyboardButton("🎞️ Get Video")],
-        [KeyboardButton("👤 Profile"), KeyboardButton("🔗 Refer & Earn")],
-        [KeyboardButton("💰 Buy Token"), KeyboardButton("🔄 Refresh Token")],
+        [KeyboardButton("🎞️ Get Video"), KeyboardButton("👤 Profile")],
         [KeyboardButton("🔖 Saved Videos")]
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
@@ -1394,10 +1392,18 @@ def video_nav_keyboard(
     """
     buttons = []
 
+    # Determine the correct "next" action callback data
+    if is_shared_link:
+        next_action_callback_data = "shared_nav"
+    elif is_batch:
+        next_action_callback_data = f"next_batch|{batch_id}|{batch_index}"
+    else:
+        next_action_callback_data = f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"
+
     # --- Like/Dislike Row ---
     buttons.append([
-        InlineKeyboardButton("Dislike 👎", callback_data="dislike_feedback"),
-        InlineKeyboardButton("Like 👍", callback_data="like_feedback")
+        InlineKeyboardButton("Dislike 👎", callback_data=f"feedback|{next_action_callback_data}"),
+        InlineKeyboardButton("Like 👍", callback_data=f"feedback|{next_action_callback_data}")
     ])
 
     # --- Navigation Row (Previous/Next) ---
@@ -2127,15 +2133,27 @@ async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
         show_alert=True
     )
 
-@app.on_callback_query(filters.regex(r"^like_feedback$"))
-async def like_feedback_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the like button feedback."""
+@app.on_callback_query(filters.regex(r"^feedback\|(.+)$"))
+async def feedback_and_navigate_callback(client: Client, callback_query: CallbackQuery):
+    """
+    Handles 'Like' and 'Dislike' buttons. Shows feedback toast, then
+    forwards the request to the appropriate 'next' video handler.
+    """
     await callback_query.answer("Thanks for your feedback ✅", show_alert=False)
 
-@app.on_callback_query(filters.regex(r"^dislike_feedback$"))
-async def dislike_feedback_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the dislike button feedback."""
-    await callback_query.answer("Thanks for your feedback ✅", show_alert=False)
+    # The original "next" action is embedded in the callback data after "feedback|"
+    next_action_data = callback_query.data.split('|', 1)[1]
+
+    # To avoid duplicating logic, we modify the callback_query object in-place
+    # and pass it to the existing navigation handlers.
+    callback_query.data = next_action_data
+
+    if next_action_data.startswith("next|"):
+        await navigate_video(client, callback_query)
+    elif next_action_data.startswith("next_batch|"):
+        await navigate_batch_video(client, callback_query)
+    elif next_action_data == "shared_nav":
+        await shared_nav_callback(client, callback_query)
 
 @app.on_callback_query(filters.regex(r"^watch_more$"))
 async def watch_more_callback(client: Client, callback_query: CallbackQuery):
@@ -2870,147 +2888,6 @@ async def profile_btn(client: Client, message: Message):
         logger.error(f"User {user_id} failed to trigger profile command from button: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex("^🔗 Refer & Earn$") & filters.private)
-async def refer_btn(client: Client, message: Message):
-    """Handles 'Refer & Earn' button click."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked Refer & Earn button.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    create_tracked_task(check_premium_status_and_notify(client, user_id))
-
-    try:
-        if await is_rate_limited(user_id):
-            await handle_error(client, message, FloodWait(10))
-            logger.warning(f"User {user_id} hit rate limit in refer_btn.")
-            return
-
-        ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        # MODIFIED: Removed the referral keyboard
-        await message.reply(
-            f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
-            reply_markup=await get_main_keyboard(user_id)
-        )
-        logger.info(f"User {user_id}: Referral link sent successfully.")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to send referral link: {e}", exc_info=True)
-        await handle_error(client, message, e)
-
-@app.on_callback_query(filters.regex(r"^refer_and_earn_inline$"))
-async def refer_and_earn_inline_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the inline 'Refer & Earn' button click from token earning options."""
-    user_id = callback_query.from_user.id
-    logger.info(f"User {user_id} clicked inline Refer & Earn button.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    create_tracked_task(check_premium_status_and_notify(client, user_id))
-
-    try:
-        if await is_rate_limited(user_id):
-            await callback_query.answer("⚠️ You're requesting too quickly. Please wait a minute and try again. ⏳", show_alert=True)
-            logger.warning(f"User {user_id} hit rate limit in refer_and_earn_inline_callback.")
-            return
-
-        ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
-        await callback_query.message.reply(
-            f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
-            quote=True,
-            disable_web_page_preview=True
-        )
-        await callback_query.answer("Referral link sent! 🎁")
-        logger.info(f"User {user_id}: Inline referral link sent successfully.")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to send inline referral link: {e}", exc_info=True)
-        await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
-
-
-@app.on_message(filters.regex("^💰 Buy Token$") & filters.private)
-async def buy_token_btn(client: Client, message: Message):
-    """Handles 'Buy Token' button click."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked Buy Token button.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    create_tracked_task(check_premium_status_and_notify(client, user_id))
-
-    try:
-        await message.reply(get_premium_only_text(), reply_markup=buy_token_keyboard())
-        logger.info(f"User {user_id}: Buy token message sent successfully.")
-    except Exception as e:
-        logger.error(f"User {user_id} failed to send buy token message: {e}", exc_info=True)
-        await handle_error(client, message, e)
-
-@app.on_message(filters.regex("^🔄 Refresh Token$") & filters.private)
-async def refresh_token_btn(client: Client, message: Message):
-    """Handles 'Refresh Token' button click."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} requested token refresh. Handler entered.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    temp_msg = None
-    try:
-        create_tracked_task(check_premium_status_and_notify(client, user_id))
-
-        if await is_rate_limited(user_id):
-            await message.reply_text("⚠️ You're refreshing too quickly. Please wait a minute and try again. ⏳")
-            logger.warning(f"User {user_id} hit rate limit in refresh_token_btn.")
-            return
-
-        temp_msg = await message.reply("⏳ Please wait while we prepare your token... ✨")
-        logger.info(f"User {user_id}: 'Please wait...' message sent. Checking for existing token.")
-
-        if is_premium_user(user_id):
-            if temp_msg:
-                await temp_msg.delete()
-            await message.reply("💡 You already have active premium access. No need to refresh yet! Enjoy the videos! 🥳")
-            logger.info(f"User {user_id} attempted token refresh but already has valid premium access. Exiting.")
-            return
-
-        logger.info(f"User {user_id}: User does not have valid premium access. Generating ad_code and attempting to shorten URL.")
-        ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
-        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-
-        ad_url = await get_shortener_config_and_shorten_url(long_url)
-        logger.info(f"User {user_id}: get_shortener_config_and_shorten_url call completed. Result: {ad_url}")
-
-        if temp_msg:
-            await temp_msg.delete()
-
-        disable_preview = False
-        if ad_url == long_url:
-            logger.warning(f"User {user_id} URL shortening failed for refresh_token_btn. Using long URL: {ad_url}")
-            disable_preview = True
-
-        user_mention_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
-        await message.reply_text(
-            f"💡 <b>Information</b>\nHere's how to get your token! 🚀\n\n"
-            f"Hey 💕 <b>{user_mention_safe}</b>,\n\nYour Ads token is expired. Please refresh your token by clicking the button below and try again. 👇\n\n<b>Token Timeout:</b> {config.TOKEN_ACCESS_HOURS} hours ⏰\n\n<b>What is a token?</b>\nThis is an ads token. If you pass 1 ad, you can use the bot for {config.TOKEN_ACCESS_HOURS} hours after passing the ad. It's that simple! ✨\n\n<tg-spoiler>‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎</tg-spoiler>",
-            disable_web_page_preview = disable_preview,
-            reply_markup=generate_token_earning_keyboard(ad_url)
-        )
-        logger.info(f"User {user_id}: Refresh token message sent. Handler finished.")
-    except Exception as e:
-        logger.error(f"User {user_id} failed in refresh_token_btn: {e}", exc_info=True)
-        if temp_msg:
-            try:
-                await temp_msg.delete()
-                logger.info(f"User {user_id}: Deleted 'Please wait...' message due to error.")
-            except Exception as delete_e:
-                logger.warning(f"User {user_id}: Failed to delete 'Please wait...' message during error handling: {delete_e}")
-        await handle_error(client, message, e)
 
 async def send_token_earning_options(client: Client, message: Message, is_pending_content: bool = False):
     """Sends messages to a user detailing how to earn tokens."""
@@ -3622,30 +3499,6 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     set_active_video_message(user_id, sent_message.id, chat_id)
     await callback_query.answer()
 
-# --- NEW: Mini App Launch Handler ---
-@app.on_message(filters.regex("^📱 Open App$") & filters.private)
-async def open_app_btn(client: Client, message: Message):
-    """Handles the 'Open App' button to launch the Mini App."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked 'Open App' button.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    if not user_can_access_video(user_id):
-        logger.info(f"User {user_id} has no access, cannot open Mini App.")
-        await send_token_earning_options(client, message)
-        return
-
-    # The WebAppInfo object tells Telegram to open our web app.
-    # IMPORTANT: The URL must be HTTPS and must be replaced with your actual frontend URL.
-    await message.reply(
-        text="Click the button below to launch the full-screen video experience!",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🚀 Launch App", web_app=WebAppInfo(url=config.MINI_APP_URL))]]
-        )
-    )
 
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
