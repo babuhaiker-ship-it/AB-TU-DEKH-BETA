@@ -2351,7 +2351,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    if not user_has_token(user_id):
+    if not is_premium_user(user_id) and not user_has_token(user_id):
         if not check_and_update_free_scrolls(user_id):
             await callback_query.answer("You are out of free scrolls!", show_alert=True)
             await send_token_earning_options(client, callback_query.message)
@@ -2601,7 +2601,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             return
 
         create_tracked_task(check_premium_status_and_notify(client, user_id))
-        if not user_has_token(user_id):
+        if not is_premium_user(user_id) and not user_has_token(user_id):
             if not check_and_update_free_scrolls(user_id):
                 await callback_query.answer("You are out of free scrolls!", show_alert=True)
                 await send_token_earning_options(client, callback_query.message)
