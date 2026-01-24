@@ -65,12 +65,12 @@ class BotConfig:
     MENU_EXPIRY_MINUTES = 30
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 900 # 5 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
-    NEW_USER_SCROLLS = 10 # Number of free scrolls for new users
-    DAILY_FREE_SCROLLS = 2 # Number of free video scrolls for users without a token
+    NEW_USER_SCROLLS = 100 # Number of free scrolls for new users
+    DAILY_FREE_SCROLLS = 10 # Number of free video scrolls for users without a token
     FREE_SCROLL_RESET_HOURS = 3 # Hours after which the free scroll limit resets
     FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 6  # Hours after which the free batch limit resets
-    TOKEN_ACCESS_HOURS = 12  # How many hours of access one token provides
+    TOKEN_ACCESS_HOURS = 24  # How many hours of access one token provides
     # --- Mini App Configuration ---
     MINI_APP_URL = "https://niggabitchass-14ai9w96j-godfatherpys-projects.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
 
@@ -1369,10 +1369,8 @@ async def send_and_replace_message(
 async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     """Main keyboard for the bot."""
     buttons = [
-        [KeyboardButton("📱 Open App"), KeyboardButton("🎞️ Get Video")],
-        [KeyboardButton("👤 Profile"), KeyboardButton("🔗 Refer & Earn")],
-        [KeyboardButton("💰 Buy Token"), KeyboardButton("🔄 Refresh Token")],
-        [KeyboardButton("🔖 Saved Videos")]
+        [KeyboardButton("🎞️ Get Video")],
+        [KeyboardButton("👤 Profile"), KeyboardButton("🔖 Saved Videos")]
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
@@ -2293,6 +2291,13 @@ async def get_video(client: Client, message: Message):
     chat_id = message.chat.id
     logger.info(f"User {user_id} requested Get Video.")
 
+    if user_id in active_video_message:
+        await message.reply_text(
+            "Menu already open, use this.",
+            reply_to_message_id=active_video_message[user_id]['message_id']
+        )
+        return
+
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
         return
@@ -2961,9 +2966,9 @@ async def profile_btn(client: Client, message: Message):
         logger.error(f"User {user_id} failed to trigger profile command from button: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex("^🔗 Refer & Earn$") & filters.private)
-async def refer_btn(client: Client, message: Message):
-    """Handles 'Refer & Earn' button click."""
+# @app.on_message(filters.regex("^🔗 Refer & Earn$") & filters.private)
+# async def refer_btn(client: Client, message: Message):
+#     """Handles 'Refer & Earn' button click."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Refer & Earn button.")
 
@@ -3021,9 +3026,9 @@ async def refer_and_earn_inline_callback(client: Client, callback_query: Callbac
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
 
-@app.on_message(filters.regex("^💰 Buy Token$") & filters.private)
-async def buy_token_btn(client: Client, message: Message):
-    """Handles 'Buy Token' button click."""
+# @app.on_message(filters.regex("^💰 Buy Token$") & filters.private)
+# async def buy_token_btn(client: Client, message: Message):
+#     """Handles 'Buy Token' button click."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked Buy Token button.")
 
@@ -3040,9 +3045,9 @@ async def buy_token_btn(client: Client, message: Message):
         logger.error(f"User {user_id} failed to send buy token message: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_message(filters.regex("^🔄 Refresh Token$") & filters.private)
-async def refresh_token_btn(client: Client, message: Message):
-    """Handles 'Refresh Token' button click."""
+# @app.on_message(filters.regex("^🔄 Refresh Token$") & filters.private)
+# async def refresh_token_btn(client: Client, message: Message):
+#     """Handles 'Refresh Token' button click."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} requested token refresh. Handler entered.")
 
@@ -3709,10 +3714,45 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     set_active_video_message(user_id, sent_message.id, chat_id)
     await callback_query.answer()
 
+@app.on_callback_query(filters.regex(r"^get_default_video$"))
+async def get_default_video_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Get Video' button from the expiration message."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+    logger.info(f"User {user_id} clicked 'Get Video' from expiration message.")
+
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channels first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    create_tracked_task(check_premium_status_and_notify(client, user_id))
+
+    if not user_can_access_video(user_id):
+        await send_token_earning_options(client, callback_query.message)
+        return
+
+    video = get_random_video()
+    if not video:
+        await callback_query.answer("No videos available at the moment. Please try again later.", show_alert=True)
+        return
+
+    await send_and_replace_message(
+        client,
+        chat_id,
+        message_id_to_edit_or_delete=callback_query.message.id,
+        new_message_type="video",
+        video_data=video,
+        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+        force_new_message=True
+    )
+    save_history(user_id, video['uuid'], "default (all)")
+    await callback_query.answer()
+
 # --- NEW: Mini App Launch Handler ---
-@app.on_message(filters.regex("^📱 Open App$") & filters.private)
-async def open_app_btn(client: Client, message: Message):
-    """Handles the 'Open App' button to launch the Mini App."""
+# @app.on_message(filters.regex("^📱 Open App$") & filters.private)
+# async def open_app_btn(client: Client, message: Message):
+#     """Handles the 'Open App' button to launch the Mini App."""
     user_id = message.from_user.id
     logger.info(f"User {user_id} clicked 'Open App' button.")
 
@@ -5201,20 +5241,23 @@ async def cleanup_expired_menus():
                     logger.info(f"Successfully deleted expired menu message {message_id} for user {user_id}.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "⏳ Video Expired!\nTap below to get a new video.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
                     )
                 except MessageIdInvalid:
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
                     await app.send_message(
                         chat_id,
-                        "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                        "⏳ Video Expired!\nTap below to get a new video.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
                     )
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
                     try:
                         await app.send_message(
                             chat_id,
-                            "Your menu has expired due to inactivity. Please click '🎞️ Get Video' to get a new one. ⏰"
+                            "⏳ Video Expired!\nTap below to get a new video.",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
                         )
                     except Exception as send_e:
                         logger.error(f"Failed to send expiry notification to user {user_id}: {send_e}")
@@ -5352,5 +5395,18 @@ async def shutdown_event():
     It gracefully stops the Pyrogram client.
     """
     logger.info("FastAPI server is shutting down...")
+
+    # New shutdown logic to delete all active menus
+    for user_id, menu_info in list(active_video_message.items()):
+        try:
+            await app.delete_messages(menu_info['chat_id'], menu_info['message_id'])
+            await app.send_message(
+                menu_info['chat_id'],
+                "⏳ Video Expired!\nTap below to get a new video.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
+            )
+        except Exception as e:
+            logger.error(f"Failed to delete active menu for user {user_id} on shutdown: {e}")
+
     await app.stop()
     logger.info("Pyrogram client stopped.")

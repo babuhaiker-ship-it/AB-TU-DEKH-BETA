@@ -1,0 +1,6 @@
+# Pyrogram session files
+*.session
+*.session-journal
+
+# Log files
+*.log
