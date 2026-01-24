@@ -4003,6 +4003,32 @@ async def removetoken_cmd(client: Client, message: Message):
         logger.error(f"Admin {admin_user_id} error removing tokens: {e}", exc_info=True)
         await message.reply("❌ Failed to remove tokens. Please try again. 🐛")
 
+@app.on_message(filters.command("removeallnewuserfreescrolls") & filters.private & admin_only)
+async def remove_all_new_user_free_scrolls_cmd(client: Client, message: Message):
+    """Admin command to remove all new user free scrolls from all users."""
+    admin_user_id = message.from_user.id
+    logger.info(f"Admin {admin_user_id} initiated /removeallnewuserfreescrolls command.")
+
+    try:
+        # This operation updates all documents in the users_collection.
+        # It sets the 'new_user_scrolls_used' field to the value of config.NEW_USER_SCROLLS.
+        result = users_collection.update_many(
+            {},
+            {'$set': {'new_user_scrolls_used': config.NEW_USER_SCROLLS}}
+        )
+
+        # result.modified_count will contain the number of users that were updated.
+        updated_count = result.modified_count
+
+        await message.reply(
+            f"✅ Successfully removed all new user free scrolls for <b>{updated_count}</b> users."
+        )
+        logger.info(f"Admin {admin_user_id} successfully removed new user free scrolls for {updated_count} users.")
+
+    except Exception as e:
+        logger.error(f"Admin {admin_user_id} failed during /removeallnewuserfreescrolls: {e}", exc_info=True)
+        await message.reply("❌ An error occurred while removing new user free scrolls. Please check the logs. 🐛")
+
 # --- Batch Add Videos ---
 
 async def process_batch_queue(user_id: int, client: Client):
