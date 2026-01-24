@@ -146,12 +146,28 @@ def set_session_string(session_string):
 
 # --- Pyrogram Client Initialization ---
 logger.info("Initializing Pyrogram client...")
-app = Client(
-    name="spicynyraa_session",  # A name for the session file
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
-    bot_token=config.BOT_TOKEN
-)
+
+# --- MODIFIED: Load session string from DB to decide on in-memory session ---
+SESSION_STRING = get_session_string()
+
+if SESSION_STRING:
+    logger.info("Found session string in DB. Initializing client in-memory.")
+    app = Client(
+        name="spicynyraa_memory_session", # Name is still useful but can be different
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN,
+        session_string=SESSION_STRING,
+        in_memory=True
+    )
+else:
+    logger.info("No session string found in DB. Initializing client with file-based session.")
+    app = Client(
+        name="spicynyraa_session",  # This will be used to create the first session file
+        api_id=config.API_ID,
+        api_hash=config.API_HASH,
+        bot_token=config.BOT_TOKEN
+    )
 
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
@@ -5306,12 +5322,14 @@ async def startup_event():
     await app.start()
     logger.info("Pyrogram client started.")
 
-    # If this is the first run, save the session string
-    SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
+    # If the client is not in-memory, it means this is the first run and
+    # a session file was just created. We need to export its session string
+    # and save it to the database for all future (in-memory) runs.
+    if not app.in_memory:
+        logger.info("Client started in file-mode. Exporting and saving session string to DB for future runs...")
         new_session_string = await app.export_session_string()
         set_session_string(new_session_string)
+        logger.info("Session string saved. Future runs will use in-memory sessions.")
 
     # Load admins and run background tasks
     await load_admins_from_db()
