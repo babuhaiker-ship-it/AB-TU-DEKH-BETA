@@ -2307,42 +2307,48 @@ async def get_video(client: Client, message: Message):
     # Reset the popup flag for the new session
     users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
 
-    # No longer checking for tokens here to allow free scrolling access
-    wait_msg = await message.reply("Just a moment...")
-    await wait_msg.delete()
+    # --- Start of new logic: Directly get a default video ---
 
-    message_id_to_edit_or_delete = message.id
+    # 1. Check for access
+    if not user_has_token(user_id):
+        if not check_and_update_free_scrolls(user_id):
+            await send_token_earning_options(client, message)
+            return
+        else:
+            # Mark that the user has seen the popup to avoid spamming them on every scroll
+            # No alert is sent here, but the logic is consistent with category selection
+            users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
 
-    cats = get_categories()
-    if not cats:
-        if message_id_to_edit_or_delete:
-            try:
-                await client.delete_messages(chat_id, message_id_to_edit_or_delete)
-            except MessageIdInvalid:
-                pass
-            except Exception as e:
-                logger.warning(f"Failed to delete old message {message_id_to_edit_or_delete} for user {user_id}: {e}")
+    temp_msg = await message.reply("⏳ Please wait, fetching a video for you... ✨")
 
-        await message.reply("😔 No categories available. Please ask an admin to add some! 🛠️")
-        logger.info(f"No categories found for user {user_id}.")
+    # 2. Get a random video (acts as "default (all)")
+    video = get_random_video()
+
+    if not video:
+        logger.warning(f"No videos found in database for user {user_id}.")
+        await temp_msg.edit_text("😔 No videos available at the moment. Please try again later. 🛠️")
         return
 
-    logger.info(f"User {user_id} prompted to choose category.")
-
-    temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
-
+    # 3. Send the video
     sent_success, sent_message_or_error = await send_and_replace_message(
         client,
         chat_id,
         message_id_to_edit_or_delete=temp_msg.id,
-        new_message_type="text",
-        text_content="🎬 <b>Choose a Category:</b>",
-        reply_markup=category_keyboard()
+        new_message_type="video",
+        video_data=video,
+        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id, is_saved=False),
+        force_new_message=True
     )
 
-    if not sent_success:
-        await message.reply(sent_message_or_error)
-        logger.error(f"User {user_id} failed to send category selection message: {sent_message_or_error}")
+    if sent_success:
+        # 4. Update history for "default (all)" category
+        default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
+        save_history(user_id, video['uuid'], "default (all)")
+    else:
+        logger.error(f"User {user_id} failed to send video on Get Video: {sent_message_or_error}")
+        # The send_and_replace_message function should handle cleanup of temp_msg.
+        # We just need to inform the user.
+        await message.reply("❌ Failed to load video. Please try again.😥")
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
