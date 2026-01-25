@@ -51,7 +51,7 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 86400  # 24 hours in seconds (for regular tokens, not premium)
+    TOKEN_EXPIRY = 43200  # 24 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 2
     REFRESH_BONUS = 1
