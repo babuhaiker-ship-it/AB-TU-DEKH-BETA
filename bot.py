@@ -51,7 +51,7 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 43200  # 24 hours in seconds (for regular tokens, not premium)
+    TOKEN_EXPIRY = 43200  # 12 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 2
     REFRESH_BONUS = 1
@@ -63,7 +63,7 @@ class BotConfig:
     # REMOVED: FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
     # REMOVED: FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
     MENU_EXPIRY_MINUTES = 10
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 1800 # 5 minutes for refresh token links to be valid
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 1800 # 30 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
     NEW_USER_SCROLLS = 20 # Number of free scrolls for new users
     DAILY_FREE_SCROLLS = 2 # Number of free video scrolls for users without a token
@@ -3686,14 +3686,14 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
 
 @app.on_callback_query(filters.regex(r"^claim_special_token$"))
 async def claim_special_token_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the 'Claim' button for the special 24-hour token offer."""
+    """Handles the 'Claim' button for the special 1-hour token offer."""
     user_id = callback_query.from_user.id
     user_doc = users_collection.find_one({'user_id': user_id})
 
     if user_doc and user_doc.get('new_user_scrolls_used', 0) >= config.NEW_USER_SCROLLS and not user_doc.get('has_claimed_special_token', False):
-        add_token(user_id, duration_seconds=86400, is_admin_granted=True)
+        add_token(user_id, duration_seconds=3600, is_admin_granted=True)
         users_collection.update_one({'user_id': user_id}, {'$set': {'has_claimed_special_token': True}})
-        await callback_query.answer("Congratulations! You now have 24 hours of unlimited access.", show_alert=True)
+        await callback_query.answer("Congratulations! You now have 1 hour of unlimited access.", show_alert=True)
         await callback_query.message.delete()
     else:
         await callback_query.answer("This offer is not available for you.", show_alert=True)
