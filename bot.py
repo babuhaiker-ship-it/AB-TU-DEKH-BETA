@@ -2032,7 +2032,7 @@ async def start_cmd(client: Client, message: Message):
                             save_history(user_id, video['uuid'], video['category'])
                             await client.send_message(
                                 message.chat.id,
-                                "🫣Tap \"watch more\" to watch your favorite category",
+                                "🫣Tap \"watch more\" you don't need to wait for links anymore",
                                 reply_markup=await get_main_keyboard(user_id)
                             )
 
@@ -2057,7 +2057,7 @@ async def start_cmd(client: Client, message: Message):
                             if sent_success:
                                 await client.send_message(
                                     message.chat.id,
-                                    "🫣Tap \"watch more\" to watch your favorite category",
+                                    "🫣Tap \"watch more\" you don't need to wait for links anymore",
                                     reply_markup=await get_main_keyboard(user_id)
                                 )
             finally:
@@ -2153,31 +2153,71 @@ async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
 
 @app.on_callback_query(filters.regex(r"^watch_more$"))
 async def watch_more_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the 'Watch More' button to show the main category menu."""
+    """Handles the 'Watch More' button to show a random video from the default category."""
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} clicked 'Watch More'.")
 
     try:
+        await callback_query.answer()
         await callback_query.message.delete()
         clear_active_video_message(user_id)
 
-        cats_keyboard = category_keyboard()
-        if cats_keyboard.inline_keyboard[0][0].callback_data == "no_cat":
-            await client.send_message(chat_id, "😔 No categories are available right now. Please check back later!")
+        if not await check_membership(client, user_id):
+            await send_force_subscribe_message(client, user_id)
             return
 
-        sent_message = await client.send_message(
+        create_tracked_task(check_premium_status_and_notify(client, user_id))
+
+        if await is_rate_limited(user_id):
+            await client.send_message(chat_id, "⚠️ You're clicking too fast! Please wait a moment. ⏳")
+            logger.warning(f"User {user_id} hit rate limit in watch_more_callback.")
+            return
+
+        users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
+
+        if not user_has_token(user_id):
+            if not check_and_update_free_scrolls(user_id):
+                await send_token_earning_options(client, callback_query.message)
+                return
+            else:
+                logger.info(f"User {user_id} is using a free scroll for Watch More.")
+                users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
+
+        wait_msg = await client.send_message(chat_id, "Just a moment...")
+
+        video = get_random_video()
+
+        await wait_msg.delete()
+
+        if not video:
+            await client.send_message(chat_id, "😔 No videos available at the moment. Please ask an admin to add some! 🛠️")
+            logger.warning(f"No videos found in database for user {user_id} on Watch More.")
+            return
+
+        sent_success, sent_message_or_error = await send_and_replace_message(
+            client,
             chat_id,
-            "🎬 <b>Choose a Category to explore more content:</b>",
-            reply_markup=cats_keyboard
+            message_id_to_edit_or_delete=None,
+            new_message_type="video",
+            video_data=video,
+            reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+            force_new_message=True
         )
-        set_active_video_message(user_id, sent_message.id, chat_id)
-        await callback_query.answer()
+
+        if sent_success:
+            default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
+            save_history(user_id, video['uuid'], "default (all)")
+        else:
+            await client.send_message(chat_id, sent_message_or_error)
+            logger.error(f"User {user_id} failed to send default video from Watch More: {sent_message_or_error}")
 
     except Exception as e:
         logger.error(f"Error in watch_more_callback for user {user_id}: {e}", exc_info=True)
-        await callback_query.answer("An error occurred. Please try again!", show_alert=True)
+        try:
+            await client.send_message(chat_id, "An error occurred. Please try again!")
+        except Exception:
+            pass
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_cmd(client: Client, message: Message):
