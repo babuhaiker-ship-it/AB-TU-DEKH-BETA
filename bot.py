@@ -195,6 +195,9 @@ admin_fsub_state = defaultdict(dict)
 admin_data_channel_state = defaultdict(dict)
 
 
+# --- Paywall State Management ---
+paywall_state = {}
+
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
 
@@ -1203,13 +1206,7 @@ async def send_and_replace_message(
             )
 
         custom_caption = video_data.get('custom_caption')
-        category_caption = f"Category: {html.escape(video_data['category'])}" if video_data.get('category') else ""
-
-        position_caption = ""
-        if total_videos > 0 and current_position > 0:
-            position_caption = f"#{current_position} of {total_videos}\n"
-
-        caption_text = f"{position_caption}{custom_caption or category_caption}".strip()
+        caption_text = f"{custom_caption or ''}".strip()
 
     # --- Delete Old Message if Forced ---
     if force_new_message and message_id_to_edit_or_delete:
@@ -2178,7 +2175,7 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
 
         if not user_has_token(user_id):
             if not check_and_update_free_scrolls(user_id):
-                await send_token_earning_options(client, callback_query.message)
+                await send_paywall_message(client, chat_id, callback_query.message)
                 return
             else:
                 logger.info(f"User {user_id} is using a free scroll for Watch More.")
@@ -2360,7 +2357,7 @@ async def get_video(client: Client, message: Message):
     # Check for access (token/premium) and consume a free scroll if necessary
     if not user_has_token(user_id):
         if not check_and_update_free_scrolls(user_id):
-            await send_token_earning_options(client, message)
+            await send_paywall_message(client, chat_id, message)
             return
         else:
             # Log that a free scroll was used
@@ -2421,8 +2418,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
 
     if not user_has_token(user_id):
         if not check_and_update_free_scrolls(user_id):
-            await callback_query.answer("You are out of free scrolls!", show_alert=True)
-            await send_token_earning_options(client, callback_query.message)
+            await send_paywall_message(client, chat_id, callback_query.message)
             return
         else:
             user_doc = users_collection.find_one({'user_id': user_id})
@@ -2677,8 +2673,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         create_tracked_task(check_premium_status_and_notify(client, user_id))
         if not user_has_token(user_id):
             if not check_and_update_free_scrolls(user_id):
-                await callback_query.answer("You are out of free scrolls!", show_alert=True)
-                await send_token_earning_options(client, callback_query.message)
+                await send_paywall_message(client, chat_id, callback_query.message)
                 return
             else:
                 user_doc = users_collection.find_one({'user_id': user_id})
@@ -3225,6 +3220,79 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
         logger.error(f"User {user_id} failed to send token earning options: {e}", exc_info=True)
         await handle_error(client, message, e)
 
+
+async def send_paywall_message(client: Client, chat_id: int, video_message: Message):
+    """Edits a video message to show the paywall, saving its original state."""
+    logger.info(f"Editing message {video_message.id} to show paywall for user {chat_id}.")
+
+    # Save original state
+    paywall_state[video_message.id] = {
+        'original_caption': video_message.caption,
+        'original_reply_markup': video_message.reply_markup
+    }
+
+    paywall_caption = (
+        "You've reached the end of your free preview! 🍿\n\n"
+        "To keep watching, you can choose one of these options:\n\n"
+        f"**Unlock with Ad 🎟️**\nWatch a short ad to get **{config.TOKEN_ACCESS_HOURS} hours** of access.\n\n"
+        "**Go Premium 💎**\nGet **unlimited, ad-free access** and all of these amazing benefits:\n"
+        "✅ Unlimited Saved Videos\n"
+        "✅ Direct Video Downloads\n"
+        "✅ No Ads, Ever!\n"
+        "✅ Your Bookmarks are Never Deleted\n"
+        "✅ Faster, Priority Downloads\n\n"
+        f"💳 Upgrade now for just ₹{config.PREMIUM_MONTH_PRICE_INR}/month!"
+    )
+
+    # "Unlock with Ad" button logic
+    ad_code = str_to_b64(f"{chat_id}:{get_current_time()}")
+    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': chat_id, 'created_at': datetime.utcnow()})
+    long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+    ad_url = await get_shortener_config_and_shorten_url(long_url)
+
+    paywall_buttons = [
+        [InlineKeyboardButton("Buy Premium", url=config.BUY_BOT_URL)],
+        [InlineKeyboardButton("Unlock with Ad", url=ad_url)],
+        [InlineKeyboardButton("Back", callback_data=f"paywall_back_{video_message.id}")]
+    ]
+    paywall_reply_markup = InlineKeyboardMarkup(paywall_buttons)
+
+    try:
+        await client.edit_message_caption(
+            chat_id=chat_id,
+            message_id=video_message.id,
+            caption=paywall_caption,
+            reply_markup=paywall_reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Failed to edit message for paywall: {e}", exc_info=True)
+        # Fallback if editing fails
+        await client.send_message(chat_id, paywall_caption, reply_markup=paywall_reply_markup)
+
+
+@app.on_callback_query(filters.regex(r"^paywall_back_(\d+)$"))
+async def paywall_back_callback(client: Client, callback_query: CallbackQuery):
+    """Restores the original video caption and buttons from before the paywall."""
+    message_id = int(callback_query.data.split('_')[2])
+    chat_id = callback_query.message.chat.id
+
+    if message_id in paywall_state:
+        original_state = paywall_state.pop(message_id)
+        try:
+            await client.edit_message_caption(
+                chat_id=chat_id,
+                message_id=message_id,
+                caption=original_state['original_caption'],
+                reply_markup=original_state['original_reply_markup']
+            )
+            await callback_query.answer("Returning to video.")
+        except Exception as e:
+            logger.error(f"Failed to restore message from paywall: {e}", exc_info=True)
+            await callback_query.answer("Could not restore video. Please try again.", show_alert=True)
+    else:
+        await callback_query.answer("This action has expired.", show_alert=True)
+        await callback_query.message.delete()
+
 @app.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Share' video callback to generate a shareable link with user_id."""
@@ -3277,13 +3345,9 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
 
     try:
         if not is_premium_user(user_id):
-            logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
-            await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
-            await client.send_message(
-                chat_id,
-                get_premium_only_text(),
-                reply_markup=buy_token_keyboard()
-            )
+            logger.info(f"Non-premium user {user_id} attempted to download. Triggering paywall.")
+            await send_paywall_message(client, chat_id, callback_query.message)
+            await callback_query.answer() # Acknowledge the button press
             return
 
         video = get_video_by_uuid(video_uuid)
@@ -3368,7 +3432,9 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
         is_premium = is_premium_user(user_id)
 
         if not is_premium and len(bookmarked_videos) >= config.FREE_USER_SAVE_LIMIT:
-            await callback_query.answer(f"You've reached your limit of {config.FREE_USER_SAVE_LIMIT} saved videos! Upgrade to Premium for unlimited saves. ✨", show_alert=True)
+            logger.info(f"Non-premium user {user_id} reached save limit. Triggering paywall.")
+            await send_paywall_message(client, callback_query.message.chat.id, callback_query.message)
+            await callback_query.answer() # Acknowledge the button press
             return
 
         video_data = get_video_by_uuid(video_uuid)
@@ -3782,9 +3848,10 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    if not user_can_access_video(user_id):
-        await send_token_earning_options(client, callback_query.message)
-        return
+    if not user_has_token(user_id):
+        if not check_and_update_free_scrolls(user_id):
+            await send_paywall_message(client, chat_id, callback_query.message)
+            return
 
     video = get_random_video()
     if not video:
@@ -4749,6 +4816,48 @@ async def categoryrename_cmd(client: Client, message: Message):
     logger.info(f"Admin {user_id} initiated /categoryrename command.")
     admin_rename_category_state[user_id] = {'step': 'await_old_name'}
     await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
+
+@app.on_message(filters.command("categorymerge") & filters.private & admin_only)
+async def categorymerge_cmd(client: Client, message: Message):
+    """Admin command to merge two categories."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /categorymerge command.")
+    try:
+        args = message.text.split(maxsplit=2)
+        if len(args) < 3:
+            await message.reply("Usage: `/categorymerge <source_category> <destination_category>`")
+            return
+
+        source_category = args[1].strip()
+        dest_category = args[2].strip()
+
+        if source_category == dest_category:
+            await message.reply("Source and destination categories cannot be the same.")
+            return
+
+        if not categories_collection.find_one({'name': source_category}):
+            await message.reply(f"Source category '{source_category}' does not exist.")
+            return
+
+        if not categories_collection.find_one({'name': dest_category}):
+            await message.reply(f"Destination category '{dest_category}' does not exist.")
+            return
+
+        # Move videos
+        result = media_collection.update_many(
+            {'category': source_category},
+            {'$set': {'category': dest_category}}
+        )
+
+        # Delete the source category
+        delete_category(source_category)
+
+        await message.reply(f"Successfully merged {result.modified_count} videos from '{source_category}' into '{dest_category}'. The source category has been deleted.")
+        logger.info(f"Admin {user_id} merged '{source_category}' into '{dest_category}', moving {result.modified_count} videos.")
+
+    except Exception as e:
+        logger.error(f"Error in /categorymerge command: {e}", exc_info=True)
+        await message.reply("An error occurred while merging categories.")
 
 # NEW: Admin command for setting force subscribe channels
 @app.on_message(filters.command("setfsub") & filters.private & admin_only)
