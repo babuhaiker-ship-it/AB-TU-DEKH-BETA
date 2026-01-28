@@ -80,7 +80,7 @@ class BotConfig:
     # --- Mini App Configuration ---
     MINI_APP_URL = "https://niggabitchass-14ai9w96j-godfatherpys-projects.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
     # --- Web Stream Configuration ---
-    FQDN = os.environ.get("FQDN", "http://localhost:8000") # Public URL for streaming links
+    FQDN = os.environ.get("FQDN", "http://185.182.82.182") # Public URL for streaming links
 
 try:
     config = BotConfig()
@@ -5650,3 +5650,8 @@ async def shutdown_event():
 
     await app.stop()
     logger.info("Pyrogram client stopped.")
+
+if __name__ == "__main__":
+    # Use port 80 or 443 if you want to avoid port restrictions or use webhooks
+    # For VPS without domain, port 80 is recommended.
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=80)
