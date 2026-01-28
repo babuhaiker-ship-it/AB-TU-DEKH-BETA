@@ -8,3 +8,5 @@ motor
 aiohttp
 shortzy
 pydantic
+aiofiles
+jinja2
