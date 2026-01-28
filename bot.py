@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery
 )
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
 from pyrogram.enums import ChatMemberStatus
@@ -22,7 +22,7 @@ import secrets
 import mimetypes
 from shortzy import Shortzy
 
-# --- Mini App / Web Server Imports ---
+# --- Web Server Imports ---
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends, Response
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse, StreamingResponse
@@ -31,11 +31,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from web.utils.custom_dl import ByteStreamer
 from web.utils.render_template import render_page
 from web.utils.exceptions import InvalidHash, FileNotFound
-import hmac
-import hashlib
-from urllib.parse import unquote, parse_qs
-import json
-from pydantic import BaseModel
+from urllib.parse import parse_qs
 
 
 # --- Logging Setup ---
@@ -77,8 +73,6 @@ class BotConfig:
     FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 12  # How many hours of access one token provides
-    # --- Mini App Configuration ---
-    MINI_APP_URL = "https://niggabitchass-14ai9w96j-godfatherpys-projects.vercel.app/" # IMPORTANT: Replace with your actual frontend URL
     # --- Web Stream Configuration ---
     FQDN = os.environ.get("FQDN", "http://185.182.82.182") # Public URL for streaming links
 
@@ -164,26 +158,6 @@ app = Client(
 # --- NEW: FastAPI App Initialization ---
 fastapi_app = FastAPI()
 
-# ==================================================
-# ADD THIS ENTIRE BLOCK TO FIX THE LOADING SCREEN
-# ==================================================
-# Configure CORS to allow the frontend to communicate with the backend
-origins = [
-    config.MINI_APP_URL,  # Your frontend URL
-    # You can add other URLs for local testing if needed
-    # "http://localhost",
-    # "http://localhost:8080",
-]
-
-fastapi_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allows all headers
-)
-# ==================================================
-# END OF BLOCK TO ADD
 
 # Global streamer instance
 streamer: ByteStreamer = None
@@ -1810,262 +1784,6 @@ async def handle_error(client: Client, message: Message, error: Exception):
         logger.error(f"An unexpected error occurred for user {message.from_user.id}: {error}", exc_info=True)
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later. 🥺")
 
-# =====================================================================================
-# ======================== MINI APP (FASTAPI) BACKEND CODE ============================
-# =====================================================================================
-
-# --- Mini App Security ---
-async def verify_telegram_init_data(request: Request) -> dict:
-    """
-    Middleware-style dependency to verify the initData from a Telegram Mini App request.
-    """
-    try:
-        # The initData is sent in the 'X-Telegram-Init-Data' header
-        init_data_str = request.headers.get("X-Telegram-Init-Data")
-        if not init_data_str:
-            logger.error("API call received without X-Telegram-Init-Data header.")
-            raise HTTPException(status_code=401, detail="Unauthorized: Missing Telegram Init Data")
-
-        # Parse the initData string
-        params = dict(parse_qs(init_data_str))
-        hash_from_telegram = params.pop('hash', [None])[0]
-
-        if not hash_from_telegram:
-            raise HTTPException(status_code=401, detail="Unauthorized: Hash not found in Init Data")
-
-        # Sort and format the remaining data for hash calculation
-        data_check_string = "\n".join(f"{k}={v[0]}" for k, v in sorted(params.items()))
-
-        # Calculate the secret key
-        secret_key = hmac.new("WebAppData".encode(), config.BOT_TOKEN.encode(), hashlib.sha256).digest()
-
-        # Calculate our own hash
-        calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-        # Compare hashes
-        if calculated_hash != hash_from_telegram:
-            logger.error(f"API call with invalid hash. Calculated: {calculated_hash}, Received: {hash_from_telegram}")
-            raise HTTPException(status_code=403, detail="Forbidden: Invalid data signature")
-
-        # Extract user data
-        user_data_json = params.get('user', [None])[0]
-        if not user_data_json:
-            raise HTTPException(status_code=401, detail="Unauthorized: User data not found in Init Data")
-
-        user_data = json.loads(unquote(user_data_json))
-        user_id = user_data.get('id')
-
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Unauthorized: User ID not found in user data")
-
-        logger.info(f"API call verified for user_id: {user_id}")
-        return {"user_id": user_id}
-
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Bad Request: Invalid JSON in user data")
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during initData verification: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-# --- Pydantic Models for API ---
-class BookmarkRequest(BaseModel):
-    video_uuid: str
-
-# --- API Endpoints ---
-
-@fastapi_app.get("/api/profile")
-async def get_api_profile(auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get user profile information."""
-    user_id = auth["user_id"]
-    user_doc = await async_users_collection.find_one({'user_id': user_id})
-    tokens_doc = await async_tokens_collection.find_one({'user_id': user_id})
-
-    if not user_doc:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    now = datetime.utcnow()
-    tokens_count = sum(1 for token in tokens_doc.get('tokens', []) if token.get('expires_at') and token['expires_at'] > now)
-
-    is_premium = False
-    for token in tokens_doc.get('tokens', []):
-        if token.get('is_admin_granted', False) and token.get('expires_at') and token['expires_at'] > now:
-            is_premium = True
-            break
-
-    return {
-        "status": "Premium" if is_premium else "Free",
-        "tokens": tokens_count,
-        "referrals": user_doc.get('referral_count', 0)
-    }
-
-@fastapi_app.get("/api/categories")
-async def get_api_categories(auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get all video categories."""
-    cursor = async_categories_collection.find({}, {'name': 1, '_id': 0})
-    categories = [doc['name'] async for doc in cursor]
-    return sorted(categories)
-
-@fastapi_app.get("/api/feed/{category}")
-async def get_api_feed(category: str, page: int = 1, limit: int = 20, auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get a feed of videos for a specific category with pagination."""
-    if page < 1:
-        raise HTTPException(status_code=400, detail="Page number must be 1 or greater.")
-    if limit < 1 or limit > 100: # Set a reasonable max limit
-        raise HTTPException(status_code=400, detail="Limit must be between 1 and 100.")
-
-    skip_count = (page - 1) * limit
-    cursor = async_media_collection.find(
-        {'category': category, 'banned': {'$ne': True}},
-        {'uuid': 1, 'custom_caption': 1, '_id': 0}
-    ).sort('sequence_number', ASCENDING).skip(skip_count).limit(limit)
-
-    videos = await cursor.to_list(length=limit)
-    return videos
-
-@fastapi_app.get("/api/get-stream-url/{video_uuid}")
-async def get_api_stream_url(video_uuid: str, auth: dict = Depends(verify_telegram_init_data)):
-    """
-    API endpoint to get a temporary direct download link for a video.
-    This endpoint performs authentication and returns the URL as JSON.
-    """
-    user_id = auth["user_id"]
-
-    # Check if user has access (token or premium or free scrolls)
-    if not user_can_access_video(user_id):
-         raise HTTPException(status_code=403, detail="Access Denied: Token required")
-
-    video_doc = await async_media_collection.find_one({'uuid': video_uuid})
-    if not video_doc:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    file_id = video_doc.get('file_id')
-    if not file_id:
-        raise HTTPException(status_code=500, detail="Video data is incomplete")
-
-    if not DATA_CHANNEL_ID:
-        logger.error("DATA_CHANNEL_ID is not set. Cannot stream videos.")
-        raise HTTPException(status_code=503, detail="Service Unavailable: Video storage channel not configured.")
-
-    try:
-        file_obj = [obj async for obj in app.get_file(file_id)][0]
-        if not file_obj or not file_obj.file_path:
-            raise HTTPException(status_code=500, detail="Could not retrieve file path from Telegram.")
-        download_link = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{file_obj.file_path}"
-        return JSONResponse(content={"url": download_link})
-    except FileReferenceExpired:
-        logger.warning(f"FileReferenceExpired for API stream {video_uuid}. Attempting self-heal.")
-        try:
-            message_id_in_channel = video_doc.get('message_id')
-            if not message_id_in_channel: raise ValueError("No message_id for healing.")
-
-            healed_message = await app.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
-            if not healed_message or not healed_message.video: raise ValueError("Failed to fetch healed message.")
-
-            new_file_id = healed_message.video.file_id
-            await async_media_collection.update_one({'uuid': video_uuid}, {'$set': {'file_id': new_file_id}})
-            logger.info(f"DB updated with new file_id for {video_uuid} via API self-heal. Retrying.")
-
-            file_obj = [obj async for obj in app.get_file(new_file_id)][0]
-            if not file_obj or not file_obj.file_path:
-                raise HTTPException(status_code=500, detail="Could not retrieve file path from Telegram after healing.")
-            download_link = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{file_obj.file_path}"
-            return JSONResponse(content={"url": download_link})
-        except Exception as heal_e:
-            logger.error(f"API self-healing failed for {video_uuid}: {heal_e}")
-            raise HTTPException(status_code=503, detail="Service Unavailable: Could not retrieve video stream.")
-    except Exception as e:
-        logger.error(f"Error generating download link for API stream {video_uuid}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal Server Error")
-
-@fastapi_app.get("/api/video/{video_uuid}")
-async def get_api_video_details(video_uuid: str, auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get details for a single video."""
-    video_doc = await async_media_collection.find_one({'uuid': video_uuid})
-    if not video_doc:
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    return {
-        "uuid": video_doc.get("uuid"),
-        "custom_caption": video_doc.get("custom_caption"),
-        "category": video_doc.get("category"),
-    }
-
-@fastapi_app.get("/api/saved")
-async def get_api_saved_videos(auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to get the user's bookmarked videos with full details."""
-    user_id = auth["user_id"]
-
-    pipeline = [
-        {'$match': {'user_id': user_id}},
-        {'$unwind': '$bookmarked_videos'},
-        {'$lookup': {
-            'from': 'media',
-            'localField': 'bookmarked_videos.uuid',
-            'foreignField': 'uuid',
-            'as': 'video_details'
-        }},
-        {'$unwind': '$video_details'},
-        {'$project': {
-            '_id': 0,
-            'uuid': '$video_details.uuid',
-            'custom_caption': '$video_details.custom_caption',
-            'category': '$video_details.category',
-            'bookmarked_at': '$bookmarked_videos.bookmarked_at'
-        }},
-        {'$sort': {'bookmarked_at': DESCENDING}}
-    ]
-
-    saved_videos_cursor = async_users_collection.aggregate(pipeline)
-    saved_videos = await saved_videos_cursor.to_list(length=None)
-
-    return saved_videos
-
-@fastapi_app.post("/api/bookmark")
-async def toggle_api_bookmark(request: BookmarkRequest, auth: dict = Depends(verify_telegram_init_data)):
-    """API endpoint to add or remove a video bookmark."""
-    user_id = auth["user_id"]
-    video_uuid = request.video_uuid
-
-    user_doc = await async_users_collection.find_one({'user_id': user_id})
-    if not user_doc:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    bookmarked_videos = user_doc.get('bookmarked_videos', [])
-    is_already_bookmarked = any(v['uuid'] == video_uuid for v in bookmarked_videos)
-
-    if is_already_bookmarked:
-        # Remove bookmark
-        await async_users_collection.update_one(
-            {'user_id': user_id},
-            {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
-        )
-        return JSONResponse(content={"status": "removed"}, status_code=200)
-    else:
-        # Add bookmark
-        is_premium = is_premium_user(user_id)
-        if not is_premium and len(bookmarked_videos) >= config.FREE_USER_SAVE_LIMIT:
-            raise HTTPException(status_code=403, detail=f"Bookmark limit of {config.FREE_USER_SAVE_LIMIT} reached for free users.")
-
-        video_data = await async_media_collection.find_one({'uuid': video_uuid})
-        if not video_data:
-            raise HTTPException(status_code=404, detail="Video to bookmark not found.")
-
-        new_bookmark = {
-            'uuid': video_uuid,
-            'bookmarked_at': datetime.utcnow(),
-            'category': video_data.get('category')
-        }
-        await async_users_collection.update_one(
-            {'user_id': user_id},
-            {'$push': {'bookmarked_videos': new_bookmark}}
-        )
-        return JSONResponse(content={"status": "added"}, status_code=201)
-
-# =====================================================================================
-# ============================= END OF MINI APP BACKEND ===============================
-# =====================================================================================
-
-
 # --- Handlers ---
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
@@ -2380,7 +2098,6 @@ async def help_cmd(client: Client, message: Message):
 
     await message.reply(
         f"👋 Hey {user_mention_safe}! Here's how to use the bot: 📚\n\n"
-        "- **📱 Open App**: Launch the new, fast, full-screen video browser.\n"
         "- **🎞️ Get Video**: The classic button to browse and watch content.\n"
         "- **👤 Profile**: Check your status, tokens, and referral stats.\n"
         "- **🔗 Refer & Earn**: Get your unique link to invite friends and earn free tokens.\n"
@@ -3979,31 +3696,6 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
     )
     save_history(user_id, video['uuid'], "default (all)")
     await callback_query.answer()
-
-# --- NEW: Mini App Launch Handler ---
-# @app.on_message(filters.regex("^📱 Open App$") & filters.private)
-# async def open_app_btn(client: Client, message: Message):
-#     """Handles the 'Open App' button to launch the Mini App."""
-    user_id = message.from_user.id
-    logger.info(f"User {user_id} clicked 'Open App' button.")
-
-    if not await check_membership(client, user_id):
-        await send_force_subscribe_message(client, user_id)
-        return
-
-    if not user_can_access_video(user_id):
-        logger.info(f"User {user_id} has no access, cannot open Mini App.")
-        await send_token_earning_options(client, message)
-        return
-
-    # The WebAppInfo object tells Telegram to open our web app.
-    # IMPORTANT: The URL must be HTTPS and must be replaced with your actual frontend URL.
-    await message.reply(
-        text="Click the button below to launch the full-screen video experience!",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🚀 Launch App", web_app=WebAppInfo(url=config.MINI_APP_URL))]]
-        )
-    )
 
 # --- Admin Commands ---
 @app.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
