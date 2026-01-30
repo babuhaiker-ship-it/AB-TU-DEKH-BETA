@@ -5449,14 +5449,27 @@ async def verify_and_cleanup_media():
 
 
 async def keep_alive():
-    """Sends a message every 2 minutes to keep the bot alive on Render."""
-    while True:
-        try:
-            sent_message = await app.send_message(config.OWNER_ID, "Bot is running...")
-            await sent_message.delete()
-        except Exception as e:
-            logger.error(f"Keep-alive task failed: {e}", exc_info=True)
-        await asyncio.sleep(120) # Sleep for 2 minutes
+    """Pings the web server to keep the bot alive on Render."""
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        logger.warning("RENDER_EXTERNAL_URL not found. Self-ping disabled. Using Telegram ping fallback.")
+        while True:
+            try:
+                sent_message = await app.send_message(config.OWNER_ID, "Bot is running...")
+                await sent_message.delete()
+            except Exception as e:
+                logger.error(f"Keep-alive telegram ping failed: {e}")
+            await asyncio.sleep(120)
+
+    logger.info(f"Self-ping enabled for: {url}")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as response:
+                    logger.debug(f"Self-ping status: {response.status}")
+            except Exception as e:
+                logger.error(f"Self-ping error: {e}")
+            await asyncio.sleep(600) # Ping every 10 minutes
 
 
 async def health_check():
