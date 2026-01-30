@@ -185,6 +185,7 @@ active_tasks = set()
 # --- Admin State Management ---
 admin_shortener_setup_state = defaultdict(dict)
 admin_delete_video_state = defaultdict(bool)
+batch_processing_timers = {}
 admin_rename_category_state = defaultdict(dict)
 admin_batch_link_state = defaultdict(list) # State for /batchvideoadd
 owner_add_admin_state = defaultdict(dict) # State for /addadmin
@@ -339,6 +340,15 @@ def b64_to_str(b64: str) -> str:
     except Exception as e:
         logger.error(f"Failed to decode base64 string: {e}")
         return ""
+
+def get_channel_msg_link(channel_id, message_id):
+    """Generates a t.me link for a message in a channel, handling private channels."""
+    if not channel_id or not message_id:
+        return None
+    str_id = str(channel_id)
+    if str_id.startswith("-100"):
+        return f"https://t.me/c/{str_id[4:]}/{message_id}"
+    return f"https://t.me/{str_id}/{message_id}"
 
 def get_current_time() -> int:
     """Returns the current UTC timestamp as an integer."""
@@ -4125,6 +4135,19 @@ async def remove_all_new_user_free_scrolls_cmd(client: Client, message: Message)
 
 # --- Batch Add Videos ---
 
+async def delayed_start_processing(user_id: int, client: Client):
+    """Waits for 5 seconds of silence before starting batch processing."""
+    try:
+        await asyncio.sleep(5)
+        state = batch_add_state.get(user_id)
+        if state and not state.get('is_processing') and state.get('video_queue'):
+            state['is_processing'] = True
+            await process_batch_queue(user_id, client)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"Error in delayed_start_processing for user {user_id}: {e}", exc_info=True)
+
 async def process_batch_queue(user_id: int, client: Client):
     """Processes a queue of videos for batch adding, handling rate limits."""
     state = batch_add_state.get(user_id)
@@ -4140,14 +4163,24 @@ async def process_batch_queue(user_id: int, client: Client):
         state['is_processing'] = False
         return
 
-    while queue and batch_add_state.get(user_id, {}).get('batch_mode'):
+    while batch_add_state.get(user_id, {}).get('batch_mode'):
+        if not queue:
+            state['is_processing'] = False
+            # Double check to prevent race condition
+            if not queue:
+                break
+            state['is_processing'] = True
+
         message = queue.popleft()
         category = state['current_category']
 
         try:
             file_unique_id = message.video.file_unique_id
-            if media_collection.find_one({"file_unique_id": file_unique_id}):
-                await message.reply_text("⚠️ This video has already been added. Skipping.")
+            existing_video = media_collection.find_one({"file_unique_id": file_unique_id})
+            if existing_video:
+                link = get_channel_msg_link(DATA_CHANNEL_ID, existing_video.get('message_id'))
+                link_text = f"\nLink: {link}" if link else ""
+                await message.reply_text(f"⚠️ This video has already been added. Skipping.{link_text}")
                 continue
 
             sent_video_message = await client.send_video(
@@ -4278,27 +4311,50 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
         logger.error(f"Admin {user_id} failed to set batch category in callback: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("done") & filters.private & admin_only)
-async def done_cmd(client: Client, message: Message):
-    """Admin command to exit batch video adding mode."""
+@app.on_message(filters.command(["stop", "done"]) & filters.private & admin_only)
+async def stop_cmd(client: Client, message: Message):
+    """Admin command to stop any active process (batch add, delete video, etc.)."""
     user_id = message.from_user.id
-    logger.info(f"Admin {user_id} exited batch add mode.")
+    logger.info(f"Admin {user_id} used stop/done command.")
     try:
-        if user_id in batch_add_state and batch_add_state[user_id].get('batch_mode'):
+        cleared_states = []
+
+        if admin_delete_video_state.get(user_id):
+            del admin_delete_video_state[user_id]
+            cleared_states.append("Video Deletion")
+
+        if user_id in admin_batch_link_state:
+            del admin_batch_link_state[user_id]
+            cleared_states.append("Batch Link Creation")
+
+        if user_id in batch_add_state:
             state = batch_add_state[user_id]
             total_added = state.get('videos_this_session', 0)
             remaining_in_queue = len(state.get('video_queue', []))
             del batch_add_state[user_id]
 
-            reply_text = f"Batch add mode disabled. Added <b>{total_added}</b> videos in this session. 🎉"
-            if remaining_in_queue > 0:
-                reply_text += f"\n⚠️ <b>{remaining_in_queue}</b> videos were still in the queue and have not been processed."
+            if user_id in batch_processing_timers:
+                batch_processing_timers[user_id].cancel()
+                del batch_processing_timers[user_id]
 
-            await message.reply(reply_text)
-            logger.info(f"Admin {user_id}: Batch add mode disabled. Total videos added: {total_added}. Remaining in queue: {remaining_in_queue}.")
+            msg = f"Batch Add (Added: {total_added}"
+            if remaining_in_queue:
+                msg += f", Remaining: {remaining_in_queue}"
+            msg += ")"
+            cleared_states.append(msg)
+
+        # Clear other possible states
+        for state_dict in [admin_shortener_setup_state, admin_rename_category_state,
+                        admin_delete_user_state, admin_fsub_state, admin_data_channel_state]:
+            if user_id in state_dict:
+                del state_dict[user_id]
+                if "Input Flows" not in cleared_states:
+                    cleared_states.append("Input Flows")
+
+        if cleared_states:
+            await message.reply(f"✅ Process stopped: {', '.join(cleared_states)}")
         else:
-            await message.reply("You are not currently in batch add mode. Use /batchadd to start. 🚀")
-            logger.warning(f"Admin {user_id} tried to use /done but not in batch mode.")
+            await message.reply("No active process to stop.")
     except Exception as e:
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
@@ -4323,14 +4379,13 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
                 video_to_delete.get('sequence_number'), video_to_delete.get('message_id')
             )
             if success:
-                await message.reply_text(f"✅ Video (UUID: <code>{video_to_delete['uuid']}</code>) deleted.")
+                await message.reply_text(f"✅ Video (UUID: <code>{video_to_delete['uuid']}</code>) deleted.\n\nSend /stop to stop the process.")
             else:
-                await message.reply_text(f"❌ Failed to delete video (UUID: <code>{video_to_delete['uuid']}</code>).")
+                await message.reply_text(f"❌ Failed to delete video (UUID: <code>{video_to_delete['uuid']}</code>).\n\nSend /stop to stop the process.")
         except Exception as e:
             logger.error(f"Admin {user_id} error deleting video: {e}", exc_info=True)
-            await message.reply("❌ An error occurred while deleting the video.")
-        finally:
-            del admin_delete_video_state[user_id]
+            await message.reply("❌ An error occurred while deleting the video.\n\nSend /stop to stop the process.")
+        # Removed automatic deletion of state for continuous mode
         return
 
     if user_id in admin_batch_link_state:
@@ -4352,12 +4407,25 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
         logger.info(f"Admin {user_id} queued a video for batch adding.")
         state = batch_add_state[user_id]
         state['video_queue'].append(message)
-        await message.reply_text(f"✅ Video queued for category <b>{html.escape(state['current_category'])}</b>. Position in queue: {len(state['video_queue'])}.")
+
+        queue_text = f"✅ Video queued for category <b>{html.escape(state['current_category'])}</b>. Position in queue: {len(state['video_queue'])}."
+
+        if state.get('last_msg_id'):
+            try:
+                await client.edit_message_text(message.chat.id, state['last_msg_id'], queue_text)
+            except Exception:
+                sent = await message.reply_text(queue_text)
+                state['last_msg_id'] = sent.id
+        else:
+            sent = await message.reply_text(queue_text)
+            state['last_msg_id'] = sent.id
 
         if not state.get('is_processing'):
-            logger.info(f"Starting batch processing task for admin {user_id} as it was not running.")
-            state['is_processing'] = True
-            create_tracked_task(process_batch_queue(user_id, client))
+            if user_id in batch_processing_timers:
+                batch_processing_timers[user_id].cancel()
+
+            logger.info(f"Setting/Resetting batch processing timer for admin {user_id}.")
+            batch_processing_timers[user_id] = create_tracked_task(delayed_start_processing(user_id, client))
         else:
             logger.info(f"Batch processing task for admin {user_id} is already running.")
         return
@@ -4721,7 +4789,9 @@ async def create_batch_link_cmd(client: Client, message: Message):
     """Admin command to finalize a batch video link."""
     user_id = message.from_user.id
     if user_id not in admin_batch_link_state or not admin_batch_link_state[user_id]:
-        await message.reply("You haven't added any videos to the batch. Forward some videos first, then use this command.")
+        await message.reply("You haven't added any videos to the batch. Batch mode disabled.")
+        if user_id in admin_batch_link_state:
+            del admin_batch_link_state[user_id]
         return
 
     video_uuids = admin_batch_link_state[user_id]
