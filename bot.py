@@ -21,7 +21,7 @@ from shortzy import Shortzy
 
 # --- Mini App / Web Server Imports ---
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, Response
 from fastapi.responses import RedirectResponse, JSONResponse
 
 
@@ -1638,9 +1638,10 @@ async def handle_error(client: Client, message: Message, error: Exception):
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later. 🥺")
 
 @fastapi_app.get("/")
+@fastapi_app.head("/")
 async def health_check_fastapi():
     """Simple health check endpoint for Render."""
-    return {"status": "alive", "message": "Bot is alive!"}
+    return Response(status_code=200, content="OK")
 
 
 # --- Handlers ---
