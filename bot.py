@@ -1,5 +1,6 @@
 import os
 import asyncio
+from contextlib import asynccontextmanager
 import uuid
 import base64
 import logging
@@ -154,7 +155,30 @@ app = Client(
 )
 
 # --- NEW: FastAPI App Initialization ---
-fastapi_app = FastAPI()
+@asynccontextmanager
+async def lifespan(fastapi_app: FastAPI):
+    # Start the Pyrogram client in the background to avoid blocking Render's port scan
+    asyncio.create_task(start_bot())
+    yield
+    # Shutdown logic
+    logger.info("FastAPI server is shutting down...")
+
+    # Delete all active menus on shutdown
+    for user_id, menu_info in list(active_video_message.items()):
+        try:
+            await app.delete_messages(menu_info['chat_id'], menu_info['message_id'])
+            await app.send_message(
+                menu_info['chat_id'],
+                "⏳ Video Expired!\nTap below to get a new video.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
+            )
+        except Exception as e:
+            logger.error(f"Failed to delete active menu for user {user_id} on shutdown: {e}")
+
+    await app.stop()
+    logger.info("Pyrogram client stopped.")
+
+fastapi_app = FastAPI(lifespan=lifespan)
 
 # ==================================================
 # ADD THIS ENTIRE BLOCK TO FIX THE LOADING SCREEN
@@ -5499,59 +5523,38 @@ async def health_check():
     except Exception as e:
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
-@fastapi_app.on_event("startup")
-async def startup_event():
+async def start_bot():
     """
-    This function runs when the FastAPI server starts.
-    It initializes and starts the Pyrogram client in the background.
+    Initializes and starts the Pyrogram client and background tasks.
+    Called in a background task by the FastAPI lifespan to prevent blocking port detection.
     """
-    logger.info("FastAPI server is starting up...")
+    logger.info("Initializing Pyrogram bot connection...")
+    try:
+        # Start the Pyrogram client
+        await app.start()
+        logger.info("Pyrogram client started successfully.")
 
-    # Start the Pyrogram client
-    await app.start()
-    logger.info("Pyrogram client started.")
+        # If this is the first run, save the session string
+        SESSION_STRING = get_session_string()
+        if not SESSION_STRING:
+            logger.info("Saving session string to DB for future runs...")
+            new_session_string = await app.export_session_string()
+            set_session_string(new_session_string)
 
-    # If this is the first run, save the session string
-    SESSION_STRING = get_session_string()
-    if not SESSION_STRING:
-        logger.info("Saving session string to DB for future runs...")
-        new_session_string = await app.export_session_string()
-        set_session_string(new_session_string)
+        # Load admins and run background tasks
+        await load_admins_from_db()
+        await load_data_channel_id()
+        await load_force_sub_channels()
+        await health_check()
 
-    # Load admins and run background tasks
-    await load_admins_from_db()
-    await load_data_channel_id() # NEW: Load data channel ID
-    await load_force_sub_channels() # NEW: Load force sub channels
-    await health_check()
-    create_tracked_task(cleanup_expired_data())
-    create_tracked_task(verify_and_cleanup_media())
-    create_tracked_task(cleanup_expired_menus())
-    create_tracked_task(keep_alive())
-    logger.info("Background tasks initiated. Bot is now fully operational.")
+        create_tracked_task(cleanup_expired_data())
+        create_tracked_task(verify_and_cleanup_media())
+        create_tracked_task(cleanup_expired_menus())
+        create_tracked_task(keep_alive())
 
-
-@fastapi_app.on_event("shutdown")
-async def shutdown_event():
-    """
-    This function runs when the FastAPI server is shutting down.
-    It gracefully stops the Pyrogram client.
-    """
-    logger.info("FastAPI server is shutting down...")
-
-    # New shutdown logic to delete all active menus
-    for user_id, menu_info in list(active_video_message.items()):
-        try:
-            await app.delete_messages(menu_info['chat_id'], menu_info['message_id'])
-            await app.send_message(
-                menu_info['chat_id'],
-                "⏳ Video Expired!\nTap below to get a new video.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
-            )
-        except Exception as e:
-            logger.error(f"Failed to delete active menu for user {user_id} on shutdown: {e}")
-
-    await app.stop()
-    logger.info("Pyrogram client stopped.")
+        logger.info("Bot initialization complete and background tasks initiated.")
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}", exc_info=True)
 
 if __name__ == "__main__":
     # Start the FastAPI app with uvicorn
