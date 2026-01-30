@@ -1886,6 +1886,11 @@ async def get_api_saved_videos(auth: dict = Depends(verify_telegram_init_data)):
 
     return saved_videos
 
+@fastapi_app.get("/")
+async def health_check_fastapi():
+    """Simple health check endpoint for Render."""
+    return {"status": "alive", "message": "Bot is alive!"}
+
 @fastapi_app.post("/api/bookmark")
 async def toggle_api_bookmark(request: BookmarkRequest, auth: dict = Depends(verify_telegram_init_data)):
     """API endpoint to add or remove a video bookmark."""
@@ -5534,3 +5539,9 @@ async def shutdown_event():
 
     await app.stop()
     logger.info("Pyrogram client stopped.")
+
+if __name__ == "__main__":
+    # Start the FastAPI app with uvicorn
+    # Render automatically gives you a PORT variable
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
