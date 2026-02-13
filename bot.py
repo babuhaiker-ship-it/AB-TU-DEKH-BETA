@@ -64,6 +64,7 @@ class BotConfig:
     FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 12  # How many hours of access one token provides
+    VERIFICATION_TOKEN_DURATION_HOURS = 12 # Hours of access granted via human verification
 try:
     config = BotConfig()
     # UPDATED: Removed force sub channel checks
@@ -87,6 +88,7 @@ categories_collection = db['categories']
 settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
 video_batches_collection = db['video_batches'] # New collection for batch videos
+ssrb_verifications_collection = db['ssrb_verifications'] # New collection for cross-bot verification
 # NEW: Collections for dynamic channel IDs
 force_sub_channels_collection = db['force_sub_channels']
 data_channel_collection = db['data_channel']
@@ -106,6 +108,7 @@ history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True) # Renamed to "used url link" conceptually
 video_batches_collection.create_index([("batch_id", ASCENDING)], unique=True)
+ssrb_verifications_collection.create_index([("user_id", ASCENDING)], unique=True)
 # NEW: Indexes for new collections
 force_sub_channels_collection.create_index([("channel_id", ASCENDING)], unique=True)
 # FIX: Removed unique=True for _id index as it's redundant and causes an error
@@ -470,7 +473,7 @@ async def send_free_limit_reached_message(client: Client, chat_id: int):
         "The rest of our private collection is still waiting for you. 🤫\n\n"
         "Unlock full, uninterrupted access and keep the vibe going. ✨"
     )
-    reply_markup = generate_token_earning_keyboard(ad_url)
+    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 async def check_and_update_free_batch_usage(user_id: int, batch_id: str) -> bool:
@@ -1345,14 +1348,22 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
-def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False) -> InlineKeyboardMarkup:
+def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None) -> InlineKeyboardMarkup:
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = [
         [InlineKeyboardButton("🔓 Unlock 24-Hour Access (Watch Ad)", url=ad_url)],
+    ]
+
+    if user_id:
+        ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
+        buttons.append([InlineKeyboardButton("🔐 human verification", url=ssrb_link)])
+
+    buttons.extend([
         [InlineKeyboardButton("💎 Become a VIP (Ad-Free Access)", url=config.BUY_BOT_URL)],
         [InlineKeyboardButton("📚 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)],
         [InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")],
-    ]
+    ])
+
     if is_pending_content:
         buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
@@ -2818,7 +2829,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
             )
 
-        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content)
+        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
 
         await message.reply(
             text,
@@ -4406,9 +4417,9 @@ async def set_fsub_cmd(client: Client, message: Message):
     if FORCE_SUB_CHANNELS:
         for channel_info in FORCE_SUB_CHANNELS:
             buttons.append([InlineKeyboardButton(f"🔗 {html.escape(channel_info.get('name', f'Channel {channel_info['channel_id']}'))}", callback_data=f"viewfsub_{channel_info['channel_id']}")])
-    
+
     buttons.append([InlineKeyboardButton("➕ Add New Channel", callback_data="addfsub_step1")])
-    
+
     await message.reply(
         "<b>Force Subscribe Channels Configuration:</b>\n\n"
         "Below are the channels currently set for force subscription. Users must join these to use the bot.\n\n"
@@ -4422,7 +4433,7 @@ async def add_fsub_step1_callback(client: Client, callback_query: CallbackQuery)
     if not is_admin(user_id):
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
-    
+
     admin_fsub_state[user_id] = {'step': 'await_channel_id'}
     await callback_query.message.edit_text(
         "Please send the <b>Channel ID</b> (e.g., -1001234567890) or the channel's public username (e.g., @channelname).\n\n"
@@ -4436,7 +4447,7 @@ async def view_fsub_callback(client: Client, callback_query: CallbackQuery):
     if not is_admin(user_id):
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
-    
+
     channel_id = int(callback_query.data.split('_')[1])
     channel_info = next((c for c in FORCE_SUB_CHANNELS if c['channel_id'] == channel_id), None)
 
@@ -4451,12 +4462,12 @@ async def view_fsub_callback(client: Client, callback_query: CallbackQuery):
         f"Name: {html.escape(channel_info.get('name', 'N/A'))}\n"
         f"Link: {html.escape(channel_info.get('link', 'N/A'))}"
     )
-    
+
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🗑️ Remove Channel", callback_data=f"removefsub_{channel_id}")],
         [InlineKeyboardButton("⬅️ Back to List", callback_data="back_to_fsub_list")]
     ])
-    
+
     await callback_query.message.edit_text(text, reply_markup=reply_markup)
     await callback_query.answer()
 
@@ -4466,9 +4477,9 @@ async def remove_fsub_callback(client: Client, callback_query: CallbackQuery):
     if not is_admin(user_id):
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
-    
+
     channel_id = int(callback_query.data.split('_')[1])
-    
+
     result = force_sub_channels_collection.delete_one({'channel_id': channel_id})
     if result.deleted_count > 0:
         await load_force_sub_channels() # Reload global list
@@ -4485,7 +4496,7 @@ async def back_to_fsub_list_callback(client: Client, callback_query: CallbackQue
     if not is_admin(user_id):
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
-    
+
     await set_fsub_cmd(client, callback_query.message) # Re-send the main fsub menu
     await callback_query.answer()
 
@@ -4510,10 +4521,10 @@ async def set_data_cmd(client: Client, message: Message):
             text += f"Currently set to: <b>Invalid Channel</b> (ID: <code>{current_data_channel_id}</code>)\n\n"
     else:
         text += "No video storage channel is currently configured.\n\n"
-    
+
     text += "Click '✏️ Set/Change Data Channel' to configure or update it."
     buttons.append([InlineKeyboardButton("✏️ Set/Change Data Channel", callback_data="setdatachannel_step1")])
-    
+
     await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 @app.on_callback_query(filters.regex(r"^setdatachannel_step1$"))
@@ -4522,7 +4533,7 @@ async def set_data_channel_step1_callback(client: Client, callback_query: Callba
     if not is_admin(user_id):
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
-    
+
     admin_data_channel_state[user_id] = {'step': 'await_channel_id'}
     await callback_query.message.edit_text(
         "Please send the <b>Channel ID</b> (e.g., -1001234567890) or the channel's public username (e.g., @channelname).\n\n"
@@ -4536,7 +4547,7 @@ async def remove_data_channel_callback(client: Client, callback_query: CallbackQ
     if not is_admin(user_id):
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
-    
+
     result = data_channel_collection.delete_one({'_id': 'data_channel'})
     if result.deleted_count > 0:
         await load_data_channel_id() # Reload global variable
@@ -4746,7 +4757,7 @@ async def handle_text_input(client: Client, message: Message):
                 finally:
                     del admin_rename_category_state[user_id]
                 return
-        
+
         # NEW: Admin Fsub state handling
         if user_id in admin_fsub_state and admin_fsub_state[user_id].get('step') == 'await_channel_id':
             try:
@@ -5057,6 +5068,44 @@ async def health_check():
     except Exception as e:
         logger.error(f"Overall health check failed: {e}", exc_info=True)
 
+async def monitor_ssrb_verifications(client: Client):
+    """
+    Background task to monitor SSRB verifications and grant tokens in ATDB.
+    """
+    logger.info("Starting SSRB verification monitor task...")
+    while True:
+        try:
+            # Find unconsumed verifications
+            unconsumed = list(ssrb_verifications_collection.find({"is_consumed_by_atdb": False}))
+            for doc in unconsumed:
+                user_id = doc['user_id']
+                logger.info(f"Detected new SSRB verification for user {user_id}. Granting token...")
+
+                # Grant token
+                duration = config.VERIFICATION_TOKEN_DURATION_HOURS * 3600
+                add_token(user_id, duration_seconds=duration, is_admin_granted=False)
+
+                # Notify user
+                try:
+                    await client.send_message(
+                        user_id,
+                        f"✅ <b>Verification Successful!</b>\n\n"
+                        f"You have received your token from Save Restrict Bot verification! Enjoy! 🍿"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to notify user {user_id} about ATDB token: {e}")
+
+                # Mark as consumed
+                ssrb_verifications_collection.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": {"is_consumed_by_atdb": True}}
+                )
+
+        except Exception as e:
+            logger.error(f"Error in monitor_ssrb_verifications: {e}", exc_info=True)
+
+        await asyncio.sleep(10) # Poll every 10 seconds
+
 async def run_bot_background():
     """
     Initializes and starts the Pyrogram client and background tasks.
@@ -5083,6 +5132,7 @@ async def run_bot_background():
         create_tracked_task(verify_and_cleanup_media())
         create_tracked_task(cleanup_expired_menus())
         create_tracked_task(keep_alive())
+        create_tracked_task(monitor_ssrb_verifications(app))
         logger.info("Bot background initialization complete. Bot is now fully operational.")
     except Exception as e:
         logger.error(f"Error during bot background initialization: {e}", exc_info=True)
