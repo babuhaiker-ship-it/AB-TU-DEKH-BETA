@@ -169,9 +169,10 @@ default_category_history = {}
 
 # --- Dynamic Admin Management ---
 BOT_ADMINS = set()
-# NEW: Global variables for dynamically loaded channel IDs
+# NEW: Global variables for dynamically loaded settings
 DATA_CHANNEL_ID = None
 FORCE_SUB_CHANNELS = [] # List of {'channel_id': int, 'link': str, 'name': str}
+SHORTENER_DISABLED = False
 
 async def load_admins_from_db():
     """Loads admin list from DB and ensures owner is always included."""
@@ -198,6 +199,13 @@ async def load_force_sub_channels():
     global FORCE_SUB_CHANNELS
     FORCE_SUB_CHANNELS = list(force_sub_channels_collection.find({}))
     logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} force subscribe channels.")
+
+async def load_shortener_setting():
+    """Loads the shortener disabled setting from the database."""
+    global SHORTENER_DISABLED
+    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    SHORTENER_DISABLED = settings_doc.get('shortener_disabled', False) if settings_doc else False
+    logger.info(f"Loaded shortener setting: {'Disabled' if SHORTENER_DISABLED else 'Enabled'}")
 
 def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
@@ -1350,19 +1358,21 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
 
 def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None) -> InlineKeyboardMarkup:
     """Generates the keyboard for token earning options with conditional buttons."""
-    buttons = [
-        [InlineKeyboardButton("🔓 Unlock 24-Hour Access (Watch Ad)", url=ad_url)],
-    ]
+    buttons = []
+
+    if not SHORTENER_DISABLED:
+        buttons.append([InlineKeyboardButton("🔓 Unlock 24-Hour Access (Watch Ad)", url=ad_url)])
 
     if user_id:
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
         buttons.append([InlineKeyboardButton("🔐 human verification", url=ssrb_link)])
 
-    buttons.extend([
-        [InlineKeyboardButton("💎 Become a VIP (Ad-Free Access)", url=config.BUY_BOT_URL)],
-        [InlineKeyboardButton("📚 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)],
-        [InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")],
-    ])
+    buttons.append([InlineKeyboardButton("💎 Become a VIP (Ad-Free Access)", url=config.BUY_BOT_URL)])
+
+    if not SHORTENER_DISABLED:
+        buttons.append([InlineKeyboardButton("📚 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
+
+    buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
 
     if is_pending_content:
         buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
@@ -1529,6 +1539,8 @@ async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> 
 # --- Token Refresh ---
 async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
     """Handles token refresh requests from users."""
+    if SHORTENER_DISABLED:
+        return False, "❌ The URL shortener service is currently disabled. Please use other methods to earn tokens. 🚫"
     try:
         if await is_rate_limited(user_id):
             return False, "⚠️ You're refreshing too quickly. Please wait a minute and try again. ⏳"
@@ -2824,9 +2836,10 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
 
         text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
         if is_pending_content:
+            v_type = "human verification" if SHORTENER_DISABLED else "Ads Verification"
             text = (
-                "❌ <b>Token Required To View Content!</b>\n\n"
-                "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
+                f"❌ <b>Token Required To View Content!</b>\n\n"
+                f"Once You Have Successfully Passed The {v_type}, Click The Refresh Button Below To View The Content You Requested."
             )
 
         reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
@@ -4884,6 +4897,40 @@ async def toggle_protect(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to toggle content protection: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling content protection. Please try again. 🐛")
 
+@app.on_message(filters.command("turnoff_shortener") & filters.private & admin_only)
+async def turnoff_shortener_cmd(client: Client, message: Message):
+    """Admin command to turn off the URL shortener."""
+    global SHORTENER_DISABLED
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'shortener_disabled': True}},
+            upsert=True
+        )
+        SHORTENER_DISABLED = True
+        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 24-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
+        logger.info(f"Admin {message.from_user.id} turned off the shortener.")
+    except Exception as e:
+        logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
+        await message.reply("❌ Failed to turn off the shortener. Check logs.")
+
+@app.on_message(filters.command("turnon_shortener") & filters.private & admin_only)
+async def turnon_shortener_cmd(client: Client, message: Message):
+    """Admin command to turn on the URL shortener."""
+    global SHORTENER_DISABLED
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'shortener_disabled': False}},
+            upsert=True
+        )
+        SHORTENER_DISABLED = False
+        await message.reply("✅ URL Shortener has been <b>turned ON</b>. All options are now visible to users. 🔓")
+        logger.info(f"Admin {message.from_user.id} turned on the shortener.")
+    except Exception as e:
+        logger.error(f"Error in /turnon_shortener: {e}", exc_info=True)
+        await message.reply("❌ Failed to turn on the shortener. Check logs.")
+
 # --- Database Cleanup ---
 async def cleanup_expired_data():
     """Periodically cleans up expired tokens and handles bookmark truncation for non-premium users."""
@@ -5127,6 +5174,7 @@ async def run_bot_background():
         await load_admins_from_db()
         await load_data_channel_id()
         await load_force_sub_channels()
+        await load_shortener_setting()
         await health_check()
         create_tracked_task(cleanup_expired_data())
         create_tracked_task(verify_and_cleanup_media())
