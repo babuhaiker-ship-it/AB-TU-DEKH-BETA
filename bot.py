@@ -168,7 +168,7 @@ processing_navigation_lock = set()
 default_category_history = {}
 
 # --- Dynamic Admin Management ---
-BOT_ADMINS = {6612030110} # Initialize with Owner ID
+BOT_ADMINS = {config.OWNER_ID} # Initialize with Owner ID from config
 # NEW: Global variables for dynamically loaded settings
 DATA_CHANNEL_ID = None
 FORCE_SUB_CHANNELS = [] # List of {'channel_id': int, 'link': str, 'name': str}
@@ -474,10 +474,10 @@ async def send_free_limit_reached_message(client: Client, chat_id: int):
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
     shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-    ad_url = await get_shortener_config_and_shorten_url(long_url)
+    ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
     if SHORTENER_DISABLED:
-        text = "Verify you’re human to continue it will just take few seconds"
+        text = "🌟 Almost there! Just one quick step…\nVerify you're human (takes a few seconds) ❤️"
     else:
         text = (
             "🛑 **You’ve reached the end of today’s free stream...** 🛑\n\n"
@@ -1368,9 +1368,10 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
 
     if user_id:
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
-        buttons.append([InlineKeyboardButton("🔐 human verification", url=ssrb_link)])
+        v_btn_text = "✅ 𝐈'𝐦 𝐇𝐮𝐦𝐚𝐧" if SHORTENER_DISABLED else "🔐 human verification"
+        buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
 
-    vip_text = "bypass with premium" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free Access)"
+    vip_text = "🧚𝑩𝒚𝒑𝒂𝒔𝒔 𝒗𝒆𝒓𝒊𝒇𝒊𝒄𝒂𝒕𝒊𝒐𝒏" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free Access)"
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
@@ -1484,8 +1485,9 @@ def get_premium_only_text() -> str:
 
 def buy_token_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for buying tokens."""
+    btn_text = "🧚𝑩𝒚𝒑𝒂𝒔𝒔 𝒗𝒆𝒓𝒊𝒇𝒊𝒄𝒂𝒕𝒊𝒐𝒏" if SHORTENER_DISABLED else "💳 Buy Premium Access"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Buy Premium Access", url=config.BUY_BOT_URL)]
+        [InlineKeyboardButton(btn_text, url=config.BUY_BOT_URL)]
     ])
 
 def saved_category_keyboard(user_id: int) -> InlineKeyboardMarkup:
@@ -2835,10 +2837,10 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
         shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
-        ad_url = await get_shortener_config_and_shorten_url(long_url)
+        ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
         if SHORTENER_DISABLED:
-            text = "Verify you’re human to continue it will just take few seconds"
+            text = "🌟 Almost there! Just one quick step…\nVerify you're human (takes a few seconds) ❤️"
         elif is_pending_content:
             text = (
                 "❌ <b>Token Required To View Content!</b>\n\n"
