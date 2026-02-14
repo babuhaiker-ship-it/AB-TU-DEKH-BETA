@@ -44,12 +44,12 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 43200  # 12 hours in seconds (for regular tokens, not premium)
+    TOKEN_EXPIRY = 7200  # 12 hours in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
-    REFERRAL_BONUS = 2
+    REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
-    PREMIUM_TRIAL_PRICE_INR = 69
-    PREMIUM_MONTH_PRICE_INR = 199
+    PREMIUM_TRIAL_PRICE_INR = 33
+    PREMIUM_MONTH_PRICE_INR = 99
     FREE_USER_SAVE_LIMIT = 5 # Maximum saved videos for free users
     # REMOVED: FORCE_SUB_CHANNEL_ID = -1002622483638
     # REMOVED: FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
@@ -61,10 +61,10 @@ class BotConfig:
     NEW_USER_SCROLLS = 20 # Number of free scrolls for new users
     DAILY_FREE_SCROLLS = 2 # Number of free video scrolls for users without a token
     FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
-    FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
+    FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
-    TOKEN_ACCESS_HOURS = 12  # How many hours of access one token provides
-    VERIFICATION_TOKEN_DURATION_HOURS = 12 # Hours of access granted via human verification
+    TOKEN_ACCESS_HOURS = 2  # How many hours of access one token provides
+    VERIFICATION_TOKEN_DURATION_HOURS = 2 # Hours of access granted via human verification
 try:
     config = BotConfig()
     # UPDATED: Removed force sub channel checks
