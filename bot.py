@@ -61,10 +61,10 @@ class BotConfig:
     NEW_USER_SCROLLS = 20 # Number of free scrolls for new users
     DAILY_FREE_SCROLLS = 2 # Number of free video scrolls for users without a token
     FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
-    FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
+    FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 12  # How many hours of access one token provides
-    VERIFICATION_TOKEN_DURATION_HOURS = 2 # Hours of access granted via human verification
+    VERIFICATION_TOKEN_DURATION_HOURS = 12 # Hours of access granted via human verification
 try:
     config = BotConfig()
     # UPDATED: Removed force sub channel checks
@@ -476,11 +476,14 @@ async def send_free_limit_reached_message(client: Client, chat_id: int):
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await get_shortener_config_and_shorten_url(long_url)
 
-    text = (
-        "🛑 **You’ve reached the end of today’s free stream...** 🛑\n\n"
-        "The rest of our private collection is still waiting for you. 🤫\n\n"
-        "Unlock full, uninterrupted access and keep the vibe going. ✨"
-    )
+    if SHORTENER_DISABLED:
+        text = "Verify you’re human to continue it will just take few seconds"
+    else:
+        text = (
+            "🛑 **You’ve reached the end of today’s free stream...** 🛑\n\n"
+            "The rest of our private collection is still waiting for you. 🤫\n\n"
+            "Unlock full, uninterrupted access and keep the vibe going. ✨"
+        )
     reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
@@ -1367,12 +1370,12 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
         buttons.append([InlineKeyboardButton("🔐 human verification", url=ssrb_link)])
 
-    buttons.append([InlineKeyboardButton("💎 Become a VIP (Ad-Free Access)", url=config.BUY_BOT_URL)])
+    vip_text = "bypass with premium" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free Access)"
+    buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
         buttons.append([InlineKeyboardButton("📚 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
-
-    buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
+        buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
 
     if is_pending_content:
         buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
@@ -2834,13 +2837,15 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url)
 
-        text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
-        if is_pending_content:
-            v_type = "human verification" if SHORTENER_DISABLED else "Ads Verification"
+        if SHORTENER_DISABLED:
+            text = "Verify you’re human to continue it will just take few seconds"
+        elif is_pending_content:
             text = (
-                f"❌ <b>Token Required To View Content!</b>\n\n"
-                f"Once You Have Successfully Passed The {v_type}, Click The Refresh Button Below To View The Content You Requested."
+                "❌ <b>Token Required To View Content!</b>\n\n"
+                "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
             )
+        else:
+            text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
 
         reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
 
