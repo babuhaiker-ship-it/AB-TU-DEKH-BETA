@@ -168,7 +168,7 @@ processing_navigation_lock = set()
 default_category_history = {}
 
 # --- Dynamic Admin Management ---
-BOT_ADMINS = set()
+BOT_ADMINS = {6612030110} # Initialize with Owner ID
 # NEW: Global variables for dynamically loaded settings
 DATA_CHANNEL_ID = None
 FORCE_SUB_CHANNELS = [] # List of {'channel_id': int, 'link': str, 'name': str}
@@ -4572,6 +4572,58 @@ async def remove_data_channel_callback(client: Client, callback_query: CallbackQ
         await set_data_cmd(client, callback_query.message) # Refresh menu
 
 
+@app.on_message(filters.command(["turnoff_shortener", "turnoff"]) & filters.private & admin_only)
+async def turnoff_shortener_cmd(client: Client, message: Message):
+    """Admin command to turn off the URL shortener."""
+    global SHORTENER_DISABLED
+
+    # If using /turnoff, check if the argument is 'shortener'
+    if message.command[0] == "turnoff":
+        if len(message.command) < 2 or message.command[1].lower() != "shortener":
+            return # Ignore other /turnoff commands or pass to handle_text_input if propagation continued
+
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'shortener_disabled': True}},
+            upsert=True
+        )
+        SHORTENER_DISABLED = True
+        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 24-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
+        logger.info(f"Admin {message.from_user.id} turned off the shortener.")
+    except Exception as e:
+        logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
+        await message.reply("❌ Failed to turn off the shortener. Check logs.")
+
+@app.on_message(filters.command(["turnon_shortener", "turnon"]) & filters.private & admin_only)
+async def turnon_shortener_cmd(client: Client, message: Message):
+    """Admin command to turn on the URL shortener."""
+    global SHORTENER_DISABLED
+
+    # If using /turnon, check if the argument is 'shortener'
+    if message.command[0] == "turnon":
+        if len(message.command) < 2 or message.command[1].lower() != "shortener":
+            return
+
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'shortener_disabled': False}},
+            upsert=True
+        )
+        SHORTENER_DISABLED = False
+        await message.reply("✅ URL Shortener has been <b>turned ON</b>. All options are now visible to users. 🔓")
+        logger.info(f"Admin {message.from_user.id} turned on the shortener.")
+    except Exception as e:
+        logger.error(f"Error in /turnon_shortener: {e}", exc_info=True)
+        await message.reply("❌ Failed to turn on the shortener. Check logs.")
+
+@app.on_message(filters.command("shortener_status") & filters.private & admin_only)
+async def shortener_status_cmd(client: Client, message: Message):
+    """Admin command to check the shortener status."""
+    status = "Disabled 🚫" if SHORTENER_DISABLED else "Enabled 🔓"
+    await message.reply(f"📊 <b>URL Shortener Status:</b> {status}")
+
 @app.on_message(filters.text & filters.private)
 async def handle_text_input(client: Client, message: Message):
     """Handles text input for various multi-step commands for owner and admins."""
@@ -4865,7 +4917,6 @@ async def handle_text_input(client: Client, message: Message):
 
     logger.debug(f"User {user_id} sent text message '{message.text}' not part of any active multi-step command. Ignoring.")
 
-
 # --- Auto-Delete & Protect Content Settings ---
 @app.on_message(filters.command('toggle_auto_delete') & filters.private & admin_only)
 async def toggle_auto_delete(client: Client, message: Message):
@@ -4896,40 +4947,6 @@ async def toggle_protect(client: Client, message: Message):
     except Exception as e:
         logger.error(f"Admin {user_id} failed to toggle content protection: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling content protection. Please try again. 🐛")
-
-@app.on_message(filters.command("turnoff_shortener") & filters.private & admin_only)
-async def turnoff_shortener_cmd(client: Client, message: Message):
-    """Admin command to turn off the URL shortener."""
-    global SHORTENER_DISABLED
-    try:
-        settings_collection.update_one(
-            {'_id': 'bot_settings'},
-            {'$set': {'shortener_disabled': True}},
-            upsert=True
-        )
-        SHORTENER_DISABLED = True
-        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 24-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
-        logger.info(f"Admin {message.from_user.id} turned off the shortener.")
-    except Exception as e:
-        logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
-        await message.reply("❌ Failed to turn off the shortener. Check logs.")
-
-@app.on_message(filters.command("turnon_shortener") & filters.private & admin_only)
-async def turnon_shortener_cmd(client: Client, message: Message):
-    """Admin command to turn on the URL shortener."""
-    global SHORTENER_DISABLED
-    try:
-        settings_collection.update_one(
-            {'_id': 'bot_settings'},
-            {'$set': {'shortener_disabled': False}},
-            upsert=True
-        )
-        SHORTENER_DISABLED = False
-        await message.reply("✅ URL Shortener has been <b>turned ON</b>. All options are now visible to users. 🔓")
-        logger.info(f"Admin {message.from_user.id} turned on the shortener.")
-    except Exception as e:
-        logger.error(f"Error in /turnon_shortener: {e}", exc_info=True)
-        await message.reply("❌ Failed to turn on the shortener. Check logs.")
 
 # --- Database Cleanup ---
 async def cleanup_expired_data():
