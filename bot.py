@@ -61,10 +61,10 @@ class BotConfig:
     NEW_USER_SCROLLS = 20 # Number of free scrolls for new users
     DAILY_FREE_SCROLLS = 2 # Number of free video scrolls for users without a token
     FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
-    FREE_BATCH_LIMIT = 2  # Number of free batches a user can watch daily without a token
+    FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
     TOKEN_ACCESS_HOURS = 12  # How many hours of access one token provides
-    VERIFICATION_TOKEN_DURATION_HOURS = 12 # Hours of access granted via human verification
+    VERIFICATION_TOKEN_DURATION_HOURS = 2 # Hours of access granted via human verification
 try:
     config = BotConfig()
     # UPDATED: Removed force sub channel checks
