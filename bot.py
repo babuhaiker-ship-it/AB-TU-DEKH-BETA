@@ -44,7 +44,7 @@ class BotConfig:
     BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
     OWNER_ID = 6612030110 # The main owner ID, cannot be removed
     TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 7200  # 12 hours in seconds (for regular tokens, not premium)
+    TOKEN_EXPIRY = 1800  # 30 minutes in seconds (for regular tokens, not premium)
     NEW_USER_TOKENS = 1
     REFERRAL_BONUS = 1
     REFRESH_BONUS = 1
@@ -58,13 +58,13 @@ class BotConfig:
     MENU_EXPIRY_MINUTES = 10
     REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 1800 # 30 minutes for refresh token links to be valid
     # --- New Feature Configuration ---
-    NEW_USER_SCROLLS = 20 # Number of free scrolls for new users
-    DAILY_FREE_SCROLLS = 2 # Number of free video scrolls for users without a token
+    NEW_USER_SCROLLS = 0 # Number of free scrolls for new users
+    DAILY_FREE_SCROLLS = 0 # Number of free video scrolls for users without a token
     FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
-    FREE_BATCH_LIMIT = 1  # Number of free batches a user can watch daily without a token
+    FREE_BATCH_LIMIT = 0  # Number of free batches a user can watch daily without a token
     FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
-    TOKEN_ACCESS_HOURS = 2  # How many hours of access one token provides
-    VERIFICATION_TOKEN_DURATION_HOURS = 2 # Hours of access granted via human verification
+    TOKEN_ACCESS_HOURS = 0.5  # How many hours of access one token provides
+    VERIFICATION_TOKEN_DURATION_HOURS = 0.5 # Hours of access granted via human verification
 try:
     config = BotConfig()
     # UPDATED: Removed force sub channel checks
@@ -433,44 +433,13 @@ def user_has_token(user_id: int) -> bool:
     return False
 
 def user_can_access_video(user_id: int) -> bool:
-    """Checks if a user can access video content (is premium, has token, or new user scrolls)."""
-    if is_premium_user(user_id) or user_has_token(user_id):
-        return True
+    """Checks if a user can access video content (is premium or has a token)."""
+    return is_premium_user(user_id) or user_has_token(user_id)
 
-    user_doc = users_collection.find_one({'user_id': user_id})
-    if user_doc and 'new_user_scrolls_used' in user_doc:
-        if user_doc['new_user_scrolls_used'] < config.NEW_USER_SCROLLS:
-            return True
-
-    return False
-
-def use_new_user_scroll(user_id: int) -> bool:
-    """
-    Atomically checks and consumes one new user scroll if available.
-    Returns True if a scroll was used, False otherwise.
-    """
-    # find_one_and_update is atomic. It finds a doc matching the query and updates it.
-    # If no doc matches (e.g., scrolls are used up), it returns None.
-    user_doc = users_collection.find_one_and_update(
-        {
-            'user_id': user_id,
-            'new_user_scrolls_used': {'$lt': config.NEW_USER_SCROLLS},
-            'has_claimed_special_token': {'$ne': True} # Ensure they haven't claimed the special token
-        },
-        {'$inc': {'new_user_scrolls_used': 1}},
-        return_document=ReturnDocument.AFTER
-    )
-
-    if user_doc:
-        logger.info(f"User {user_id} used a new user scroll ({user_doc['new_user_scrolls_used']}/{config.NEW_USER_SCROLLS}).")
-        return True
-
-    return False
-
-# --- Free Batch Limit Management ---
-async def send_free_limit_reached_message(client: Client, chat_id: int):
-    """Sends a message informing the user their free limit is reached."""
-    user_id = chat_id  # Assuming private chat
+# --- Access Limit Management ---
+async def send_access_limit_reached_message(client: Client, chat_id: int):
+    """Sends a message informing the user they need a token to access content."""
+    user_id = chat_id
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
     shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
@@ -480,116 +449,12 @@ async def send_free_limit_reached_message(client: Client, chat_id: int):
         text = "🌟 Almost there! Just one quick step…\nVerify you're human (takes a few seconds) ❤️"
     else:
         text = (
-            "🛑 **You’ve reached the end of today’s free stream...** 🛑\n\n"
-            "The rest of our private collection is still waiting for you. 🤫\n\n"
-            "Unlock full, uninterrupted access and keep the vibe going. ✨"
+            "🛑 **Access Token Required** 🛑\n\n"
+            "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
+            "Unlock 30 minutes of uninterrupted access and keep the vibe going. ✨"
         )
     reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
-
-async def check_and_update_free_batch_usage(user_id: int, batch_id: str) -> bool:
-    """
-    Checks if a user can watch a batch based on their token, premium, or free status.
-    A user gets a limited number of free batches per day.
-    Once a batch is claimed as free, all videos in it can be watched for the day.
-    Returns True if access is granted, False otherwise.
-    """
-    if is_premium_user(user_id) or user_has_token(user_id):
-        return True
-
-    # New user scroll logic
-    if use_new_user_scroll(user_id):
-        return True
-
-    # Fallback to daily free scrolls
-    now = datetime.utcnow()
-    # Ensure free_scroll_usage exists, get the latest doc
-    user_doc = users_collection.find_one_and_update(
-        {'user_id': user_id},
-        {'$setOnInsert': {
-            'free_batch_usage': {'claimed_batches': [], 'reset_at': now + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
-        }},
-        upsert=True,
-        return_document=ReturnDocument.AFTER
-    )
-
-    free_usage = user_doc.get('free_batch_usage', {})
-    claimed_batches = free_usage.get('claimed_batches', [])
-    reset_at = free_usage.get('reset_at')
-
-    # Reset if the time has come
-    if not reset_at or now >= reset_at:
-        new_reset_at = now + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'free_batch_usage': {'claimed_batches': [], 'reset_at': new_reset_at}}}
-        )
-        claimed_batches = []
-        logger.info(f"Reset free batch limit for user {user_id}. Next reset at {new_reset_at}.")
-
-    # If they've already claimed this batch today, they can continue watching
-    if batch_id in claimed_batches:
-        logger.info(f"User {user_id} has access to already claimed batch {batch_id}.")
-        return True
-
-    # If they haven't claimed it, check if they have free slots
-    if len(claimed_batches) < config.FREE_BATCH_LIMIT:
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$push': {'free_batch_usage.claimed_batches': batch_id}}
-        )
-        logger.info(f"User {user_id} claimed a new free batch {batch_id}. Total claimed today: {len(claimed_batches) + 1}/{config.FREE_BATCH_LIMIT}.")
-        return True
-    else:
-        logger.warning(f"User {user_id} has reached their free batch limit for today.")
-        return False
-
-def check_and_update_free_scrolls(user_id: int) -> bool:
-    """
-    Checks if a user can use a free scroll.
-    Returns True if access is granted, False otherwise.
-    """
-    if is_premium_user(user_id) or user_has_token(user_id):
-        return True
-
-    # New user scroll logic
-    if use_new_user_scroll(user_id):
-        return True
-
-    now = datetime.utcnow()
-    user_doc = users_collection.find_one_and_update(
-        {'user_id': user_id},
-        {'$setOnInsert': {
-            'free_scroll_usage': {'count': 0, 'reset_at': now + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)}
-        }},
-        upsert=True,
-        return_document=ReturnDocument.AFTER
-    )
-
-    free_scroll_usage = user_doc.get('free_scroll_usage', {})
-    count = free_scroll_usage.get('count', 0)
-    reset_at = free_scroll_usage.get('reset_at')
-
-    # Reset if the time has come
-    if not reset_at or now >= reset_at:
-        new_reset_at = now + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'free_scroll_usage': {'count': 0, 'reset_at': new_reset_at}}}
-        )
-        count = 0
-        logger.info(f"Reset free scroll limit for user {user_id}. Next reset at {new_reset_at}.")
-
-    if count < config.DAILY_FREE_SCROLLS:
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$inc': {'free_scroll_usage.count': 1}}
-        )
-        logger.info(f"User {user_id} used a free scroll. Total used today: {count + 1}/{config.DAILY_FREE_SCROLLS}.")
-        return True
-    else:
-        logger.warning(f"User {user_id} has reached their free scroll limit for today.")
-        return False
 
 # --- Premium Status Check and Notification ---
 async def check_premium_status_and_notify(client: Client, user_id: int):
@@ -633,7 +498,7 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
         if referrer_id != new_user_id:
             ref_user = users_collection.find_one({'user_id': referrer_id})
             if ref_user:
-                add_token(referrer_id, config.REFERRAL_BONUS * 86400, is_admin_granted=False)
+                add_token(referrer_id, config.REFERRAL_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
                 users_collection.update_one({'user_id': referrer_id}, {'$inc': {'referral_count': 1}}, upsert=True)
                 users_collection.update_one({'user_id': new_user_id}, {'$set': {'referred_by': referrer_id}}, upsert=True)
                 logger.info(f"User {new_user_id} successfully referred by {referrer_id}.")
@@ -647,7 +512,7 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
                 if referrer_id != new_user_id:
                     ref_user = users_collection.find_one({'user_id': referrer_id})
                     if ref_user:
-                        add_token(referrer_id, config.REFERRAL_BONUS * 86400, is_admin_granted=False)
+                        add_token(referrer_id, config.REFERRAL_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
                         users_collection.update_one({'user_id': referrer_id}, {'$inc': {'referral_count': 1}}, upsert=True)
                         users_collection.update_one({'user_id': new_user_id}, {'$set': {'referred_by': referrer_id}}, upsert=True)
                         logger.info(f"User {new_user_id} successfully referred by {referrer_id} via video share.")
@@ -1364,7 +1229,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons = []
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("🔓 Unlock 24-Hour Access (Watch Ad)", url=ad_url)])
+        buttons.append([InlineKeyboardButton("🔓 Unlock 30-Minute Access (Watch Ad)", url=ad_url)])
 
     if user_id:
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
@@ -1375,7 +1240,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("📚 24-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
+        buttons.append([InlineKeyboardButton("📚 30-Minute Access Tutorial", url=config.TUTORIAL_LINK_2)])
         buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
 
     if is_pending_content:
@@ -1603,11 +1468,11 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             logger.warning(f"User {user_id} attempted to reuse token refresh link: {ad_code}")
             return False, "This token refresh link has already been used. Please generate a new one. 🔄"
 
-        added_token = add_token(user_id, config.REFRESH_BONUS * 86400, is_admin_granted=False)
+        added_token = add_token(user_id, config.REFRESH_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
         if added_token:
             refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
             logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
-            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {config.TOKEN_ACCESS_HOURS} hours. Enjoy! 🍿"
+            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {int(config.REFRESH_BONUS * config.TOKEN_EXPIRY / 60)} minutes. Enjoy! 🍿"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
     except Exception as e:
@@ -1721,7 +1586,7 @@ async def start_cmd(client: Client, message: Message):
             # Prepare custom force-sub message based on user state
             custom_text = None
             if is_new_user:
-                part1 = f"🎉 Congratulations {first_name_safe}!\n\nYou've just received free scrolls 🎁 to start your journey!\n\n"
+                part1 = f"🎉 Congratulations {first_name_safe}! Welcome to our spicy collection! 🌶️\n\n"
                 part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
                 custom_text = part1 + part2
 
@@ -1787,8 +1652,8 @@ async def start_cmd(client: Client, message: Message):
                             )
 
                 elif deep_link_type == 'batch':
-                    if not await check_and_update_free_batch_usage(user_id, deep_link_data):
-                        await send_free_limit_reached_message(client, message.chat.id)
+                    if not user_can_access_video(user_id):
+                        await send_access_limit_reached_message(client, message.chat.id)
                         return
 
                     batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
@@ -1814,9 +1679,9 @@ async def start_cmd(client: Client, message: Message):
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
             await message.reply(
-                f"🎉 Congratulations {first_name_safe}!\n"
-                f"You got free scrolls 🎁 to start your journey!\n\n"
-                f"🔥 Tap ‘🎞️ Get Video’ now and dive straight into your favorite category 🚀",
+                f"🎉 Congratulations {first_name_safe}!\n\n"
+                f"Welcome to the most exclusive spicy collection. 🌶️\n\n"
+                f"🔥 Tap ‘🎞️ Get Video’ now to explore and dive into your favorite category! 🚀",
                 reply_markup=await get_main_keyboard(user_id)
             )
         else: # Existing user, no deep link
@@ -1866,7 +1731,7 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
         await send_force_subscribe_message(client, user_id)
         return
 
-    if not user_has_token(user_id):
+    if not user_can_access_video(user_id):
         await callback_query.answer("You still haven't received a token. Please complete the task first.", show_alert=True)
         return
 
@@ -1926,13 +1791,9 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
 
         users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
 
-        if not user_has_token(user_id):
-            if not check_and_update_free_scrolls(user_id):
-                await send_token_earning_options(client, callback_query.message)
-                return
-            else:
-                logger.info(f"User {user_id} is using a free scroll for Watch More.")
-                users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
+        if not user_can_access_video(user_id):
+            await send_token_earning_options(client, callback_query.message)
+            return
 
         wait_msg = await client.send_message(chat_id, "Just a moment...")
 
@@ -2100,18 +1961,10 @@ async def get_video(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
-    # Reset the free scroll popup flag for this session
-    users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
-
-    # Check for access (token/premium) and consume a free scroll if necessary
-    if not user_has_token(user_id):
-        if not check_and_update_free_scrolls(user_id):
-            await send_token_earning_options(client, message)
-            return
-        else:
-            # Log that a free scroll was used
-            logger.info(f"User {user_id} is using a free scroll for Get Video.")
-            users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
+    # Check for access (token/premium)
+    if not user_can_access_video(user_id):
+        await send_token_earning_options(client, message)
+        return
 
     wait_msg = await message.reply("Just a moment...")
 
@@ -2165,16 +2018,10 @@ async def select_category(client: Client, callback_query: CallbackQuery):
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    if not user_has_token(user_id):
-        if not check_and_update_free_scrolls(user_id):
-            await callback_query.answer("You are out of free scrolls!", show_alert=True)
-            await send_token_earning_options(client, callback_query.message)
-            return
-        else:
-            user_doc = users_collection.find_one({'user_id': user_id})
-            if not user_doc.get('has_seen_free_scroll_popup'):
-                await callback_query.answer("You are using a free scroll!", show_alert=True)
-                users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
+    if not user_can_access_video(user_id):
+        await callback_query.answer("You need an access token to continue! 🧐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
 
     if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ Too many category changes. Wait 1 min. ⏳", show_alert=True)
@@ -2300,6 +2147,11 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
+    if not user_can_access_video(user_id):
+        await callback_query.answer("You need an access token to view saved videos! 🧐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
+
     if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
         logger.warning(f"User {user_id} hit rate limit in view_saved_category_callback.")
@@ -2421,16 +2273,10 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             return
 
         create_tracked_task(check_premium_status_and_notify(client, user_id))
-        if not user_has_token(user_id):
-            if not check_and_update_free_scrolls(user_id):
-                await callback_query.answer("You are out of free scrolls!", show_alert=True)
-                await send_token_earning_options(client, callback_query.message)
-                return
-            else:
-                user_doc = users_collection.find_one({'user_id': user_id})
-                if not user_doc.get('has_seen_free_scroll_popup'):
-                    await callback_query.answer("You are using a free scroll!", show_alert=True)
-                    users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': True}})
+        if not user_can_access_video(user_id):
+            await callback_query.answer("You need an access token to continue! 🧐", show_alert=True)
+            await send_token_earning_options(client, callback_query.message)
+            return
         try:
             if await is_rate_limited(user_id):
                 await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
@@ -2612,9 +2458,9 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     action, batch_id, current_index_str = callback_query.data.split('|')
 
-    if not await check_and_update_free_batch_usage(user_id, batch_id):
-        await callback_query.answer("Your free limit is reached!", show_alert=True)
-        await send_free_limit_reached_message(client, callback_query.message.chat.id)
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Access token required! 🧐", show_alert=True)
+        await send_access_limit_reached_message(client, callback_query.message.chat.id)
         return
 
     if user_id in processing_navigation_lock:
@@ -2802,21 +2648,6 @@ async def refer_and_earn_inline_callback(client: Client, callback_query: Callbac
 async def send_token_earning_options(client: Client, message: Message, is_pending_content: bool = False):
     """Sends messages to a user detailing how to earn tokens."""
     user_id = message.chat.id
-    user_doc = users_collection.find_one({'user_id': user_id})
-
-    if user_doc and 'new_user_scrolls_used' in user_doc and user_doc['new_user_scrolls_used'] >= config.NEW_USER_SCROLLS and not user_doc.get('has_claimed_special_token', False):
-        try:
-            user = await client.get_users(user_id)
-            first_name_safe = html.escape(user.first_name) if user.first_name else "there"
-        except Exception as e:
-            logger.warning(f"Could not get user's first name for special token offer: {e}")
-            first_name_safe = "there"
-
-        text = f"Dear {first_name_safe}, you have used all of your free scrolls, but we decided to grant 24 hours of unlimited access. Click the button below to claim it."
-        reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Claim", callback_data="claim_special_token")]])
-        await client.send_message(message.chat.id, text, reply_markup=reply_markup)
-        return
-
     logger.info(f"User {user_id} is being sent token earning options.")
 
     if not await check_membership(client, user_id):
@@ -3364,19 +3195,6 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     await callback_query.message.edit_text("Operation cancelled. Your saved videos are safe! ✅")
     await callback_query.answer("Operation cancelled.")
 
-@app.on_callback_query(filters.regex(r"^claim_special_token$"))
-async def claim_special_token_callback(client: Client, callback_query: CallbackQuery):
-    """Handles the 'Claim' button for the special 1-hour token offer."""
-    user_id = callback_query.from_user.id
-    user_doc = users_collection.find_one({'user_id': user_id})
-
-    if user_doc and user_doc.get('new_user_scrolls_used', 0) >= config.NEW_USER_SCROLLS and not user_doc.get('has_claimed_special_token', False):
-        add_token(user_id, duration_seconds=3600, is_admin_granted=True)
-        users_collection.update_one({'user_id': user_id}, {'$set': {'has_claimed_special_token': True}})
-        await callback_query.answer("Congratulations! You now have 1 hour of unlimited access.", show_alert=True)
-        await callback_query.message.delete()
-    else:
-        await callback_query.answer("This offer is not available for you.", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^back_to_saved_cats$"))
 async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQuery):
@@ -3601,7 +3419,7 @@ async def addtoken_cmd(client: Client, message: Message):
         args = message.text.split()
         if len(args) < 3:
             logger.warning(f"Admin {user_id} used addtoken with insufficient arguments: {message.text}")
-            await message.reply("Usage: <code>/addtoken &lt;user_id&gt; &lt;duration_days&gt;</code>\nDuration is in days. 📝")
+            await message.reply("Usage: <code>/addtoken &lt;user_id&gt; &lt;num_tokens&gt;</code>\n1 token = 30 minutes of access. 📝")
             return
 
         target_user_id = int(args[1])
@@ -3611,15 +3429,10 @@ async def addtoken_cmd(client: Client, message: Message):
             await message.reply("User ID must be a positive integer. 🔢")
             return
 
-        duration_days = int(args[2])
-        if duration_days <= 0:
-            logger.warning(f"Admin {user_id} provided invalid duration: {duration_days}.")
-            await message.reply("Duration must be a positive integer (days). 🔢")
-            return
-
-        if duration_days > 365:
-            logger.warning(f"Admin {user_id} attempted to add more than 365 days of premium access ({duration_days}).")
-            await message.reply("Cannot add more than 365 days of premium access at once. Max 365 days per command. 🚫")
+        num_tokens = int(args[2])
+        if num_tokens <= 0:
+            logger.warning(f"Admin {user_id} provided invalid number of tokens: {num_tokens}.")
+            await message.reply("Number of tokens must be a positive integer. 🔢")
             return
 
         user_doc = users_collection.find_one({'user_id': target_user_id})
@@ -3628,18 +3441,18 @@ async def addtoken_cmd(client: Client, message: Message):
             await message.reply("User not found in database. 🧐")
             return
 
-        add_token_info = add_token(target_user_id, duration_seconds=duration_days * 86400, is_admin_granted=True)
+        add_token_info = add_token(target_user_id, duration_seconds=num_tokens * config.TOKEN_EXPIRY, is_admin_granted=True)
 
         if not add_token_info:
             await message.reply("❌ Failed to grant premium access. Please try again. 🐛")
             return
 
         expiry_date = add_token_info['expires_at']
-        logger.info(f"Admin {user_id} granted {duration_days} days of premium access to user {target_user_id}. Expires: {expiry_date}")
-        await message.reply(f"✅ Granted <b>{duration_days}</b> days of premium access to user <b>{target_user_id}</b>. New expiry: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}. 🎉")
+        logger.info(f"Admin {user_id} granted {num_tokens} tokens (30 mins each) to user {target_user_id}. Expires: {expiry_date}")
+        await message.reply(f"✅ Granted <b>{num_tokens}</b> tokens (30 mins each) to user <b>{target_user_id}</b>. New expiry: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}. 🎉")
 
         try:
-            await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{duration_days}</b> days of premium access by an admin! Your premium access now expires on <b>{expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 💎")
+            await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{num_tokens}</b> access tokens by an admin! Your access now expires on <b>{expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 💎")
             users_collection.update_one(
                 {'user_id': target_user_id},
                 {'$set': {'last_premium_check_status': True}}
@@ -4596,7 +4409,7 @@ async def turnoff_shortener_cmd(client: Client, message: Message):
             upsert=True
         )
         SHORTENER_DISABLED = True
-        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 24-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
+        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 30-Minute Access' and Tutorial buttons are now hidden from users. 🚫")
         logger.info(f"Admin {message.from_user.id} turned off the shortener.")
     except Exception as e:
         logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
