@@ -32,44 +32,45 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Configuration #demo ---
+# --- Configuration ---
 class BotConfig:
-    BOT_TOKEN = '8336714943:AAEDF5NRMs4MKIlu__ZoEi8VVfz0xwCIJFA'
-    API_ID = 29800015
-    API_HASH = 'c8f37108be31ab9ea2818bfe533fbb6f'
-    BOT_USERNAME = '@SpicyNyraa_bot'
-    MONGO_URI = 'mongodb+srv://Pyasipriya:AxHCCAJJI2Idv544@cluster0.2dfenf7.mongodb.net/spicybot?retryWrites=true&w=majority&appName=Cluster0'
-    MONGO_DB_NAME = 'spicybot'
-    # REMOVED: VIDEO_CHANNEL_ID = -1002621716446 # Your video storage channel ID
-    BUY_BOT_URL = 'https://t.me/SpicyNyraaSupport_bot' # MODIFIED: Added https://
-    OWNER_ID = 6612030110 # The main owner ID, cannot be removed
-    TUTORIAL_LINK_2 = 'https://t.me/urlshortenertutorial'
-    TOKEN_EXPIRY = 1800  # 30 minutes in seconds (for regular tokens, not premium)
-    NEW_USER_TOKENS = 1
-    REFERRAL_BONUS = 1
-    REFRESH_BONUS = 1
-    PREMIUM_TRIAL_PRICE_INR = 33
-    PREMIUM_MONTH_PRICE_INR = 99
-    FREE_USER_SAVE_LIMIT = 5 # Maximum saved videos for free users
-    # REMOVED: FORCE_SUB_CHANNEL_ID = -1002622483638
-    # REMOVED: FORCE_SUB_CHANNEL_LINK = "https://t.me/SpicyNyraa"
-    # REMOVED: FORCE_SUB_CHANNEL_ID_2 = -1002539389126 # ADDED: Second force sub channel
-    # REMOVED: FORCE_SUB_CHANNEL_LINK_2 = "https://t.me/+uD3cGGm-Dso0NGU1" # ADDED: Second force sub link
-    MENU_EXPIRY_MINUTES = 10
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = 1800 # 30 minutes for refresh token links to be valid
-    # --- New Feature Configuration ---
-    NEW_USER_SCROLLS = 0 # Number of free scrolls for new users
-    DAILY_FREE_SCROLLS = 0 # Number of free video scrolls for users without a token
-    FREE_SCROLL_RESET_HOURS = 6 # Hours after which the free scroll limit resets
-    FREE_BATCH_LIMIT = 0  # Number of free batches a user can watch daily without a token
-    FREE_LIMIT_RESET_HOURS = 12  # Hours after which the free batch limit resets
-    TOKEN_ACCESS_HOURS = 0.5  # How many hours of access one token provides
-    VERIFICATION_TOKEN_DURATION_HOURS = 0.5 # Hours of access granted via human verification
+    # Essential Variables (No Defaults)
+    BOT_TOKEN = os.environ.get('BOT_TOKEN')
+    API_ID = os.environ.get('API_ID')
+    API_HASH = os.environ.get('API_HASH')
+    BOT_USERNAME = os.environ.get('BOT_USERNAME')
+    MONGO_URI = os.environ.get('MONGO_URI')
+    MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME')
+
+    # Configuration Parameters (With Defaults)
+    BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/SpicyNyraaSupport_bot')
+    OWNER_ID = int(os.environ.get('OWNER_ID', 6612030110))
+    TUTORIAL_LINK_2 = os.environ.get('TUTORIAL_LINK_2', 'https://t.me/urlshortenertutorial')
+    TOKEN_EXPIRY = int(os.environ.get('TOKEN_EXPIRY', 1800))
+    NEW_USER_TOKENS = int(os.environ.get('NEW_USER_TOKENS', 1))
+    REFERRAL_BONUS = int(os.environ.get('REFERRAL_BONUS', 1))
+    REFRESH_BONUS = int(os.environ.get('REFRESH_BONUS', 1))
+    PREMIUM_TRIAL_PRICE_INR = int(os.environ.get('PREMIUM_TRIAL_PRICE_INR', 33))
+    PREMIUM_MONTH_PRICE_INR = int(os.environ.get('PREMIUM_MONTH_PRICE_INR', 99))
+    FREE_USER_SAVE_LIMIT = int(os.environ.get('FREE_USER_SAVE_LIMIT', 5))
+    MENU_EXPIRY_MINUTES = int(os.environ.get('MENU_EXPIRY_MINUTES', 10))
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = int(os.environ.get('REFRESH_TOKEN_LINK_EXPIRY_SECONDS', 1800))
+    NEW_USER_SCROLLS = int(os.environ.get('NEW_USER_SCROLLS', 0))
+    DAILY_FREE_SCROLLS = int(os.environ.get('DAILY_FREE_SCROLLS', 0))
+    FREE_SCROLL_RESET_HOURS = int(os.environ.get('FREE_SCROLL_RESET_HOURS', 6))
+    FREE_BATCH_LIMIT = int(os.environ.get('FREE_BATCH_LIMIT', 0))
+    FREE_LIMIT_RESET_HOURS = int(os.environ.get('FREE_LIMIT_RESET_HOURS', 12))
+    TOKEN_ACCESS_HOURS = float(os.environ.get('TOKEN_ACCESS_HOURS', 0.5))
+    VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 0.5))
+
 try:
     config = BotConfig()
     # UPDATED: Removed force sub channel checks
     if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI, config.BOT_USERNAME]):
         raise ValueError("One or more essential configuration variables are not set. Please check all config variables.")
+
+    # Cast essential numeric variables to correct type after checking they exist
+    config.API_ID = int(config.API_ID)
 except Exception as e:
     raise RuntimeError(f"Failed to load bot configuration: {e}")
 
