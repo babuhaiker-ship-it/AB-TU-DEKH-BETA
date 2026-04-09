@@ -43,7 +43,7 @@ class BotConfig:
     MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME')
 
     # Configuration Parameters (With Defaults)
-    BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/nyraapaybot')
+    BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/nyraapaybot?start')
     OWNER_ID = int(os.environ.get('OWNER_ID', 6612030110))
     TUTORIAL_LINK_2 = os.environ.get('TUTORIAL_LINK_2', 'https://t.me/urlshortenertutorial')
     TOKEN_EXPIRY = int(os.environ.get('TOKEN_EXPIRY', 1800))
