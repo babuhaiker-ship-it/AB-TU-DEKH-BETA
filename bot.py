@@ -3411,16 +3411,16 @@ async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery)
         logger.error(f"Admin {user_id} failed to confirm category deletion: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred during category deletion. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("addtoken") & filters.private & admin_only)
+@app.on_message(filters.command(["addtoken", "addpremium", "add_premium"]) & filters.private & admin_only)
 async def addtoken_cmd(client: Client, message: Message):
-    """Admin command to add tokens to a specific user and grant premium access."""
+    """Admin command to grant premium access to a specific user for a number of days."""
     user_id = message.from_user.id
-    logger.info(f"Admin {user_id} requested to add token (premium).")
+    logger.info(f"Admin {user_id} requested to add premium access.")
     try:
         args = message.text.split()
         if len(args) < 3:
-            logger.warning(f"Admin {user_id} used addtoken with insufficient arguments: {message.text}")
-            await message.reply("Usage: <code>/addtoken &lt;user_id&gt; &lt;num_tokens&gt;</code>\n1 token = 30 minutes of access. 📝")
+            logger.warning(f"Admin {user_id} used addpremium with insufficient arguments: {message.text}")
+            await message.reply("Usage: <code>/addpremium &lt;user_id&gt; &lt;num_days&gt;</code>\nExample: /addpremium 12345678 30 (for 30 days unlimited access) 📝")
             return
 
         target_user_id = int(args[1])
@@ -3430,30 +3430,32 @@ async def addtoken_cmd(client: Client, message: Message):
             await message.reply("User ID must be a positive integer. 🔢")
             return
 
-        num_tokens = int(args[2])
-        if num_tokens <= 0:
-            logger.warning(f"Admin {user_id} provided invalid number of tokens: {num_tokens}.")
-            await message.reply("Number of tokens must be a positive integer. 🔢")
+        num_days = int(args[2])
+        if num_days <= 0:
+            logger.warning(f"Admin {user_id} provided invalid number of days: {num_days}.")
+            await message.reply("Number of days must be a positive integer. 🔢")
             return
 
         user_doc = users_collection.find_one({'user_id': target_user_id})
         if not user_doc:
-            logger.warning(f"Admin {user_id} attempted to add tokens to non-existent user {target_user_id}.")
+            logger.warning(f"Admin {user_id} attempted to add premium to non-existent user {target_user_id}.")
             await message.reply("User not found in database. 🧐")
             return
 
-        add_token_info = add_token(target_user_id, duration_seconds=num_tokens * config.TOKEN_EXPIRY, is_admin_granted=True)
+        # Grant unlimited access for specified number of days
+        duration_seconds = num_days * 86400
+        add_token_info = add_token(target_user_id, duration_seconds=duration_seconds, is_admin_granted=True)
 
         if not add_token_info:
             await message.reply("❌ Failed to grant premium access. Please try again. 🐛")
             return
 
         expiry_date = add_token_info['expires_at']
-        logger.info(f"Admin {user_id} granted {num_tokens} tokens (30 mins each) to user {target_user_id}. Expires: {expiry_date}")
-        await message.reply(f"✅ Granted <b>{num_tokens}</b> tokens (30 mins each) to user <b>{target_user_id}</b>. New expiry: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}. 🎉")
+        logger.info(f"Admin {user_id} granted {num_days} days of premium to user {target_user_id}. Expires: {expiry_date}")
+        await message.reply(f"✅ Granted <b>{num_days}</b> days of unlimited Premium access to user <b>{target_user_id}</b>. New expiry: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}. 🎉")
 
         try:
-            await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{num_tokens}</b> access tokens by an admin! Your access now expires on <b>{expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 💎")
+            await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{num_days}</b> days of unlimited Premium Access by an admin! Your access now expires on <b>{expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 💎")
             users_collection.update_one(
                 {'user_id': target_user_id},
                 {'$set': {'last_premium_check_status': True}}
@@ -3470,16 +3472,16 @@ async def addtoken_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} error adding tokens/premium access: {e}", exc_info=True)
         await message.reply("❌ Failed to add premium access. Please try again. 🐛")
 
-@app.on_message(filters.command("removetoken") & filters.private & admin_only)
+@app.on_message(filters.command(["removetoken", "removepremium", "remove_premium"]) & filters.private & admin_only)
 async def removetoken_cmd(client: Client, message: Message):
-    """Admin command to remove all tokens/premium access from a user."""
+    """Admin command to remove all premium access/tokens from a user."""
     admin_user_id = message.from_user.id
-    logger.info(f"Admin {admin_user_id} requested to remove tokens.")
+    logger.info(f"Admin {admin_user_id} requested to remove premium.")
     try:
         args = message.text.split()
         if len(args) < 2:
-            logger.warning(f"Admin {admin_user_id} used removetoken with insufficient arguments: {message.text}")
-            await message.reply("Usage: <code>/removetoken &lt;user_id&gt;</code> 📝")
+            logger.warning(f"Admin {admin_user_id} used removepremium with insufficient arguments: {message.text}")
+            await message.reply("Usage: <code>/removepremium &lt;user_id&gt;</code> 📝")
             return
 
         target_user_id = int(args[1])
@@ -3508,18 +3510,18 @@ async def removetoken_cmd(client: Client, message: Message):
                 {'user_id': target_user_id},
                 {'$set': {'last_premium_check_status': False}}
             )
-            logger.info(f"Admin {admin_user_id} removed all tokens for user {target_user_id}.")
-            await message.reply(f"✅ All tokens and premium access for user <b>{target_user_id}</b> have been revoked.")
+            logger.info(f"Admin {admin_user_id} removed premium access for user {target_user_id}.")
+            await message.reply(f"✅ Premium access and all active tokens for user <b>{target_user_id}</b> have been revoked.")
 
             try:
-                await client.send_message(target_user_id, "⚠️ Your premium access and all active tokens have been revoked by an administrator.")
+                await client.send_message(target_user_id, "⚠️ Your Premium Access has been revoked by an administrator.")
             except (UserIsBlocked, ChatInvalid):
-                logger.warning(f"Could not notify user {target_user_id} about token removal; user blocked or chat invalid.")
+                logger.warning(f"Could not notify user {target_user_id} about premium removal; user blocked or chat invalid.")
             except Exception as notify_e:
-                logger.error(f"Failed to notify user {target_user_id} about token removal: {notify_e}")
+                logger.error(f"Failed to notify user {target_user_id} about premium removal: {notify_e}")
         else:
-            await message.reply(f"User <b>{target_user_id}</b> had no active tokens to remove.")
-            logger.info(f"Admin {admin_user_id} attempted to remove tokens, but user {target_user_id} had none.")
+            await message.reply(f"User <b>{target_user_id}</b> had no active Premium Access to remove.")
+            logger.info(f"Admin {admin_user_id} attempted to remove premium, but user {target_user_id} had none.")
 
     except ValueError:
         logger.warning(f"Admin {admin_user_id} provided invalid input for removetoken: {message.text}")
