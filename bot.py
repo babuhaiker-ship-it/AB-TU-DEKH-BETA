@@ -1291,8 +1291,8 @@ def video_nav_keyboard(
             dislike_cb = f"dislike|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"
 
         buttons.append([
-            InlineKeyboardButton("👍 Like", callback_data=f"like_{video_uuid}"),
-            InlineKeyboardButton("👎 Dislike", callback_data=dislike_cb)
+            InlineKeyboardButton("👎 Dislike", callback_data=dislike_cb),
+            InlineKeyboardButton("👍 Like", callback_data=f"like_{video_uuid}")
         ])
 
     # --- Navigation Row (Previous/Next) ---
