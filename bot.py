@@ -6,10 +6,10 @@ import logging
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as PyUser, Chat as PyChat
 )
 from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
-from pyrogram.enums import ChatMemberStatus
+from pyrogram.enums import ChatMemberStatus, ChatType
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
 from aiohttp import ClientTimeout
@@ -4981,6 +4981,30 @@ async def monitor_ssrb_verifications(client: Client):
                     )
                 except Exception as e:
                     logger.warning(f"Failed to notify user {user_id} about ATDB token: {e}")
+
+                # NEW: Automatically load request if pending command exists
+                user_doc = users_collection.find_one_and_update(
+                    {'user_id': user_id},
+                    {'$unset': {'pending_command': ""}},
+                    return_document=ReturnDocument.BEFORE
+                )
+                pending_command = user_doc.get('pending_command') if user_doc else None
+
+                if pending_command:
+                    try:
+                        await client.send_message(user_id, "✅ Verification Success! Loading your content now...")
+                        # Reuse start_cmd by creating a mock message
+                        mock_msg = Message(
+                            id=0,
+                            client=client,
+                            text=f"/start {pending_command}",
+                            from_user=PyUser(id=user_id, is_bot=False, first_name="User"),
+                            chat=PyChat(id=user_id, type=ChatType.PRIVATE),
+                            date=datetime.utcnow()
+                        )
+                        create_tracked_task(start_cmd(client, mock_msg))
+                    except Exception as e:
+                        logger.error(f"Failed to auto-trigger pending command for user {user_id}: {e}")
 
                 # Mark as consumed
                 ssrb_verifications_collection.update_one(
