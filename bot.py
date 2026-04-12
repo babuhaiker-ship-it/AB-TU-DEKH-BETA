@@ -1283,6 +1283,18 @@ def video_nav_keyboard(
     """
     buttons = []
 
+    # --- Interaction Row (Like/Dislike) ---
+    if not is_batch and not is_shared_link:
+        if category == "default (all)":
+            dislike_cb = f"dislike_default|{video_uuid}"
+        else:
+            dislike_cb = f"dislike|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"
+
+        buttons.append([
+            InlineKeyboardButton("👍 Like", callback_data=f"like_{video_uuid}"),
+            InlineKeyboardButton("👎 Dislike", callback_data=dislike_cb)
+        ])
+
     # --- Navigation Row (Previous/Next) ---
     if category == "default (all)":
         nav_buttons = [InlineKeyboardButton("➡️ Next", callback_data=f"next_default|{video_uuid}")]
@@ -1654,6 +1666,7 @@ async def start_cmd(client: Client, message: Message):
 
                 elif deep_link_type == 'batch':
                     if not user_can_access_video(user_id):
+                        users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
                         await send_access_limit_reached_message(client, message.chat.id)
                         return
 
@@ -2241,6 +2254,25 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         clear_active_video_message(user_id)
 
 
+@app.on_callback_query(filters.regex(r"^dislike\|(.+)\|(.+)\|(\d+)$"))
+async def dislike_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'Dislike' video callback by jumping to the next video."""
+    user_id = callback_query.from_user.id
+    try:
+        parts = callback_query.data.split('|')
+        # Reconstruct next callback data
+        next_data = f"next|{parts[1]}|{parts[2]}|{parts[3]}"
+
+        await callback_query.answer("Skipping video... 👎", show_alert=False)
+        logger.info(f"User {user_id} disliked video. Jumping to next.")
+
+        # Mock callback query for navigate_video
+        callback_query.data = next_data
+        await navigate_video(client, callback_query)
+    except Exception as e:
+        logger.error(f"User {user_id} failed in dislike_callback: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to skip.", show_alert=True)
+
 @app.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|(.+)\|(\d+)$")) # Updated regex to capture is_saved flag
 async def navigate_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' video navigation."""
@@ -2376,6 +2408,21 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         if user_id in processing_navigation_lock:
             processing_navigation_lock.remove(user_id)
 
+
+@app.on_callback_query(filters.regex(r"^dislike_default\|(.+)$"))
+async def dislike_default_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'Dislike' for default category by jumping next."""
+    user_id = callback_query.from_user.id
+    try:
+        video_uuid = callback_query.data.split('|')[1]
+        await callback_query.answer("Skipping video... 👎", show_alert=False)
+        logger.info(f"User {user_id} disliked default video. Jumping to next.")
+
+        callback_query.data = f"next_default|{video_uuid}"
+        await navigate_default_category(client, callback_query)
+    except Exception as e:
+        logger.error(f"User {user_id} failed in dislike_default_callback: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to skip.", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^(next_default|prev_default)\|(.+)$"))
 async def navigate_default_category(client: Client, callback_query: CallbackQuery):
@@ -2696,6 +2743,33 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             except: pass
         logger.error(f"User {user_id} failed to send token earning options: {e}", exc_info=True)
         await handle_error(client, message, e)
+
+@app.on_callback_query(filters.regex(r"^like_(.+)$"))
+async def like_callback(client: Client, callback_query: CallbackQuery):
+    """Handles 'Like' video callback."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 1)[1]
+
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    create_tracked_task(check_premium_status_and_notify(client, user_id))
+
+    try:
+        share_payload = f"video_{video_uuid}_{user_id}"
+        share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start={share_payload}"
+
+        await callback_query.answer("You liked this video! ❤️", show_alert=False)
+        logger.info(f"User {user_id} liked video {video_uuid}.")
+        await callback_query.message.reply(
+            f"💖 <b>Share your loved videos to the friends!</b> 🎁\n\n<code>{html.escape(share_link)}</code>\n\nShare this link and earn tokens! 📢",
+            quote=True,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.error(f"User {user_id} failed in like_callback: {e}", exc_info=True)
+        await callback_query.answer("❌ Something went wrong.", show_alert=True)
 
 @app.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client: Client, callback_query: CallbackQuery):
