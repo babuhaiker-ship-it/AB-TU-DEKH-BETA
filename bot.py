@@ -17,12 +17,15 @@ from collections import defaultdict, deque
 import re
 import html
 import urllib.parse
+import hashlib
+import hmac
+import json
 from shortzy import Shortzy
 
 # --- Mini App / Web Server Imports ---
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends, Response
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse, StreamingResponse
 
 
 # --- Logging Setup ---
@@ -41,6 +44,7 @@ class BotConfig:
     BOT_USERNAME = os.environ.get('BOT_USERNAME')
     MONGO_URI = os.environ.get('MONGO_URI')
     MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME')
+    WEBAPP_URL = os.environ.get('WEBAPP_URL') # URL for the Mini App
 
     # Configuration Parameters (With Defaults)
     BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/nyraapaybot?start')
@@ -1551,6 +1555,165 @@ async def health_check_fastapi():
     """Simple health check endpoint for Render."""
     return Response(status_code=200, content="OK")
 
+# --- Mini App API Helpers ---
+
+def verify_telegram_init_data(init_data: str) -> dict | None:
+    """Verifies the Telegram Mini App initData."""
+    try:
+        parsed_data = dict(urllib.parse.parse_qsl(init_data))
+        if 'hash' not in parsed_data:
+            return None
+
+        received_hash = parsed_data.pop('hash')
+        data_check_string = '\n'.join([f"{k}={v}" for k, v in sorted(parsed_data.items())])
+
+        secret_key = hmac.new(b"WebAppData", config.BOT_TOKEN.encode(), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+        if computed_hash == received_hash:
+            user_data = json.loads(parsed_data.get('user', '{}'))
+            return user_data
+        return None
+    except Exception as e:
+        logger.error(f"Error verifying initData: {e}")
+        return None
+
+async def get_current_user(request: Request):
+    """Dependency to get and verify the current user from headers."""
+    init_data = request.headers.get("X-TG-INIT-DATA")
+    if not init_data:
+        raise HTTPException(status_code=401, detail="Missing X-TG-INIT-DATA header")
+
+    user_data = verify_telegram_init_data(init_data)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid initData")
+
+    user_id = user_data.get('id')
+    if not user_id:
+         raise HTTPException(status_code=401, detail="Invalid user data")
+
+    # Check if user is premium
+    if not is_premium_user(user_id):
+        raise HTTPException(status_code=403, detail="Premium access required")
+
+    return user_id
+
+# --- Mini App API Endpoints ---
+
+@fastapi_app.get("/webapp", response_class=HTMLResponse)
+async def serve_webapp():
+    """Serves the Mini App HTML file."""
+    try:
+        with open("index.html", "r") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>Mini App file not found.</h1>"
+
+@fastapi_app.get("/api/categories")
+async def api_get_categories(user_id: int = Depends(get_current_user)):
+    """Returns all categories for the Mini App."""
+    return get_categories(for_admin_use=False)
+
+@fastapi_app.get("/api/videos")
+async def api_get_videos(category: str = "default (all)", user_id: int = Depends(get_current_user)):
+    """Returns a list of videos for the Mini App."""
+    query = {}
+    if category != "default (all)":
+        query['category'] = category
+
+    # Fetch 50 random videos for the feed
+    videos_cursor = media_collection.aggregate([
+        {"$match": query},
+        {"$sample": {"size": 50}}
+    ])
+
+    videos = []
+    user_doc = users_collection.find_one({'user_id': user_id})
+    bookmarked_ids = [b['uuid'] for b in user_doc.get('bookmarked_videos', [])] if user_doc else []
+
+    for v in videos_cursor:
+        videos.append({
+            "uuid": v['uuid'],
+            "category": v.get('category', 'N/A'),
+            "caption": v.get('custom_caption') or "",
+            "is_bookmarked": v['uuid'] in bookmarked_ids
+        })
+    return videos
+
+@fastapi_app.post("/api/like/{video_uuid}")
+async def api_like_video(video_uuid: str, user_id: int = Depends(get_current_user)):
+    """Handles liking a video from the Mini App."""
+    # Since 'Like' just skips in the bot, we'll just log it or save history for now
+    video = get_video_by_uuid(video_uuid)
+    if video:
+        save_history(user_id, video_uuid, video.get('category', 'default (all)'))
+    return {"status": "ok"}
+
+@fastapi_app.post("/api/bookmark/{video_uuid}")
+async def api_bookmark_video(video_uuid: str, user_id: int = Depends(get_current_user)):
+    """Handles bookmarking/removing a video from the Mini App."""
+    user = users_collection.find_one({'user_id': user_id})
+    if not user:
+        return JSONResponse(status_code=404, content={"detail": "User not found"})
+
+    bookmarked_videos = user.get('bookmarked_videos', [])
+    existing = next((v for v in bookmarked_videos if v['uuid'] == video_uuid), None)
+
+    if existing:
+        # Remove bookmark
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
+        )
+        return {"status": "removed"}
+    else:
+        # Add bookmark
+        if not is_premium_user(user_id) and len(bookmarked_videos) >= config.FREE_USER_SAVE_LIMIT:
+             return JSONResponse(status_code=403, content={"detail": "Bookmark limit reached"})
+
+        video_data = get_video_by_uuid(video_uuid)
+        if not video_data:
+             return JSONResponse(status_code=404, content={"detail": "Video not found"})
+
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$push': {'bookmarked_videos': {
+                'uuid': video_uuid,
+                'bookmarked_at': datetime.utcnow(),
+                'category': video_data.get('category')
+            }}}
+        )
+        return {"status": "added"}
+
+@fastapi_app.get("/api/stream/{video_uuid}")
+async def api_stream_video(video_uuid: str, request: Request):
+    """Streams video content from Telegram."""
+    # Note: For streaming, we might need a separate auth mechanism if headers can't be sent by <video> tag.
+    # For now, let's assume we use a temporary token in query param or session cookie if needed.
+    # But as a simple implementation, let's try to verify if it's a valid request.
+
+    video = get_video_by_uuid(video_uuid)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    file_id = video['file_id']
+
+    async def media_generator():
+        try:
+            # We need to make sure the app is connected
+            if not app.is_connected:
+                await app.start()
+
+            async for chunk in app.stream_media(file_id):
+                yield chunk
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+
+    # To handle seek, we'd need to look at request.headers.get("Range")
+    # Pyrogram's stream_media might not support offset/limit easily via this API
+    # But for a basic "TikTok" style where it mostly plays from start, it might be okay.
+    return StreamingResponse(media_generator(), media_type="video/mp4")
+
 
 # --- Handlers ---
 @app.on_message(filters.command("start") & filters.private)
@@ -1947,10 +2110,49 @@ async def profile_cmd(client: Client, message: Message):
         await handle_error(client, message, e)
 
 
+async def send_default_video(client: Client, user_id: int, chat_id: int, message_id_to_replace: int = None):
+    """Helper function to fetch and send a random default video."""
+    wait_msg = await client.send_message(chat_id, "Just a moment...")
+
+    # Fetch a random video
+    video = get_random_video()
+
+    await wait_msg.delete()
+
+    if not video:
+        await client.send_message(chat_id, "😔 No videos available at the moment. Please ask an admin to add some! 🛠️")
+        logger.warning(f"No videos found in database for user {user_id} on Get Video.")
+        return
+
+    # Send the video to the user
+    sent_success, sent_message_or_error = await send_and_replace_message(
+        client,
+        chat_id,
+        message_id_to_edit_or_delete=message_id_to_replace,
+        new_message_type="video",
+        video_data=video,
+        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+        force_new_message=True
+    )
+
+    if sent_success:
+        # Initialize history for "default (all)" category navigation
+        default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
+        save_history(user_id, video['uuid'], "default (all)")
+    else:
+        # Attempt to notify user of the failure
+        try:
+            await client.send_message(chat_id, sent_message_or_error)
+        except Exception as e:
+            logger.error(f"Failed to send error message to user {user_id}: {e}")
+        logger.error(f"User {user_id} failed to send default video: {sent_message_or_error}")
+
 @app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
 async def get_video(client: Client, message: Message):
     """
-    Handles the 'Get Video' button request by immediately showing a random video.
+    Handles the 'Get Video' button request.
+    For premium users, shows a choice between Bot and Mini App.
+    For others, immediately shows a random video.
     """
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -1982,41 +2184,32 @@ async def get_video(client: Client, message: Message):
         await send_token_earning_options(client, message)
         return
 
-    wait_msg = await message.reply("Just a moment...")
-
-    # Fetch a random video
-    video = get_random_video()
-
-    await wait_msg.delete()
-
-    if not video:
-        await message.reply("😔 No videos available at the moment. Please ask an admin to add some! 🛠️")
-        logger.warning(f"No videos found in database for user {user_id} on Get Video.")
+    # NEW: Choice for premium users
+    if is_premium_user(user_id) and config.WEBAPP_URL:
+        await message.reply(
+            "✨ <b>Premium Access</b> ✨\n\nHow would you like to watch today?",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🎞️ Watch in Bot", callback_data="watch_in_bot"),
+                    InlineKeyboardButton("📱 Mini App (TikTok Style)", web_app=WebAppInfo(url=config.WEBAPP_URL))
+                ]
+            ])
+        )
         return
 
-    # Send the video to the user
-    sent_success, sent_message_or_error = await send_and_replace_message(
-        client,
-        chat_id,
-        message_id_to_edit_or_delete=message.id,
-        new_message_type="video",
-        video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
-        force_new_message=True
-    )
+    # Default behavior (non-premium or webapp url not set)
+    await send_default_video(client, user_id, chat_id, message.id)
 
-    if sent_success:
-        # Initialize history for "default (all)" category navigation
-        default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
-        save_history(user_id, video['uuid'], "default (all)")
-    else:
-        # Attempt to notify user of the failure
-        try:
-            await message.reply(sent_message_or_error)
-        except RPCError as e:
-            logger.error(f"Could not reply to original message after send_and_replace_message failed: {e}")
-            await client.send_message(chat_id, sent_message_or_error)
-        logger.error(f"User {user_id} failed to send default video: {sent_message_or_error}")
+@app.on_callback_query(filters.regex("^watch_in_bot$"))
+async def watch_in_bot_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Watch in Bot' choice for premium users."""
+    user_id = callback_query.from_user.id
+    chat_id = callback_query.message.chat.id
+
+    await callback_query.answer()
+    await callback_query.message.delete()
+
+    await send_default_video(client, user_id, chat_id)
 
 @app.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):

@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SpicyNyraa Mini App</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css" />
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            background-color: #000;
+            color: #fff;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        .swiper {
+            width: 100%;
+            height: 100%;
+        }
+        .swiper-slide {
+            position: relative;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        .video-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            padding: 80px 20px 40px 20px;
+            background: linear-gradient(transparent, rgba(0,0,0,0.8));
+            pointer-events: none;
+        }
+        .side-bar {
+            position: absolute;
+            right: 15px;
+            bottom: 120px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            align-items: center;
+            z-index: 10;
+        }
+        .icon-btn {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        .icon-btn:active {
+            transform: scale(0.9);
+        }
+        .icon-btn.active svg {
+            fill: #ff3b30;
+            stroke: #ff3b30;
+        }
+        .loading-overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #000;
+            z-index: 5;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255,255,255,0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .category-badge {
+            background: rgba(255,255,255,0.2);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-bottom: 8px;
+            display: inline-block;
+        }
+        #category-menu {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 100;
+            display: none;
+            padding: 40px 20px;
+            overflow-y: auto;
+        }
+        .category-item {
+            padding: 15px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            font-size: 18px;
+        }
+        .top-nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 50;
+            background: linear-gradient(rgba(0,0,0,0.5), transparent);
+        }
+    </style>
+</head>
+<body>
+    <div class="top-nav">
+        <div class="text-xl font-bold italic tracking-wider text-red-500">SpicyNyraa</div>
+        <button id="open-categories" class="bg-white/20 px-4 py-2 rounded-full text-sm backdrop-blur-md">Categories ▾</button>
+    </div>
+
+    <div class="swiper mySwiper">
+        <div class="swiper-wrapper" id="video-container">
+            <!-- Videos will be injected here -->
+        </div>
+    </div>
+
+    <div id="category-menu">
+        <div class="flex justify-between items-center mb-6">
+            <h2 class="text-2xl font-bold">Categories</h2>
+            <button id="close-categories" class="text-3xl">&times;</button>
+        </div>
+        <div id="categories-list">
+            <!-- Categories will be injected here -->
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js"></script>
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+        tg.ready();
+
+        const videoContainer = document.getElementById('video-container');
+        const categoriesList = document.getElementById('categories-list');
+        const categoryMenu = document.getElementById('category-menu');
+        let swiper;
+        let currentCategory = "default (all)";
+        let videos = [];
+
+        async function apiRequest(endpoint, method = 'GET') {
+            const response = await fetch(endpoint, {
+                method: method,
+                headers: {
+                    'X-TG-INIT-DATA': tg.initData,
+                    'Content-Type': 'application/json'
+                }
+            });
+            if (!response.ok) {
+                if (response.status === 403) {
+                    tg.showAlert("Premium access required to use this Mini App.");
+                    tg.close();
+                }
+                throw new Error('API request failed');
+            }
+            return response.json();
+        }
+
+        async function loadCategories() {
+            try {
+                const cats = await apiRequest('/api/categories');
+                categoriesList.innerHTML = cats.map(cat => `
+                    <div class="category-item" onclick="selectCategory('${cat}')">${cat}</div>
+                `).join('');
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function loadVideos(category = "default (all)") {
+            tg.MainButton.showProgress();
+            try {
+                const data = await apiRequest(`/api/videos?category=${encodeURIComponent(category)}`);
+                videos = data;
+                renderVideos();
+                if (swiper) swiper.destroy();
+                initSwiper();
+            } catch (e) {
+                tg.showAlert("Failed to load videos.");
+            } finally {
+                tg.MainButton.hideProgress();
+            }
+        }
+
+        function renderVideos() {
+            videoContainer.innerHTML = videos.map((v, index) => `
+                <div class="swiper-slide" data-uuid="${v.uuid}">
+                    <div class="loading-overlay" id="loading-${index}">
+                        <div class="spinner"></div>
+                    </div>
+                    <video
+                        id="video-${index}"
+                        loop
+                        playsinline
+                        preload="none"
+                        onwaiting="document.getElementById('loading-${index}').style.display='flex'"
+                        onplaying="document.getElementById('loading-${index}').style.display='none'"
+                    >
+                        <source src="/api/stream/${v.uuid}" type="video/mp4">
+                    </video>
+                    <div class="side-bar">
+                        <div class="icon-btn" onclick="likeVideo('${v.uuid}', this)">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                            </svg>
+                        </div>
+                        <div class="icon-btn ${v.is_bookmarked ? 'active text-red-500' : ''}" onclick="bookmarkVideo('${v.uuid}', this)">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8" fill="${v.is_bookmarked ? 'currentColor' : 'none'}" viewBox="0 0 24 24" stroke="currentColor">
+                              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+                            </svg>
+                        </div>
+                    </div>
+                    <div class="video-overlay">
+                        <span class="category-badge">${v.category}</span>
+                        <h3 class="text-lg font-semibold">${v.caption || 'Video'}</h3>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function initSwiper() {
+            swiper = new Swiper(".mySwiper", {
+                direction: "vertical",
+                slidesPerView: 1,
+                mousewheel: true,
+                on: {
+                    slideChange: function () {
+                        pauseAllVideos();
+                        playVideoAt(this.activeIndex);
+                        // Preload next video
+                        if (this.activeIndex + 1 < videos.length) {
+                             const nextVideo = document.getElementById(`video-${this.activeIndex + 1}`);
+                             if (nextVideo) nextVideo.preload = "auto";
+                        }
+                    }
+                }
+            });
+            playVideoAt(0);
+        }
+
+        function playVideoAt(index) {
+            const video = document.getElementById(`video-${index}`);
+            if (video) {
+                video.preload = "auto";
+                video.play().catch(e => console.log("Auto-play blocked"));
+            }
+        }
+
+        function pauseAllVideos() {
+            document.querySelectorAll('video').forEach(v => {
+                v.pause();
+            });
+        }
+
+        function selectCategory(cat) {
+            currentCategory = cat;
+            categoryMenu.style.display = 'none';
+            document.getElementById('open-categories').innerText = cat === "default (all)" ? "Categories ▾" : cat + " ▾";
+            loadVideos(cat);
+        }
+
+        async function likeVideo(uuid, btn) {
+            // Heart animation
+            btn.classList.add('scale-125');
+            setTimeout(() => btn.classList.remove('scale-125'), 200);
+
+            try {
+                await apiRequest(`/api/like/${uuid}`, 'POST');
+                // Move to next video on like
+                swiper.slideNext();
+            } catch (e) {}
+        }
+
+        async function bookmarkVideo(uuid, btn) {
+            try {
+                const res = await apiRequest(`/api/bookmark/${uuid}`, 'POST');
+                const svg = btn.querySelector('svg');
+                if (res.status === 'added') {
+                    btn.classList.add('active', 'text-red-500');
+                    svg.setAttribute('fill', 'currentColor');
+                    tg.HapticFeedback.notificationOccurred('success');
+                } else {
+                    btn.classList.remove('active', 'text-red-500');
+                    svg.setAttribute('fill', 'none');
+                    tg.HapticFeedback.selectionChanged();
+                }
+            } catch (e) {}
+        }
+
+        document.getElementById('open-categories').onclick = () => categoryMenu.style.display = 'block';
+        document.getElementById('close-categories').onclick = () => categoryMenu.style.display = 'none';
+
+        // Load initial data
+        loadCategories();
+        loadVideos();
+    </script>
+</body>
+</html>
