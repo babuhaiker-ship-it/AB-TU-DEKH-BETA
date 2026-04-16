@@ -545,9 +545,14 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
                 return referrer_id
     elif ref_code.startswith('video_'):
         try:
-            parts = ref_code.split('_')
-            if len(parts) == 3:
-                referrer_id = int(parts[2])
+            # ref_code format: video_UUID_REFERRERID
+            parts = ref_code.rsplit('_', 1)
+            if len(parts) == 2:
+                referrer_id_str = parts[1]
+                if referrer_id_str.isdigit() or (referrer_id_str.startswith('-') and referrer_id_str[1:].isdigit()):
+                    referrer_id = int(referrer_id_str)
+                else:
+                    return None
 
                 if referrer_id != new_user_id:
                     ref_user = users_collection.find_one({'user_id': referrer_id})
@@ -1175,7 +1180,7 @@ async def send_and_replace_message(
             except MessageIdInvalid as e:
                 logger.warning(f"copy_message failed for video {video_data['uuid']} (Msg ID: {video_data.get('message_id')}). Reason: {e}. Triggering deletion.")
                 await client.send_message(chat_id, "Oops! This video seems to be permanently unavailable and has been removed. Trying the next one... 🔄")
-                await delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id'))
+                create_tracked_task(delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id')))
                 return False, "Video was permanently unavailable."
             except Exception as e:
                 logger.error(f"copy_message failed for video {video_data['uuid']}. Error: {e}. Falling back to send_video.", exc_info=True)
@@ -1222,12 +1227,12 @@ async def send_and_replace_message(
                     except Exception as heal_e:
                         logger.error(f"Self-healing failed for video {video_data['uuid']}: {heal_e}", exc_info=True)
                         await client.send_message(chat_id, "Oops! This video is unavailable and has been removed. Trying the next one... 🔄")
-                        await delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id'))
+                        create_tracked_task(delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id')))
                         return False, "Video was unavailable and self-healing failed."
                 except Exception as e2:
                     logger.error(f"Fallback send_video also failed for {video_data['uuid']}: {e2}. The video might be broken.", exc_info=True)
                     await client.send_message(chat_id, "Oops! This video is unavailable and has been removed. Trying the next one... 🔄")
-                    await delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id'))
+                    create_tracked_task(delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id')))
                     return False, "Video was unavailable by all methods."
 
     # --- Handle Text Message Sending/Editing ---
@@ -1449,9 +1454,10 @@ async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> 
     Handles a user attempting to view a video shared via a deep link.
     Returns (success: bool, result: dict | str), where result is video data on success, or an error message on failure.
     """
+    logger.info(f"Handling shared video request: user_id={user_id}, video_uuid={video_uuid}")
     video = get_video_by_uuid(video_uuid)
     if not video:
-        logger.warning(f"User {user_id} attempted to view non-existent shared video {video_uuid}.")
+        logger.warning(f"User {user_id} attempted to view non-existent shared video. UUID requested: '{video_uuid}'")
         return False, "Oops, invalid link. Try again! 😔"
 
     if video.get('banned'):
@@ -1670,7 +1676,19 @@ async def start_cmd(client: Client, message: Message):
                 if deep_link_arg.startswith('token_'):
                     deep_link_type, deep_link_data = 'token_refresh', deep_link_arg[6:]
                 elif deep_link_arg.startswith('video_'):
-                    deep_link_type, deep_link_data = 'video_share', deep_link_arg.split('_')[1]
+                    # Handle formats like video_UUID or video_UUID_REFERRERID
+                    video_payload = deep_link_arg[6:]
+                    if '_' in video_payload:
+                        # The payload is UUID_REFERRERID or just UUID
+                        # Use rsplit to correctly handle UUIDs that might contain underscores
+                        p = video_payload.rsplit('_', 1)
+                        if p[1].isdigit() or (p[1].startswith('-') and p[1][1:].isdigit()):
+                            deep_link_data = p[0]
+                        else:
+                            deep_link_data = video_payload
+                    else:
+                        deep_link_data = video_payload
+                    deep_link_type = 'video_share'
                 elif deep_link_arg.startswith('ref_'): # Referral was already handled for new users
                     pass
                 elif deep_link_arg.startswith('batch_'):
