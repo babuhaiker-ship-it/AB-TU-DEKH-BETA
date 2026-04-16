@@ -1655,6 +1655,15 @@ async def start_cmd(client: Client, message: Message):
 
         # Handle deep links first
         if deep_link_arg:
+            # NEW: Delete existing active menu to ensure only one is active
+            if user_id in active_video_message:
+                try:
+                    old_menu = active_video_message[user_id]
+                    await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
+                except Exception:
+                    pass
+                clear_active_video_message(user_id)
+
             loading_msg = await message.reply("Loading your request, please wait...")
             try:
                 deep_link_type, deep_link_data = None, None
@@ -1999,13 +2008,14 @@ async def get_video(client: Client, message: Message):
     chat_id = message.chat.id
     logger.info(f"User {user_id} requested Get Video.")
 
-    # Prevent opening a new menu if one is already active
+    # Delete existing active menu if one is already active to ensure only one is active at a time
     if user_id in active_video_message:
-        await message.reply_text(
-            "Menu already open, use this.",
-            reply_to_message_id=active_video_message[user_id]['message_id']
-        )
-        return
+        try:
+            old_menu = active_video_message[user_id]
+            await client.delete_messages(old_menu['chat_id'], old_menu['message_id'])
+        except Exception:
+            pass
+        clear_active_video_message(user_id)
 
     # Ensure user is a member of required channels
     if not await check_membership(client, user_id):
