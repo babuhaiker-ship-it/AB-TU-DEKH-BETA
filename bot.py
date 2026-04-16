@@ -60,6 +60,8 @@ class BotConfig:
     FREE_SCROLL_RESET_HOURS = int(os.environ.get('FREE_SCROLL_RESET_HOURS', 6))
     FREE_BATCH_LIMIT = int(os.environ.get('FREE_BATCH_LIMIT', 0))
     FREE_LIMIT_RESET_HOURS = int(os.environ.get('FREE_LIMIT_RESET_HOURS', 12))
+    DAILY_FREE_VIDEOS = int(os.environ.get('DAILY_FREE_VIDEOS', 1))
+    FREE_VIDEO_RESET_HOURS = int(os.environ.get('FREE_VIDEO_RESET_HOURS', 24))
     TOKEN_ACCESS_HOURS = float(os.environ.get('TOKEN_ACCESS_HOURS', 0.5))
     VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 0.5))
 
@@ -436,6 +438,43 @@ def user_has_token(user_id: int) -> bool:
 def user_can_access_video(user_id: int) -> bool:
     """Checks if a user can access video content (is premium or has a token)."""
     return is_premium_user(user_id) or user_has_token(user_id)
+
+def has_free_video_access(user_id: int) -> bool:
+    """Checks if a user has daily free video access remaining."""
+    if is_premium_user(user_id) or user_has_token(user_id):
+        return True
+
+    user = users_collection.find_one({'user_id': user_id})
+    if not user:
+        return False
+
+    usage = user.get('free_video_usage')
+    if not usage:
+        return True # Default to allow if not set, though it should be set on start
+
+    now = datetime.utcnow()
+    if now > usage.get('reset_at', datetime.min):
+        # Reset usage
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {
+                'free_video_usage.count': 0,
+                'free_video_usage.reset_at': now + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)
+            }}
+        )
+        return True
+
+    return usage.get('count', 0) < config.DAILY_FREE_VIDEOS
+
+def mark_free_video_used(user_id: int):
+    """Increments the daily free video usage count."""
+    if is_premium_user(user_id) or user_has_token(user_id):
+        return
+
+    users_collection.update_one(
+        {'user_id': user_id},
+        {'$inc': {'free_video_usage.count': 1}}
+    )
 
 # --- Access Limit Management ---
 async def send_access_limit_reached_message(client: Client, chat_id: int):
@@ -1575,7 +1614,8 @@ async def start_cmd(client: Client, message: Message):
                 'new_user_scrolls_used': 0, 'has_claimed_special_token': False,
                 'has_seen_free_scroll_popup': False,
                 'free_scroll_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)},
-                'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)}
+                'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)},
+                'free_video_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)}
             })
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_SCROLLS} free scrolls.")
 
@@ -1644,7 +1684,7 @@ async def start_cmd(client: Client, message: Message):
                         create_tracked_task(start_cmd(client, mock_message))
 
                 elif deep_link_type == 'video_share':
-                    if not user_can_access_video(user_id):
+                    if not has_free_video_access(user_id):
                         users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
                         await send_token_earning_options(client, message, is_pending_content=True)
                         return
@@ -1659,6 +1699,8 @@ async def start_cmd(client: Client, message: Message):
                             force_new_message=True
                         )
                         if sent_success:
+                            if not user_can_access_video(user_id):
+                                mark_free_video_used(user_id)
                             save_history(user_id, video['uuid'], video['category'])
                             await client.send_message(
                                 message.chat.id,
@@ -1808,6 +1850,7 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
         users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
 
         if not user_can_access_video(user_id):
+            await callback_query.answer("Human verification required! 🔐", show_alert=True)
             await send_token_earning_options(client, callback_query.message)
             return
 
@@ -1977,11 +2020,6 @@ async def get_video(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
-    # Check for access (token/premium)
-    if not user_can_access_video(user_id):
-        await send_token_earning_options(client, message)
-        return
-
     wait_msg = await message.reply("Just a moment...")
 
     # Fetch a random video
@@ -2035,7 +2073,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     if not user_can_access_video(user_id):
-        await callback_query.answer("You need an access token to continue! 🧐", show_alert=True)
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
 
@@ -2260,6 +2298,12 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
 async def interaction_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Like' and 'Dislike' video callbacks by jumping to the next video."""
     user_id = callback_query.from_user.id
+
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
+
     action = "liked" if callback_query.data.startswith("like") else "disliked"
     popup = "You liked this video! ❤️" if action == "liked" else "Skipping video... 👎"
     try:
@@ -2311,7 +2355,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 
         create_tracked_task(check_premium_status_and_notify(client, user_id))
         if not user_can_access_video(user_id):
-            await callback_query.answer("You need an access token to continue! 🧐", show_alert=True)
+            await callback_query.answer("Human verification required! 🔐", show_alert=True)
             await send_token_earning_options(client, callback_query.message)
             return
         try:
@@ -2417,6 +2461,12 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 async def interaction_default_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Like' and 'Dislike' for default category by jumping next."""
     user_id = callback_query.from_user.id
+
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
+
     action = "liked" if callback_query.data.startswith("like") else "disliked"
     popup = "You liked this video! ❤️" if action == "liked" else "Skipping video... 👎"
     try:
@@ -2450,7 +2500,7 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
             return
 
         if not user_can_access_video(user_id):
-            await callback_query.answer("You need a token to continue browsing.", show_alert=True)
+            await callback_query.answer("Human verification required! 🔐", show_alert=True)
             await send_token_earning_options(client, callback_query.message)
             return
 
@@ -2513,8 +2563,8 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     action, batch_id, current_index_str = callback_query.data.split('|')
 
     if not user_can_access_video(user_id):
-        await callback_query.answer("Access token required! 🧐", show_alert=True)
-        await send_access_limit_reached_message(client, callback_query.message.chat.id)
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
         return
 
     if user_id in processing_navigation_lock:
@@ -2587,6 +2637,11 @@ async def change_category(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested to change category.")
+
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -2756,6 +2811,11 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
 
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
+
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
         return
@@ -2872,6 +2932,11 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
 
     logger.info(f"User {user_id} requested to bookmark video {video_uuid}.")
 
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
+
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
         return
@@ -2975,6 +3040,11 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
     video_uuid = callback_query.data.split('_', 2)[2]
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested to remove saved video {video_uuid}.")
+
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
 
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
@@ -3142,7 +3212,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     wait_msg = await callback_query.message.reply("Just a moment, checking your access...")
     if not user_can_access_video(user_id):
         await wait_msg.delete()
-        await callback_query.answer("You need access to watch this video. Please get a token first! 🧐", show_alert=True)
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
     await wait_msg.delete()
@@ -3257,6 +3327,11 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} clicked 'Back' to saved categories menu.")
 
+    if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
+        await send_token_earning_options(client, callback_query.message)
+        return
+
     if not await check_membership(client, user_id):
         await send_force_subscribe_message(client, user_id)
         return
@@ -3295,6 +3370,7 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     if not user_can_access_video(user_id):
+        await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
 
