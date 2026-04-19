@@ -637,9 +637,10 @@ def delete_category(name: str) -> tuple[bool, str, int]:
 def get_first_video_by_sequence_number(category: str) -> dict | None:
     """
     Retrieves the first video in the specified category based on its sequence_number.
+    Filters for valid, non-banned videos with a sequence number.
     """
     video = media_collection.find_one(
-        {'category': category},
+        {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
         sort=[('sequence_number', ASCENDING)]
     )
     return video
@@ -684,7 +685,7 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
 
     else: # Regular category navigation, use sequence_number for ordering
         all_videos_in_category = list(media_collection.find(
-            {'category': category},
+            {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
             sort=[('sequence_number', ASCENDING)]
         ))
 
@@ -740,7 +741,7 @@ def get_next_video_chronological(current_uuid: str, category: str) -> dict | Non
 
     # Find the next video with a sequence number strictly greater than the current one
     next_video = media_collection.find_one(
-        {'category': category, 'sequence_number': {'$gt': current_sequence}},
+        {'category': category, 'sequence_number': {'$gt': current_sequence}, 'banned': {'$ne': True}},
         sort=[('sequence_number', ASCENDING)]
     )
 
@@ -768,7 +769,7 @@ def get_previous_video_chronological(current_uuid: str, category: str) -> dict |
 
     # Find the previous video with a sequence number strictly less than the current one
     prev_video = media_collection.find_one(
-        {'category': category, 'sequence_number': {'$lt': current_sequence}},
+        {'category': category, 'sequence_number': {'$lt': current_sequence}, 'banned': {'$ne': True}},
         sort=[('sequence_number', DESCENDING)] # Sort descending to get the largest sequence_number less than current
     )
 
@@ -860,17 +861,20 @@ def get_previous_saved_video_chronological(user_id: int, current_uuid: str, cate
 
 
 def get_random_video() -> dict | None:
-    """Retrieves one random video from the entire collection."""
-    pipeline = [{'$sample': {'size': 1}}]
+    """Retrieves one random video from the entire collection (valid and non-banned only)."""
+    pipeline = [
+        {'$match': {'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}},
+        {'$sample': {'size': 1}}
+    ]
     random_videos = list(media_collection.aggregate(pipeline))
     if random_videos:
         return random_videos[0]
     return None
 
 def get_random_video_from_different_category(exclude_category: str) -> dict | None:
-    """Retrieves one random video from any category except the excluded one."""
+    """Retrieves one random video from any category except the excluded one (valid and non-banned only)."""
     pipeline = [
-        {'$match': {'category': {'$ne': exclude_category}}},
+        {'$match': {'category': {'$ne': exclude_category}, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}},
         {'$sample': {'size': 1}}
     ]
     random_videos = list(media_collection.aggregate(pipeline))
@@ -2150,22 +2154,15 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category_name)
 
     video = None
-    if last_viewed_uuid:
-        video = get_video_by_uuid(last_viewed_uuid)
-        if not video:
-            logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category_name} not found. Falling back to first video.")
-            users_collection.update_one(
-                {'user_id': user_id},
-                {'$unset': {f'last_viewed_per_category.{category_name}': ""}}
-            )
-
     if category_name == "default (all)":
         video = get_random_video()
     else:
         if last_viewed_uuid:
             video = get_video_by_uuid(last_viewed_uuid)
-            if not video:
-                logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category_name} not found. Falling back to first video.")
+            # Ensure the last viewed video still matches the category and is valid
+            if not video or video.get('category') != category_name or video.get('banned') or not video.get('sequence_number'):
+                logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category_name} is no longer valid. Falling back.")
+                video = None
                 users_collection.update_one(
                     {'user_id': user_id},
                     {'$unset': {f'last_viewed_per_category.{category_name}': ""}}
@@ -2177,7 +2174,10 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     if not video:
         logger.warning(f"No videos found in category '{category_name}' for user {user_id}.")
         await callback_query.answer("No videos in this category. Try another! 😔", show_alert=True)
-        await temp_msg.delete()
+        try:
+            await temp_msg.delete()
+        except Exception:
+            pass
         await callback_query.message.edit_text(
             "No videos in this category. Try another! 😔",
             reply_markup=category_keyboard()
