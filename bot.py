@@ -1092,8 +1092,8 @@ async def send_and_replace_message(
                     for button in row:
                         if button.callback_data and '|' in button.callback_data:
                             parts = button.callback_data.split('|')
-                            if len(parts) == 4 and (parts[0] == 'next' or parts[0] == 'prev'):
-                                is_saved_from_markup = bool(int(parts[3]))
+                            if (len(parts) == 3 or len(parts) == 4) and (parts[0] == 'next' or parts[0] == 'prev'):
+                                is_saved_from_markup = bool(int(parts[-1]))
                                 break
                     if is_saved_from_markup:
                         break
@@ -1235,9 +1235,20 @@ async def send_and_replace_message(
                         return False, "Video was unavailable and self-healing failed."
                 except Exception as e2:
                     logger.error(f"Fallback send_video also failed for {video_data['uuid']}: {e2}. The video might be broken.", exc_info=True)
-                    await client.send_message(chat_id, "Oops! This video is unavailable and has been removed. Trying the next one... 🔄")
-                    create_tracked_task(delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id')))
-                    return False, "Video was unavailable by all methods."
+                    # Check if the error is likely due to the video file itself being missing/invalid
+                    broken_video_errors = ["FILE_ID_INVALID", "FILE_REFERENCE_EXPIRED", "MESSAGE_ID_INVALID", "MEDIA_EMPTY"]
+                    is_probably_broken = any(err in str(e2) for err in broken_video_errors) or isinstance(e2, (FileIdInvalid, FileReferenceExpired, MessageIdInvalid))
+
+                    # Avoid deleting for markup errors or user-related errors
+                    avoid_deletion_errors = ["BUTTON_DATA_INVALID", "REPLY_MARKUP_INVALID", "USER_IS_BLOCKED", "PEER_ID_INVALID", "CHAT_WRITE_FORBIDDEN"]
+                    should_avoid = any(err in str(e2) for err in avoid_deletion_errors) or isinstance(e2, (UserIsBlocked, PeerIdInvalid))
+
+                    if is_probably_broken and not should_avoid:
+                        await client.send_message(chat_id, "Oops! This video is unavailable and has been removed. Trying the next one... 🔄")
+                        create_tracked_task(delete_broken_video_from_db_and_channel(client, video_data['uuid'], video_data.get('category'), video_data.get('sequence_number'), video_data.get('message_id')))
+                        return False, "Video was unavailable by all methods."
+                    else:
+                        return False, f"Failed to send video: {e2}"
 
     # --- Handle Text Message Sending/Editing ---
     elif new_message_type == "text" and text_content:
@@ -1337,8 +1348,15 @@ def video_nav_keyboard(
             dislike_cb = f"dislike_default|{video_uuid}"
             like_cb = f"like_default|{video_uuid}"
         else:
-            dislike_cb = f"dislike|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"
-            like_cb = f"like|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"
+            # Shorten "default (all)" to "def" to save space in callback data
+            cat_payload = "def" if category == "default (all)" else str_to_b64(category)
+            dislike_cb = f"dislike|{video_uuid}|{cat_payload}|{int(is_saved)}"
+            like_cb = f"like|{video_uuid}|{cat_payload}|{int(is_saved)}"
+
+            # TRUNCATION: If still over 64 bytes, we MUST omit category and rely on DB lookup
+            if len(dislike_cb) > 64 or len(like_cb) > 64:
+                dislike_cb = f"dislike|{video_uuid}|{int(is_saved)}"
+                like_cb = f"like|{video_uuid}|{int(is_saved)}"
 
         buttons.append([
             InlineKeyboardButton("👎 Dislike", callback_data=dislike_cb),
@@ -1363,9 +1381,18 @@ def video_nav_keyboard(
             InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")
         ])
     else:
+        cat_payload = str_to_b64(category)
+        prev_cb = f"prev|{video_uuid}|{cat_payload}|{int(is_saved)}"
+        next_cb = f"next|{video_uuid}|{cat_payload}|{int(is_saved)}"
+
+        # TRUNCATION: Ensure we stay under Telegram's 64-byte limit
+        if len(prev_cb) > 64 or len(next_cb) > 64:
+            prev_cb = f"prev|{video_uuid}|{int(is_saved)}"
+            next_cb = f"next|{video_uuid}|{int(is_saved)}"
+
         buttons.append([
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"prev|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}"),
-            InlineKeyboardButton("➡️ Next", callback_data=f"next|{video_uuid}|{str_to_b64(category)}|{int(is_saved)}")
+            InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb),
+            InlineKeyboardButton("➡️ Next", callback_data=next_cb)
         ])
 
     # --- Action Row (Bookmark/Share/Download) ---
@@ -2322,7 +2349,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         clear_active_video_message(user_id)
 
 
-@app.on_callback_query(filters.regex(r"^(dislike|like)\|(.+)\|(.+)\|(\d+)$"))
+@app.on_callback_query(filters.regex(r"^(dislike|like)\|(.+)\|"))
 async def interaction_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Like' and 'Dislike' video callbacks by jumping to the next video."""
     user_id = callback_query.from_user.id
@@ -2337,7 +2364,10 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
     try:
         parts = callback_query.data.split('|')
         # Reconstruct next callback data
-        next_data = f"next|{parts[1]}|{parts[2]}|{parts[3]}"
+        if len(parts) == 4: # action|uuid|cat|is_saved
+            next_data = f"next|{parts[1]}|{parts[2]}|{parts[3]}"
+        else: # action|uuid|is_saved (truncated)
+            next_data = f"next|{parts[1]}|{parts[2]}"
 
         await callback_query.answer(popup, show_alert=False)
         logger.info(f"User {user_id} {action} video. Jumping to next.")
@@ -2349,7 +2379,7 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed in interaction_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|(.+)\|(\d+)$")) # Updated regex to capture is_saved flag
+@app.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|")) # Updated regex to capture is_saved flag
 async def navigate_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' video navigation."""
     user_id = callback_query.from_user.id
@@ -2363,17 +2393,26 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 
     try:
         chat_id = callback_query.message.chat.id
-        # Parse callback data: action (next/prev), current_uuid, category, is_saved_flag
+        # Parse callback data: action (next/prev), current_uuid, [category], is_saved_flag
         parts = callback_query.data.split('|')
-        if len(parts) != 4:
+
+        if len(parts) == 4:
+            action, current_uuid, category_payload, is_saved_flag_str = parts
+            category = "default (all)" if category_payload == "def" else b64_to_str(category_payload)
+            is_saved = bool(int(is_saved_flag_str))
+        elif len(parts) == 3:
+            action, current_uuid, is_saved_flag_str = parts
+            is_saved = bool(int(is_saved_flag_str))
+            # Retrieve category from database as it's no longer in the callback to save space
+            video_doc = get_video_by_uuid(current_uuid)
+            if not video_doc:
+                await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
+                return
+            category = video_doc.get('category')
+        else:
             logger.error(f"Invalid callback data for navigate_video: {callback_query.data}")
             await callback_query.answer("Invalid request. Please try again.", show_alert=True)
             return
-
-        action, current_uuid, category_encoded, is_saved_flag_str = parts
-        # Changed: Decode category name from callback data
-        category = b64_to_str(category_encoded)
-        is_saved = bool(int(is_saved_flag_str)) # Convert '0' or '1' to boolean
 
         logger.info(f"User {user_id} requested {action} video in category '{category}', is_saved: {is_saved}.")
 
