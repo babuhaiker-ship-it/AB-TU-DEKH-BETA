@@ -1767,11 +1767,6 @@ async def start_cmd(client: Client, message: Message):
                             )
 
                 elif deep_link_type == 'batch':
-                    if not user_can_access_video(user_id):
-                        users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
-                        await send_access_limit_reached_message(client, message.chat.id)
-                        return
-
                     batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
                     if not batch_doc or not batch_doc.get('video_uuids'):
                         await message.reply("This batch link is invalid or has expired.😔")
