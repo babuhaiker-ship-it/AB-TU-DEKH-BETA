@@ -1109,6 +1109,7 @@ async def send_and_replace_message(
             position_caption = f"#{current_position} of {total_videos}\n"
 
         caption_text = f"{position_caption}{custom_caption or category_caption}".strip()
+        caption_text += f"\n\n⚠️ This video will be deleted in {config.MENU_EXPIRY_MINUTES} minutes. Save or forward it! ⏳"
 
     # --- Delete Old Message if Forced ---
     if force_new_message and message_id_to_edit_or_delete:
@@ -5058,8 +5059,8 @@ async def cleanup_expired_menus():
             logger.info(f"Cleared active_video_message state for user {user_id} after menu expiry.")
 
         try:
-            sleep_interval = max(60, config.MENU_EXPIRY_MINUTES * 60 / 2)
-            await asyncio.sleep(sleep_interval)
+            # Check every 60 seconds for expired menus to ensure timely deletion
+            await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info("cleanup_expired_menus task cancelled gracefully.")
             break
