@@ -46,7 +46,7 @@ class BotConfig:
     BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/nyraapaybot?start')
     OWNER_ID = int(os.environ.get('OWNER_ID', 6612030110))
     TUTORIAL_LINK_2 = os.environ.get('TUTORIAL_LINK_2', 'https://t.me/urlshortenertutorial')
-    TOKEN_EXPIRY = int(os.environ.get('TOKEN_EXPIRY', 1800))
+    TOKEN_EXPIRY = int(os.environ.get('TOKEN_EXPIRY', 21600))
     NEW_USER_TOKENS = int(os.environ.get('NEW_USER_TOKENS', 1))
     REFERRAL_BONUS = int(os.environ.get('REFERRAL_BONUS', 1))
     REFRESH_BONUS = int(os.environ.get('REFRESH_BONUS', 1))
@@ -54,7 +54,7 @@ class BotConfig:
     PREMIUM_MONTH_PRICE_INR = int(os.environ.get('PREMIUM_MONTH_PRICE_INR', 99))
     FREE_USER_SAVE_LIMIT = int(os.environ.get('FREE_USER_SAVE_LIMIT', 5))
     MENU_EXPIRY_MINUTES = int(os.environ.get('MENU_EXPIRY_MINUTES', 10))
-    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = int(os.environ.get('REFRESH_TOKEN_LINK_EXPIRY_SECONDS', 1800))
+    REFRESH_TOKEN_LINK_EXPIRY_SECONDS = int(os.environ.get('REFRESH_TOKEN_LINK_EXPIRY_SECONDS', 21600))
     NEW_USER_SCROLLS = int(os.environ.get('NEW_USER_SCROLLS', 0))
     DAILY_FREE_SCROLLS = int(os.environ.get('DAILY_FREE_SCROLLS', 0))
     FREE_SCROLL_RESET_HOURS = int(os.environ.get('FREE_SCROLL_RESET_HOURS', 6))
@@ -62,8 +62,8 @@ class BotConfig:
     FREE_LIMIT_RESET_HOURS = int(os.environ.get('FREE_LIMIT_RESET_HOURS', 12))
     DAILY_FREE_VIDEOS = int(os.environ.get('DAILY_FREE_VIDEOS', 1))
     FREE_VIDEO_RESET_HOURS = int(os.environ.get('FREE_VIDEO_RESET_HOURS', 24))
-    TOKEN_ACCESS_HOURS = float(os.environ.get('TOKEN_ACCESS_HOURS', 0.5))
-    VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 0.5))
+    TOKEN_ACCESS_HOURS = float(os.environ.get('TOKEN_ACCESS_HOURS', 6.0))
+    VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 6.0))
 
 try:
     config = BotConfig()
@@ -491,7 +491,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         text = (
             "🛑 **Access Token Required** 🛑\n\n"
             "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            "Unlock 30 minutes of uninterrupted access and keep the vibe going. ✨"
+            "Unlock 6 hours of uninterrupted access and keep the vibe going. ✨"
         )
     reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
@@ -1289,7 +1289,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons = []
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("🔓 Unlock 30-Minute Access (Watch Ad)", url=ad_url)])
+        buttons.append([InlineKeyboardButton("🔓 Unlock 6-Hour Access (Watch Ad)", url=ad_url)])
 
     if user_id:
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
@@ -1300,7 +1300,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("📚 30-Minute Access Tutorial", url=config.TUTORIAL_LINK_2)])
+        buttons.append([InlineKeyboardButton("📚 6-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
         buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
 
     if is_pending_content:
@@ -1563,7 +1563,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         if added_token:
             refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
             logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
-            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {int(config.REFRESH_BONUS * config.TOKEN_EXPIRY / 60)} minutes. Enjoy! 🍿"
+            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {int(config.REFRESH_BONUS * config.TOKEN_EXPIRY / 3600)} hours. Enjoy! 🍿"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
     except Exception as e:
@@ -4603,7 +4603,7 @@ async def turnoff_shortener_cmd(client: Client, message: Message):
             upsert=True
         )
         SHORTENER_DISABLED = True
-        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 30-Minute Access' and Tutorial buttons are now hidden from users. 🚫")
+        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 6-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
         logger.info(f"Admin {message.from_user.id} turned off the shortener.")
     except Exception as e:
         logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
