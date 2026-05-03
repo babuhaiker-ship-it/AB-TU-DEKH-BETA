@@ -1724,6 +1724,8 @@ async def start_cmd(client: Client, message: Message):
                     pass
                 elif deep_link_arg.startswith('batch_'):
                     deep_link_type, deep_link_data = 'batch', deep_link_arg[6:]
+                elif deep_link_arg == 'getvideo':
+                    deep_link_type = 'getvideo'
 
                 if deep_link_type == 'token_refresh':
                     success, msg = await handle_token_refresh(user_id, deep_link_data)
@@ -1786,6 +1788,25 @@ async def start_cmd(client: Client, message: Message):
                                     "🫣Tap \"watch more\" you don't need to wait for links anymore",
                                     reply_markup=await get_main_keyboard(user_id)
                                 )
+
+                elif deep_link_type == 'getvideo':
+                    video = get_random_video()
+                    if not video:
+                        await message.reply("😔 No videos available at the moment. Please ask an admin to add some! 🛠️")
+                    else:
+                        sent_success, _ = await send_and_replace_message(
+                            client, message.chat.id, message.id, "video", video_data=video,
+                            reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+                            force_new_message=True
+                        )
+                        if sent_success:
+                            default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
+                            save_history(user_id, video['uuid'], "default (all)")
+                            await client.send_message(
+                                message.chat.id,
+                                "🫣Tap \"watch more\" you don't need to wait for links anymore",
+                                reply_markup=await get_main_keyboard(user_id)
+                            )
             finally:
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
