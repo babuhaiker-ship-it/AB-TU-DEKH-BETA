@@ -439,7 +439,7 @@ def user_can_access_video(user_id: int) -> bool:
     """Checks if a user can access video content (is premium or has a token)."""
     return is_premium_user(user_id) or user_has_token(user_id)
 
-def has_free_video_access(user_id: int) -> bool:
+def has_free_video_access(user_id: int, limit: int = None) -> bool:
     """Checks if a user has daily free video access remaining."""
     if is_premium_user(user_id) or user_has_token(user_id):
         return True
@@ -464,7 +464,8 @@ def has_free_video_access(user_id: int) -> bool:
         )
         return True
 
-    return usage.get('count', 0) < config.DAILY_FREE_VIDEOS
+    access_limit = limit if limit is not None else config.DAILY_FREE_VIDEOS
+    return usage.get('count', 0) < access_limit
 
 def mark_free_video_used(user_id: int):
     """Increments the daily free video usage count."""
@@ -1790,6 +1791,10 @@ async def start_cmd(client: Client, message: Message):
                                 )
 
                 elif deep_link_type == 'getvideo':
+                    if not user_can_access_video(user_id):
+                        if not has_free_video_access(user_id, limit=2):
+                            await send_token_earning_options(client, message)
+                            return
                     video = get_random_video()
                     if not video:
                         await message.reply("😔 No videos available at the moment. Please ask an admin to add some! 🛠️")
@@ -1802,6 +1807,8 @@ async def start_cmd(client: Client, message: Message):
                         if sent_success:
                             default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
                             save_history(user_id, video['uuid'], "default (all)")
+                            if not user_can_access_video(user_id):
+                                mark_free_video_used(user_id)
                             await client.send_message(
                                 message.chat.id,
                                 "🫣Tap \"watch more\" you don't need to wait for links anymore",
@@ -1924,9 +1931,10 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
         users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
 
         if not user_can_access_video(user_id):
-            await callback_query.answer("Human verification required! 🔐", show_alert=True)
-            await send_token_earning_options(client, callback_query.message)
-            return
+            if not has_free_video_access(user_id, limit=2):
+                await callback_query.answer("Human verification required! 🔐", show_alert=True)
+                await send_token_earning_options(client, callback_query.message)
+                return
 
         wait_msg = await client.send_message(chat_id, "Just a moment...")
 
@@ -1952,6 +1960,8 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
         if sent_success:
             default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
             save_history(user_id, video['uuid'], "default (all)")
+            if not user_can_access_video(user_id):
+                mark_free_video_used(user_id)
         else:
             await client.send_message(chat_id, sent_message_or_error)
             logger.error(f"User {user_id} failed to send default video from Watch More: {sent_message_or_error}")
@@ -2095,6 +2105,12 @@ async def get_video(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in get_video.")
         return
 
+    # FREE PREVIEW LOGIC: Allow 2 videos in "Get Video" menu
+    if not user_can_access_video(user_id):
+        if not has_free_video_access(user_id, limit=2):
+            await send_token_earning_options(client, message)
+            return
+
     wait_msg = await message.reply("Just a moment...")
 
     # Fetch a random video
@@ -2122,6 +2138,8 @@ async def get_video(client: Client, message: Message):
         # Initialize history for "default (all)" category navigation
         default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
         save_history(user_id, video['uuid'], "default (all)")
+        if not user_can_access_video(user_id):
+            mark_free_video_used(user_id)
     else:
         # Attempt to notify user of the failure
         try:
@@ -2148,9 +2166,11 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     if not user_can_access_video(user_id):
-        await callback_query.answer("Human verification required! 🔐", show_alert=True)
-        await send_token_earning_options(client, callback_query.message)
-        return
+        limit = 2 if category_name == "default (all)" else None
+        if not has_free_video_access(user_id, limit=limit):
+            await callback_query.answer("Human verification required! 🔐", show_alert=True)
+            await send_token_earning_options(client, callback_query.message)
+            return
 
     if await is_rate_limited(user_id):
         await callback_query.answer("⚠️ Too many category changes. Wait 1 min. ⏳", show_alert=True)
@@ -2241,6 +2261,8 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         if category_name == "default (all)":
             default_category_history[user_id] = {'videos': [video['uuid']], 'position': 0}
         save_history(user_id, video['uuid'], category_name)
+        if not user_can_access_video(user_id):
+            mark_free_video_used(user_id)
         await callback_query.answer()
         # If the original message was the category selection, delete it
         if callback_query.message.id != temp_msg.id:
@@ -2371,9 +2393,10 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
 
     if not user_can_access_video(user_id):
-        await callback_query.answer("Human verification required! 🔐", show_alert=True)
-        await send_token_earning_options(client, callback_query.message)
-        return
+        if not has_free_video_access(user_id, limit=2):
+            await callback_query.answer("Human verification required! 🔐", show_alert=True)
+            await send_token_earning_options(client, callback_query.message)
+            return
 
     action = "liked" if callback_query.data.startswith("like") else "disliked"
     popup = "You liked this video! ❤️" if action == "liked" else "Skipping video... 👎"
@@ -2438,9 +2461,11 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 
         create_tracked_task(check_premium_status_and_notify(client, user_id))
         if not user_can_access_video(user_id):
-            await callback_query.answer("Human verification required! 🔐", show_alert=True)
-            await send_token_earning_options(client, callback_query.message)
-            return
+            limit = 2 if category == "default (all)" else None
+            if not has_free_video_access(user_id, limit=limit):
+                await callback_query.answer("Human verification required! 🔐", show_alert=True)
+                await send_token_earning_options(client, callback_query.message)
+                return
         try:
             if await is_rate_limited(user_id):
                 await callback_query.answer("⚠️ Browse too quickly. Wait 1 min. ⏳", show_alert=True)
@@ -2522,6 +2547,8 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 
             if sent_success:
                 save_history(user_id, video['uuid'], category)
+                if not user_can_access_video(user_id):
+                    mark_free_video_used(user_id)
                 logger.info(f"User {user_id} navigated to {action} video {video['uuid']} in category {category}.")
                 await callback_query.answer()
             else:
@@ -2583,9 +2610,10 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
             return
 
         if not user_can_access_video(user_id):
-            await callback_query.answer("Human verification required! 🔐", show_alert=True)
-            await send_token_earning_options(client, callback_query.message)
-            return
+            if not has_free_video_access(user_id, limit=2):
+                await callback_query.answer("Human verification required! 🔐", show_alert=True)
+                await send_token_earning_options(client, callback_query.message)
+                return
 
         session = default_category_history.get(user_id)
         if not session:
@@ -2623,13 +2651,16 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
             await callback_query.answer("The next video is unavailable.", show_alert=True)
             return
 
-        await send_and_replace_message(
+        sent_success, _ = await send_and_replace_message(
             client, chat_id, callback_query.message.id, "video", video_data=video,
             reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
             force_new_message=False
         )
-        save_history(user_id, video['uuid'], "default (all)")
-        await callback_query.answer()
+        if sent_success:
+            save_history(user_id, video['uuid'], "default (all)")
+            if not user_can_access_video(user_id):
+                mark_free_video_used(user_id)
+            await callback_query.answer()
 
     except Exception as e:
         logger.error(f"Error in navigate_default_category for user {user_id}: {e}", exc_info=True)
@@ -3453,16 +3484,17 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     if not user_can_access_video(user_id):
-        await callback_query.answer("Human verification required! 🔐", show_alert=True)
-        await send_token_earning_options(client, callback_query.message)
-        return
+        if not has_free_video_access(user_id, limit=2):
+            await callback_query.answer("Human verification required! 🔐", show_alert=True)
+            await send_token_earning_options(client, callback_query.message)
+            return
 
     video = get_random_video()
     if not video:
         await callback_query.answer("No videos available at the moment. Please try again later.", show_alert=True)
         return
 
-    await send_and_replace_message(
+    sent_success, _ = await send_and_replace_message(
         client,
         chat_id,
         message_id_to_edit_or_delete=callback_query.message.id,
@@ -3471,7 +3503,10 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
         reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
         force_new_message=True
     )
-    save_history(user_id, video['uuid'], "default (all)")
+    if sent_success:
+        save_history(user_id, video['uuid'], "default (all)")
+        if not user_can_access_video(user_id):
+            mark_free_video_used(user_id)
     await callback_query.answer()
 
 # --- NEW: Mini App Launch Handler ---
