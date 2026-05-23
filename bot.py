@@ -1,4 +1,14 @@
 import asyncio
+import sys
+import types
+
+# Prevent pyrogram from loading its problematic sync module on Python 3.14
+# This avoids import-time RuntimeError about missing event loop
+pyrogram_sync = types.ModuleType("pyrogram.sync")
+pyrogram_sync.idle = lambda *args, **kwargs: None
+pyrogram_sync.compose = lambda *args, **kwargs: None
+sys.modules["pyrogram.sync"] = pyrogram_sync
+
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -5345,10 +5355,15 @@ async def run_bot_background():
     """
     try:
         logger.info("Starting Pyrogram client in the background...")
+        # Explicitly set the loop for the Pyrogram client to the current running loop
+        app.loop = asyncio.get_running_loop()
+        logger.info(f"Using event loop: {app.loop}")
+
         await app.start()
-        logger.info("Pyrogram client started.")
+        logger.info("Pyrogram client started successfully.")
 
         # If this is the first run, save the session string
+        logger.info("Checking for session string...")
         SESSION_STRING = get_session_string()
         if not SESSION_STRING:
             logger.info("Saving session string to DB for future runs...")
@@ -5356,10 +5371,13 @@ async def run_bot_background():
             set_session_string(new_session_string)
 
         # Load admins and run background tasks
+        logger.info("Loading dynamic configurations from DB...")
         await load_admins_from_db()
         await load_data_channel_id()
         await load_force_sub_channels()
         await load_shortener_setting()
+
+        logger.info("Running health check...")
         await health_check()
         create_tracked_task(cleanup_expired_data())
         create_tracked_task(verify_and_cleanup_media())
