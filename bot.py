@@ -1,9 +1,27 @@
 import os
 import asyncio
+import sys
+import types
+
+# --- Python 3.12+ Compatibility: Explicit Event Loop & Sync Mock ---
+# This must be done BEFORE importing Pyrogram to avoid "RuntimeError: There is no current event loop"
+# especially on Python 3.12, 3.13, and 3.14.
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+# Mock pyrogram.sync to prevent it from trying to use a non-existent loop during import
+# or causing issues with synchronous wrappers in newer Python versions.
+m = types.ModuleType("pyrogram.sync")
+m.idle = lambda: None
+m.compose = lambda: None
+sys.modules["pyrogram.sync"] = m
+
 import uuid
 import base64
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as PyUser, Chat as PyChat
@@ -81,7 +99,7 @@ BATCH_UPLOAD_LIMIT = 20
 BATCH_COOLDOWN_SECONDS = 60
 
 # --- MongoDB Setup ---
-client = MongoClient(config.MONGO_URI)
+client = MongoClient(config.MONGO_URI, tz_aware=True)
 db = client[config.MONGO_DB_NAME]
 users_collection = db['users']
 tokens_collection = db['tokens']
@@ -327,7 +345,7 @@ def get_channel_msg_link(channel_id, message_id):
 
 def get_current_time() -> int:
     """Returns the current UTC timestamp as an integer."""
-    return int(datetime.utcnow().timestamp())
+    return int(datetime.now(timezone.utc).timestamp())
 
 async def get_shortener_config_and_shorten_url(long_url: str) -> str:
     """
@@ -391,7 +409,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
     Adds a new token for a user with a specified duration.
     If is_admin_granted is True, this token signifies premium access.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=duration_seconds)
     token = {
         'token_id': str(uuid.uuid4()),
@@ -413,7 +431,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
 
 def is_premium_user(user_id: int) -> bool:
     """Checks if a user is a premium user (has an active admin-granted token)."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     doc = tokens_collection.find_one({'user_id': user_id})
     if not doc or 'tokens' not in doc:
         return False
@@ -425,7 +443,7 @@ def is_premium_user(user_id: int) -> bool:
 
 def user_has_token(user_id: int) -> bool:
     """Checks if a user has any valid tokens (admin-granted or not) for general access."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     doc = tokens_collection.find_one({'user_id': user_id})
     if not doc or 'tokens' not in doc:
         return False
@@ -457,8 +475,8 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
         return False
 
     usage = user.get('free_video_usage')
-    now = datetime.utcnow()
-    if not usage or now > usage.get('reset_at', datetime.min):
+    now = datetime.now(timezone.utc)
+    if not usage or now > usage.get('reset_at', datetime.min.replace(tzinfo=timezone.utc)):
         # Reset usage
         users_collection.update_one(
             {'user_id': user_id},
@@ -486,7 +504,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
     """Sends a message informing the user they need a token to access content."""
     user_id = chat_id
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
+    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -611,7 +629,7 @@ def add_category(name: str) -> tuple[bool, str]:
 
         categories_collection.insert_one({
             'name': name,
-            'created_at': datetime.utcnow()
+            'created_at': datetime.now(timezone.utc)
         })
         logger.info(f"Category '{name}' added")
         return True, f"Category '{html.escape(name)}' added successfully."
@@ -671,7 +689,7 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
             if video_data and video_data.get('category') == category:
                 filtered_saved_videos.append(bookmark)
 
-        filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+        filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)))
 
         total_videos = len(filtered_saved_videos)
         if not total_videos:
@@ -806,7 +824,7 @@ def get_next_saved_video_chronological(user_id: int, current_uuid: str, category
         if video_data and video_data.get('category') == category:
             filtered_saved_videos.append(bookmark)
 
-    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)))
 
     if not filtered_saved_videos:
         return None
@@ -844,7 +862,7 @@ def get_previous_saved_video_chronological(user_id: int, current_uuid: str, cate
         if video_data and video_data.get('category') == category:
             filtered_saved_videos.append(bookmark)
 
-    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)))
 
     if not filtered_saved_videos:
         return None
@@ -894,7 +912,7 @@ def save_history(user_id: int, video_uuid: str, category: str):
     Saves a video viewing entry to a user's general history (limited to 100 entries)
     AND updates the last viewed video for the specific category.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
         history_collection.update_one(
@@ -923,7 +941,7 @@ def set_active_video_message(user_id: int, message_id: int, chat_id: int, video_
     active_video_message[user_id] = {
         'message_id': message_id,
         'chat_id': chat_id,
-        'timestamp': datetime.utcnow(),
+        'timestamp': datetime.now(timezone.utc),
         'video_uuid': video_uuid
     }
     logger.info(f"Active video message set for user {user_id}: message_id={message_id}, chat_id={chat_id}, video_uuid={video_uuid}")
@@ -1526,7 +1544,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         if bypass_limit_seconds > 0:
             log_entry = shortener_logs_collection.find_one({'ad_code': ad_code, 'user_id': user_id})
             if log_entry:
-                time_elapsed = (datetime.utcnow() - log_entry['created_at']).total_seconds()
+                time_elapsed = (datetime.now(timezone.utc) - log_entry['created_at']).total_seconds()
                 if time_elapsed < bypass_limit_seconds:
                     logger.warning(f"Bypass detected for user {user_id}. Time elapsed: {time_elapsed}s, Limit: {bypass_limit_seconds}s")
 
@@ -1535,7 +1553,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
 
                     # Generate a new token and link
                     new_ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-                    shortener_logs_collection.insert_one({'ad_code': new_ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
+                    shortener_logs_collection.insert_one({'ad_code': new_ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
                     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{new_ad_code}"
                     new_ad_url = await get_shortener_config_and_shorten_url(long_url)
 
@@ -1570,7 +1588,7 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
 
         added_token = add_token(user_id, config.REFRESH_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
         if added_token:
-            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.utcnow()})
+            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
             logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
             return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {int(config.REFRESH_BONUS * config.TOKEN_EXPIRY / 3600)} hours. Enjoy! 🍿"
         else:
@@ -1591,7 +1609,7 @@ async def is_rate_limited(user_id: int) -> bool:
     if is_admin(user_id):
         return False
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
 
     try:
@@ -1655,13 +1673,13 @@ async def start_cmd(client: Client, message: Message):
             users_collection.insert_one({
                 'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-                'joined_date': datetime.utcnow(), 'referral_count': 0, 'bookmarked_videos': [],
+                'joined_date': datetime.now(timezone.utc), 'referral_count': 0, 'bookmarked_videos': [],
                 'last_premium_check_status': False, 'last_viewed_per_category': {}, 'pending_command': None,
                 'new_user_scrolls_used': 0, 'has_claimed_special_token': False,
                 'has_seen_free_scroll_popup': False,
-                'free_scroll_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)},
-                'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)},
-                'free_video_usage': {'count': 0, 'reset_at': datetime.utcnow() + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)}
+                'free_scroll_usage': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)},
+                'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.now(timezone.utc) + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)},
+                'free_video_usage': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)}
             })
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_SCROLLS} free scrolls.")
 
@@ -2028,7 +2046,7 @@ async def profile_cmd(client: Client, message: Message):
                 'username': html.escape(message.from_user.username) if message.from_user.username else "",
                 'first_name': html.escape(message.from_user.first_name) if message.from_user.first_name else "User",
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
-                'joined_date': datetime.utcnow(),
+                'joined_date': datetime.now(timezone.utc),
                 'referral_count': 0,
                 'bookmarked_videos': [],
                 'last_premium_check_status': False,
@@ -2044,7 +2062,7 @@ async def profile_cmd(client: Client, message: Message):
 
         tokens_count = 0
         if tokens_doc and 'tokens' in tokens_doc:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
 
         referral_count = user.get('referral_count', 0)
@@ -2181,7 +2199,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     current_active_tracked_message = active_video_message.get(user_id)
     if current_active_tracked_message and \
        current_active_tracked_message.get('message_id') == callback_query.message.id and \
-       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+       datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min.replace(tzinfo=timezone.utc)) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
         logger.warning(f"User {user_id} tried to select category but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -2310,7 +2328,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
     current_active_tracked_message = active_video_message.get(user_id)
     if current_active_tracked_message and \
        current_active_tracked_message.get('message_id') == callback_query.message.id and \
-       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+       datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min.replace(tzinfo=timezone.utc)) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
         logger.warning(f"User {user_id} tried to select saved category but menu expired.")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -2332,7 +2350,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         if video_data and video_data.get('category') == selected_category:
             filtered_saved_videos.append(bookmark)
 
-    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+    filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)))
 
     if not filtered_saved_videos:
         await callback_query.answer(f"You haven't saved any videos from the '{html.escape(selected_category)}' category yet. ❤️", show_alert=True)
@@ -2492,7 +2510,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             current_active_tracked_message = active_video_message.get(user_id)
             if current_active_tracked_message and \
                current_active_tracked_message.get('message_id') == callback_query.message.id and \
-               datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+               datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min.replace(tzinfo=timezone.utc)) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
                 logger.warning(f"User {user_id} tried to navigate but menu expired.")
                 await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -2832,7 +2850,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         current_active_tracked_message = active_video_message.get(user_id)
         if current_active_tracked_message and \
            current_active_tracked_message.get('message_id') == callback_query.message.id and \
-           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+           datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min.replace(tzinfo=timezone.utc)) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
             logger.warning(f"User {user_id} tried to change category but menu expired. Callback Message ID: {callback_query.message.id}, Active Menu ID: {current_active_tracked_message.get('message_id')}")
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -2954,7 +2972,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.utcnow()})
+        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -3146,7 +3164,7 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
             return
 
         # Add the video with timestamp for ordering and its category for filtering
-        bookmarked_videos.append({'uuid': video_uuid, 'bookmarked_at': datetime.utcnow(), 'category': video_data.get('category')})
+        bookmarked_videos.append({'uuid': video_uuid, 'bookmarked_at': datetime.now(timezone.utc), 'category': video_data.get('category')})
 
         users_collection.update_one(
             {'user_id': user_id},
@@ -3235,7 +3253,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
         current_active_tracked_message = active_video_message.get(user_id)
         if current_active_tracked_message and \
            current_active_tracked_message.get('message_id') == callback_query.message.id and \
-           datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+           datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min.replace(tzinfo=timezone.utc)) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
             logger.warning(f"User {user_id} tried to remove saved video but menu expired.")
             await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -3290,7 +3308,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                     b for b in existing_bookmarked_videos
                     if get_video_by_uuid(b['uuid']) and get_video_by_uuid(b['uuid']).get('category') == current_category_of_removed_video
                 ]
-                remaining_in_same_category.sort(key=lambda x: x.get('bookmarked_at', datetime.min))
+                remaining_in_same_category.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)))
 
                 if remaining_in_same_category:
                     # Show the next video in the same category (chronologically by bookmark date)
@@ -3363,7 +3381,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
     current_active_tracked_message = active_video_message.get(user_id)
     if current_active_tracked_message and \
        current_active_tracked_message.get('message_id') == callback_query.message.id and \
-       datetime.utcnow() - current_active_tracked_message.get('timestamp', datetime.min) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
+       datetime.now(timezone.utc) - current_active_tracked_message.get('timestamp', datetime.min.replace(tzinfo=timezone.utc)) > timedelta(minutes=config.MENU_EXPIRY_MINUTES):
 
         logger.warning(f"User {user_id} tried to view saved video but menu expired.")
         await callback_query.answer("Menu expired. Click '🎞️ Get Video' to restart. ⏰", show_alert=True)
@@ -4271,7 +4289,7 @@ async def view_token_cmd(client: Client, message: Message):
 
 async def view_token_page(client: Client, message_or_query, page: int = 0):
     """Helper function to display a page of the token leaderboard."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     pipeline = [
         {"$unwind": "$tokens"},
         {"$match": {"tokens.expires_at": {"$gt": now}}},
@@ -4377,7 +4395,7 @@ async def stats_cmd(client: Client, message: Message):
 async def token_stats_cmd(client: Client, message: Message):
     """Admin command to show URL shortener usage statistics."""
     try:
-        one_day_ago = datetime.utcnow() - timedelta(days=1)
+        one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
         count = shortener_logs_collection.count_documents({'timestamp': {'$gte': one_day_ago}})
         await message.reply(f"📊 **Token Generation Stats**\n\n"
                             f"The URL shortener has been used **{count}** times in the last 24 hours.")
@@ -4540,7 +4558,7 @@ async def create_batch_link_cmd(client: Client, message: Message):
         "batch_id": batch_id,
         "video_uuids": video_uuids,
         "created_by": user_id,
-        "created_at": datetime.utcnow()
+        "created_at": datetime.now(timezone.utc)
     })
 
     share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=batch_{batch_id}"
@@ -4996,7 +5014,7 @@ async def handle_text_input(client: Client, message: Message):
                     'name': channel_name,
                     'link': invite_link,
                     'added_by': user_id,
-                    'added_at': datetime.utcnow()
+                    'added_at': datetime.now(timezone.utc)
                 })
                 await load_force_sub_channels() # Reload global list
                 await message.reply(f"✅ Channel '<b>{html.escape(channel_name)}</b>' (<code>{channel_id}</code>) added to force subscribe list.")
@@ -5040,7 +5058,7 @@ async def handle_text_input(client: Client, message: Message):
 
                 data_channel_collection.update_one(
                     {'_id': 'data_channel'},
-                    {'$set': {'channel_id': channel_id, 'name': channel_name, 'set_by': user_id, 'set_at': datetime.utcnow()}},
+                    {'$set': {'channel_id': channel_id, 'name': channel_name, 'set_by': user_id, 'set_at': datetime.now(timezone.utc)}},
                     upsert=True
                 )
                 await load_data_channel_id() # Reload global variable
@@ -5092,7 +5110,7 @@ async def cleanup_expired_data():
     """Periodically cleans up expired tokens and handles bookmark truncation for non-premium users."""
     while True:
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
             tokens_collection.update_many(
                 {},
@@ -5109,7 +5127,7 @@ async def cleanup_expired_data():
                 bookmarked_videos = user.get('bookmarked_videos', [])
 
                 if not is_currently_premium and len(bookmarked_videos) > config.FREE_USER_SAVE_LIMIT:
-                    bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min), reverse=True)
+                    bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
                     truncated_bookmarks = bookmarked_videos[:config.FREE_USER_SAVE_LIMIT]
 
                     users_collection.update_one(
@@ -5140,7 +5158,7 @@ async def cleanup_expired_menus():
     """
     while True:
         logger.info("Starting expired menu cleanup task.")
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired_threshold = now - timedelta(minutes=config.MENU_EXPIRY_MINUTES)
 
         users_to_clear = []
@@ -5316,7 +5334,7 @@ async def monitor_ssrb_verifications(client: Client):
                             text=f"/start {pending_command}",
                             from_user=PyUser(id=user_id, is_bot=False, first_name="User"),
                             chat=PyChat(id=user_id, type=ChatType.PRIVATE),
-                            date=datetime.utcnow()
+                            date=datetime.now(timezone.utc)
                         )
                         create_tracked_task(start_cmd(client, mock_msg))
                     except Exception as e:
@@ -5340,6 +5358,8 @@ async def run_bot_background():
     """
     try:
         logger.info("Starting Pyrogram client in the background...")
+        # Manually set the loop for the app client for Python 3.12+ compatibility
+        app.loop = asyncio.get_running_loop()
         await app.start()
         logger.info("Pyrogram client started.")
 
