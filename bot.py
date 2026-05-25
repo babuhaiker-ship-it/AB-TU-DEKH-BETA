@@ -1,14 +1,7 @@
 import asyncio
-import sys
-import types
 
-# Prevent pyrogram from loading its problematic sync module on Python 3.14
-# This avoids import-time RuntimeError about missing event loop
-pyrogram_sync = types.ModuleType("pyrogram.sync")
-pyrogram_sync.idle = lambda *args, **kwargs: None
-pyrogram_sync.compose = lambda *args, **kwargs: None
-sys.modules["pyrogram.sync"] = pyrogram_sync
-
+# Ensure an event loop exists before any other imports.
+# This fixes Pyrogram's import-time RuntimeError on Python 3.14+
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -5355,9 +5348,14 @@ async def run_bot_background():
     """
     try:
         logger.info("Starting Pyrogram client in the background...")
-        # Explicitly set the loop for the Pyrogram client to the current running loop
-        app.loop = asyncio.get_running_loop()
-        logger.info(f"Using event loop: {app.loop}")
+        # Explicitly set the loop for the Pyrogram client components to the current running loop.
+        # This is critical for compatibility with FastAPI/Uvicorn on Python 3.14+
+        running_loop = asyncio.get_running_loop()
+        app.loop = running_loop
+        if hasattr(app, 'dispatcher'): app.dispatcher.loop = running_loop
+        if hasattr(app, 'storage'): app.storage.loop = running_loop
+
+        logger.info(f"Using event loop: {running_loop}")
 
         await app.start()
         logger.info("Pyrogram client started successfully.")
