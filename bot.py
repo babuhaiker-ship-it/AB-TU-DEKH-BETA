@@ -4,6 +4,14 @@ import uuid
 import base64
 import logging
 from datetime import datetime, timedelta
+
+# --- Python 3.12+ / 3.14 Compatibility: Ensure an event loop exists before importing Pyrogram ---
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as PyUser, Chat as PyChat
@@ -2722,7 +2730,6 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     current_index = int(current_index_str)
 
     active_menu = active_video_message.get(user_id)
-    current_uuid = active_menu.get('video_uuid') if active_menu else None
     session = user_session_history.get(user_id)
     is_prev = action == "prev_batch"
 
@@ -5343,6 +5350,14 @@ async def run_bot_background():
     This runs in a background task to avoid blocking the FastAPI port binding.
     """
     try:
+        # --- Python 3.12+ Compatibility: Explicitly set loop for the client and its components ---
+        running_loop = asyncio.get_running_loop()
+        app.loop = running_loop
+        if hasattr(app, "dispatcher") and app.dispatcher:
+            app.dispatcher.loop = running_loop
+        if hasattr(app, "storage") and app.storage:
+            app.storage.loop = running_loop
+
         logger.info("Starting Pyrogram client in the background...")
         await app.start()
         logger.info("Pyrogram client started.")
