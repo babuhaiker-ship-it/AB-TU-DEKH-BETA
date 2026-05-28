@@ -144,7 +144,7 @@ def set_session_string(session_string):
 
 # --- Pyrogram Client Initialization ---
 logger.info("Initializing Pyrogram client...")
-app = Client(
+bot = Client(
     name="spicynyraa_session",  # A name for the session file
     api_id=config.API_ID,
     api_hash=config.API_HASH,
@@ -152,7 +152,7 @@ app = Client(
 )
 
 # --- FastAPI App Initialization ---
-fastapi_app = FastAPI()
+app = FastAPI()
 
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
@@ -1549,8 +1549,8 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
                     new_ad_url = await get_shortener_config_and_shorten_url(long_url)
 
                     # Send the bypass message and the new link
-                    await app.send_message(user_id, "Bypass detected! Your access link has been blocked.")
-                    await app.send_message(
+                    await bot.send_message(user_id, "Bypass detected! Your access link has been blocked.")
+                    await bot.send_message(
                         user_id,
                         "Please try again with this new link:",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Try New Link", url=new_ad_url)]])
@@ -1639,15 +1639,15 @@ async def handle_error(client: Client, message: Message, error: Exception):
         logger.error(f"An unexpected error occurred for user {message.from_user.id}: {error}", exc_info=True)
         await message.reply_text(f"❌ <b>An unexpected error occurred.</b>\nPlease try again later. 🥺")
 
-@fastapi_app.get("/")
-@fastapi_app.head("/")
+@app.get("/")
+@app.head("/")
 async def health_check_fastapi():
     """Simple health check endpoint for Render."""
     return Response(status_code=200, content="OK")
 
 
 # --- Handlers ---
-@app.on_message(filters.command("start") & filters.private)
+@bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     first_name_safe = html.escape(message.from_user.first_name) if message.from_user.first_name else "there"
@@ -1848,7 +1848,7 @@ async def start_cmd(client: Client, message: Message):
         logger.error(f"User {user_id} encountered an unexpected error in start command: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_callback_query(filters.regex(r"^check_join_status$"))
+@bot.on_callback_query(filters.regex(r"^check_join_status$"))
 async def check_join_status_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Try Again' button after a user is prompted to join channels."""
     user_id = callback_query.from_user.id
@@ -1876,7 +1876,7 @@ async def check_join_status_callback(client: Client, callback_query: CallbackQue
     else:
         await callback_query.answer("⚠️ You still need to join all channels to proceed.", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^reload_pending_content$"))
+@bot.on_callback_query(filters.regex(r"^reload_pending_content$"))
 async def reload_pending_content_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Refresh' button to reload content after getting a token."""
     user_id = callback_query.from_user.id
@@ -1912,7 +1912,7 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
     mock_message.from_user = callback_query.from_user
     create_tracked_task(start_cmd(client, mock_message))
 
-@app.on_callback_query(filters.regex(r"^shared_nav$"))
+@bot.on_callback_query(filters.regex(r"^shared_nav$"))
 async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
     """Handles navigation for single shared videos."""
     await callback_query.answer(
@@ -1921,7 +1921,7 @@ async def shared_nav_callback(client: Client, callback_query: CallbackQuery):
         show_alert=True
     )
 
-@app.on_callback_query(filters.regex(r"^watch_more$"))
+@bot.on_callback_query(filters.regex(r"^watch_more$"))
 async def watch_more_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Watch More' button to show a random video from the default category."""
     user_id = callback_query.from_user.id
@@ -1987,7 +1987,7 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
         except Exception:
             pass
 
-@app.on_message(filters.command("help") & filters.private)
+@bot.on_message(filters.command("help") & filters.private)
 async def help_cmd(client: Client, message: Message):
     """Handles the /help command."""
     user_id = message.from_user.id
@@ -2011,7 +2011,7 @@ async def help_cmd(client: Client, message: Message):
         reply_markup=reply_markup
     )
 
-@app.on_message(filters.command("profile") & filters.private)
+@bot.on_message(filters.command("profile") & filters.private)
 async def profile_cmd(client: Client, message: Message):
     """Handles the /profile command to show user statistics."""
     user_id = message.from_user.id
@@ -2088,7 +2088,7 @@ async def profile_cmd(client: Client, message: Message):
         await handle_error(client, message, e)
 
 
-@app.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
+@bot.on_message(filters.regex("^🎞️ Get Video$") & filters.private)
 async def get_video(client: Client, message: Message):
     """
     Handles the 'Get Video' button request by immediately showing a random video.
@@ -2161,7 +2161,7 @@ async def get_video(client: Client, message: Message):
             await client.send_message(chat_id, sent_message_or_error)
         logger.error(f"User {user_id} failed to send default video: {sent_message_or_error}")
 
-@app.on_callback_query(filters.regex(r"^cat_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^cat_(.+)$"))
 async def select_category(client: Client, callback_query: CallbackQuery):
     """Handles category selection callback (for main categories)."""
     user_id = callback_query.from_user.id
@@ -2289,7 +2289,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         clear_active_video_message(user_id)
         await temp_msg.delete()
 
-@app.on_callback_query(filters.regex(r"^view_saved_cat_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^view_saved_cat_(.+)$"))
 async def view_saved_category_callback(client: Client, callback_query: CallbackQuery):
     """Handles selection of a specific category within the 'Saved Videos' menu."""
     user_id = callback_query.from_user.id
@@ -2400,7 +2400,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         clear_active_video_message(user_id)
 
 
-@app.on_callback_query(filters.regex(r"^(dislike|like)\|(.+)\|"))
+@bot.on_callback_query(filters.regex(r"^(dislike|like)\|(.+)\|"))
 async def interaction_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Like' and 'Dislike' video callbacks by jumping to the next video."""
     user_id = callback_query.from_user.id
@@ -2432,7 +2432,7 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed in interaction_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|")) # Updated regex to capture is_saved flag
+@bot.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|")) # Updated regex to capture is_saved flag
 async def navigate_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' video navigation."""
     user_id = callback_query.from_user.id
@@ -2611,7 +2611,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             processing_navigation_lock.remove(user_id)
 
 
-@app.on_callback_query(filters.regex(r"^(dislike_default|like_default)\|(.+)$"))
+@bot.on_callback_query(filters.regex(r"^(dislike_default|like_default)\|(.+)$"))
 async def interaction_default_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Like' and 'Dislike' for default category by jumping next."""
     user_id = callback_query.from_user.id
@@ -2635,7 +2635,7 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
         logger.error(f"User {user_id} failed in interaction_default_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^(next_default|prev_default)\|(.+)$"))
+@bot.on_callback_query(filters.regex(r"^(next_default|prev_default)\|(.+)$"))
 async def navigate_default_category(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' for the 'default (all)' category."""
     user_id = callback_query.from_user.id
@@ -2721,7 +2721,7 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
             processing_navigation_lock.remove(user_id)
 
 
-@app.on_callback_query(filters.regex(r"^(next_batch|prev_batch)\|(.+)\|(\d+)$"))
+@bot.on_callback_query(filters.regex(r"^(next_batch|prev_batch)\|(.+)\|(\d+)$"))
 async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     """Handles 'Next' and 'Previous' for batch video menus."""
     user_id = callback_query.from_user.id
@@ -2816,7 +2816,7 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
         if user_id in processing_navigation_lock:
             processing_navigation_lock.remove(user_id)
 
-@app.on_callback_query(filters.regex(r"^change_cat$"))
+@bot.on_callback_query(filters.regex(r"^change_cat$"))
 async def change_category(client: Client, callback_query: CallbackQuery):
     """Handles 'Change Category' request."""
     user_id = callback_query.from_user.id
@@ -2894,7 +2894,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed to send change category menu: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
-@app.on_message(filters.regex("^👤 Profile$") & filters.private)
+@bot.on_message(filters.regex("^👤 Profile$") & filters.private)
 async def profile_btn(client: Client, message: Message):
     """Handles 'Profile' button click."""
     user_id = message.from_user.id
@@ -2910,7 +2910,7 @@ async def profile_btn(client: Client, message: Message):
         await handle_error(client, message, e)
 
 
-@app.on_callback_query(filters.regex(r"^refer_and_earn_inline$"))
+@bot.on_callback_query(filters.regex(r"^refer_and_earn_inline$"))
 async def refer_and_earn_inline_callback(client: Client, callback_query: CallbackQuery):
     """Handles the inline 'Refer & Earn' button click from token earning options."""
     user_id = callback_query.from_user.id
@@ -2993,7 +2993,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
         logger.error(f"User {user_id} failed to send token earning options: {e}", exc_info=True)
         await handle_error(client, message, e)
 
-@app.on_callback_query(filters.regex(r"^share_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^share_(.+)$"))
 async def share_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Share' video callback to generate a shareable link with user_id."""
     user_id = callback_query.from_user.id
@@ -3033,7 +3033,7 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed to send share link for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
-@app.on_callback_query(filters.regex(r"^download_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^download_(.+)$"))
 async def download_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Download' video callback for premium users."""
     user_id = callback_query.from_user.id
@@ -3112,7 +3112,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
         await callback_query.answer("❌ Failed to send video for download. Please try again later. 😥", show_alert=True)
 
 
-@app.on_callback_query(filters.regex(r"^bookmark_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^bookmark_(.+)$"))
 async def bookmark_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles 'Bookmark' video callback."""
     user_id = callback_query.from_user.id
@@ -3169,7 +3169,7 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
         logger.error(f"Error handling bookmark for user {user_id}, video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to bookmark video. Please try again later. 😥", show_alert=True)
 
-@app.on_message(filters.regex("^🔖 Saved Videos$") & filters.private)
+@bot.on_message(filters.regex("^🔖 Saved Videos$") & filters.private)
 async def saved_videos_btn(client: Client, message: Message):
     """Handles 'Saved Videos' button click by showing categories of saved videos."""
     user_id = message.from_user.id
@@ -3221,7 +3221,7 @@ async def saved_videos_btn(client: Client, message: Message):
         logger.error(f"User {user_id} failed to send saved categories menu: {sent_message_or_error}")
 
 
-@app.on_callback_query(filters.regex(r"^remove_saved_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^remove_saved_(.+)$"))
 async def remove_saved_video_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     # Split by '_' and then take the part after 'remove_saved_'
@@ -3349,7 +3349,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
 
 # The view_saved_video_callback is effectively deprecated by the new direct display logic for "Saved Videos"
 # but kept here in case future functionality explicitly links to individual saved videos from somewhere else.
-@app.on_callback_query(filters.regex(r"^view_saved_video_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^view_saved_video_(.+)$"))
 async def view_saved_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles viewing a specific saved video."""
     user_id = callback_query.from_user.id
@@ -3435,7 +3435,7 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         logger.error(f"User {user_id} failed to load saved video {video_uuid}: {sent_message_or_error}")
 
 
-@app.on_callback_query(filters.regex(r"^unavailable_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^unavailable_(.+)$"))
 async def unavailable_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles clicks on unavailable videos in the saved list."""
     user_id = callback_query.from_user.id
@@ -3452,7 +3452,7 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
     )
     logger.info(f"User {user_id} clicked unavailable video {video_uuid}. Removed from bookmarks.")
 
-@app.on_callback_query(filters.regex(r"^confirm_clear_all_saved$"))
+@bot.on_callback_query(filters.regex(r"^confirm_clear_all_saved$"))
 async def confirm_clear_all_saved_callback(client: Client, callback_query: CallbackQuery):
     """Asks for confirmation before clearing all saved videos."""
     user_id = callback_query.from_user.id
@@ -3473,7 +3473,7 @@ async def confirm_clear_all_saved_callback(client: Client, callback_query: Callb
     )
     await callback_query.answer()
 
-@app.on_callback_query(filters.regex(r"^clear_all_saved_videos$"))
+@bot.on_callback_query(filters.regex(r"^clear_all_saved_videos$"))
 async def clear_all_saved_videos_callback(client: Client, callback_query: CallbackQuery):
     """Clears all saved videos for the user."""
     user_id = callback_query.from_user.id
@@ -3496,7 +3496,7 @@ async def clear_all_saved_videos_callback(client: Client, callback_query: Callba
         await callback_query.answer("❌ Failed to clear saved videos. Please try again. 🐛", show_alert=True)
         await callback_query.message.edit_text("❌ Failed to clear saved videos. Please try again. 😥")
 
-@app.on_callback_query(filters.regex(r"^cancel_clear_saved$"))
+@bot.on_callback_query(filters.regex(r"^cancel_clear_saved$"))
 async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQuery):
     """Cancels clearing all saved videos."""
     user_id = callback_query.from_user.id
@@ -3510,7 +3510,7 @@ async def cancel_clear_saved_callback(client: Client, callback_query: CallbackQu
     await callback_query.answer("Operation cancelled.")
 
 
-@app.on_callback_query(filters.regex(r"^back_to_saved_cats$"))
+@bot.on_callback_query(filters.regex(r"^back_to_saved_cats$"))
 async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Back' button from a saved video to the saved categories menu."""
     user_id = callback_query.from_user.id
@@ -3548,7 +3548,7 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     set_active_video_message(user_id, sent_message.id, chat_id)
     await callback_query.answer()
 
-@app.on_callback_query(filters.regex(r"^get_default_video$"))
+@bot.on_callback_query(filters.regex(r"^get_default_video$"))
 async def get_default_video_callback(client: Client, callback_query: CallbackQuery):
     """Handles the 'Get Video' button from the expiration message."""
     user_id = callback_query.from_user.id
@@ -3590,7 +3590,7 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
 # --- NEW: Mini App Launch Handler ---
 
 # --- Admin Commands ---
-@app.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
+@bot.on_message(filters.command("broadcast") & filters.private & admin_only & filters.reply)
 async def broadcast_cmd(client: Client, message: Message):
     """Admin command to broadcast a replied message to all users."""
     user_id = message.from_user.id
@@ -3652,7 +3652,7 @@ async def broadcast_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to complete broadcast: {e}", exc_info=True)
         await message.reply("❌ An error occurred during broadcast. Check logs for details. 🐛")
 
-@app.on_message(filters.command("addcategory") & filters.private & admin_only)
+@bot.on_message(filters.command("addcategory") & filters.private & admin_only)
 async def addcategory_cmd(client: Client, message: Message):
     """Admin command to add a new video category."""
     user_id = message.from_user.id
@@ -3679,7 +3679,7 @@ async def addcategory_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to add category: {e}", exc_info=True)
         await message.reply("❌ An error occurred while adding category. Please try again. 🐛")
 
-@app.on_message(filters.command("deletecategory") & filters.private & admin_only)
+@bot.on_message(filters.command("deletecategory") & filters.private & admin_only)
 async def deletecategory_cmd(client: Client, message: Message):
     """Admin command to delete a video category."""
     user_id = message.from_user.id
@@ -3707,7 +3707,7 @@ async def deletecategory_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to send delete category options: {e}", exc_info=True)
         await message.reply("❌ An error occurred while preparing delete category options. Please try again. 🐛")
 
-@app.on_callback_query(filters.regex(r"^confirmdelcat_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^confirmdelcat_(.+)$"))
 async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery):
     """Handles confirmation for category deletion."""
     user_id = callback_query.from_user.id
@@ -3736,7 +3736,7 @@ async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery)
         logger.error(f"Admin {user_id} failed to confirm category deletion: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred during category deletion. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command(["addtoken", "addpremium", "add_premium"]) & filters.private & admin_only)
+@bot.on_message(filters.command(["addtoken", "addpremium", "add_premium"]) & filters.private & admin_only)
 async def addtoken_cmd(client: Client, message: Message):
     """Admin command to grant premium access to a specific user for a number of days."""
     user_id = message.from_user.id
@@ -3797,7 +3797,7 @@ async def addtoken_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} error adding tokens/premium access: {e}", exc_info=True)
         await message.reply("❌ Failed to add premium access. Please try again. 🐛")
 
-@app.on_message(filters.command(["removetoken", "removepremium", "remove_premium"]) & filters.private & admin_only)
+@bot.on_message(filters.command(["removetoken", "removepremium", "remove_premium"]) & filters.private & admin_only)
 async def removetoken_cmd(client: Client, message: Message):
     """Admin command to remove all premium access/tokens from a user."""
     admin_user_id = message.from_user.id
@@ -3855,7 +3855,7 @@ async def removetoken_cmd(client: Client, message: Message):
         logger.error(f"Admin {admin_user_id} error removing tokens: {e}", exc_info=True)
         await message.reply("❌ Failed to remove tokens. Please try again. 🐛")
 
-@app.on_message(filters.command("removeallnewuserfreescrolls") & filters.private & admin_only)
+@bot.on_message(filters.command("removeallnewuserfreescrolls") & filters.private & admin_only)
 async def remove_all_new_user_free_scrolls_cmd(client: Client, message: Message):
     """Admin command to remove all new user free scrolls from all users."""
     admin_user_id = message.from_user.id
@@ -3977,7 +3977,7 @@ async def process_batch_queue(user_id: int, client: Client):
         else:
             logger.info(f"Batch processing stopped for admin {user_id}. {len(batch_add_state[user_id]['video_queue'])} videos remain in queue.")
 
-@app.on_message(filters.command("batchadd") & filters.private & admin_only)
+@bot.on_message(filters.command("batchadd") & filters.private & admin_only)
 async def batchadd_cmd(client: Client, message: Message):
     """Admin command to enter batch video adding mode and choose category."""
     user_id = message.from_user.id
@@ -4006,7 +4006,7 @@ async def batchadd_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to initiate batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while starting batch add mode. Please try again. 🐛")
 
-@app.on_callback_query(filters.regex(r"^batchselcat_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^batchselcat_(.+)$"))
 async def batch_select_category_callback(client: Client, callback_query: CallbackQuery):
     """Handles callback for selecting the category in batch add mode."""
     user_id = callback_query.from_user.id
@@ -4059,7 +4059,7 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
         logger.error(f"Admin {user_id} failed to set batch category in callback: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command(["stop", "done"]) & filters.private & admin_only)
+@bot.on_message(filters.command(["stop", "done"]) & filters.private & admin_only)
 async def stop_cmd(client: Client, message: Message):
     """Admin command to stop any active process (batch add, delete video, etc.)."""
     user_id = message.from_user.id
@@ -4107,7 +4107,7 @@ async def stop_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
-@app.on_message(filters.video & filters.private & admin_only)
+@bot.on_message(filters.video & filters.private & admin_only)
 async def handle_video_for_admin_modes(client: Client, message: Message):
     """
     Handles incoming videos for various admin modes: delete, batch add, batch link creation.
@@ -4181,7 +4181,7 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
     logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
 
 
-@app.on_message(filters.command("category") & filters.private & admin_only)
+@bot.on_message(filters.command("category") & filters.private & admin_only)
 async def set_category_cmd(client: Client, message: Message):
     """Admin command to set the current category for batch adding."""
     user_id = message.from_user.id
@@ -4212,7 +4212,7 @@ async def set_category_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to send set category options: {e}", exc_info=True)
         await message.reply("❌ An error occurred while preparing set category options. Please try again. 🐛")
 
-@app.on_callback_query(filters.regex(r"^setcat_(.+)$"))
+@bot.on_callback_query(filters.regex(r"^setcat_(.+)$"))
 async def setcat_callback(client: Client, callback_query: CallbackQuery):
     """Handles callback for setting the batch add category."""
     user_id = callback_query.from_user.id
@@ -4269,7 +4269,7 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"Admin {user_id} failed to set batch category: {e}", exc_info=True)
         await callback_query.answer("❌ An error occurred while setting category. Please try again. 🐛", show_alert=True)
 
-@app.on_message(filters.command("viewtoken") & filters.private & admin_only)
+@bot.on_message(filters.command("viewtoken") & filters.private & admin_only)
 async def view_token_cmd(client: Client, message: Message):
     """Admin command to view users with the most tokens."""
     try:
@@ -4338,7 +4338,7 @@ async def view_token_page(client: Client, message_or_query, page: int = 0):
         await message_or_query.message.edit_text(text, reply_markup=reply_markup)
         await message_or_query.answer()
 
-@app.on_callback_query(filters.regex(r"^viewtoken_(\d+)$"))
+@bot.on_callback_query(filters.regex(r"^viewtoken_(\d+)$"))
 async def view_token_callback(client: Client, callback_query: CallbackQuery):
     """Callback for /viewtoken pagination."""
     if not is_admin(callback_query.from_user.id):
@@ -4352,7 +4352,7 @@ async def view_token_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"Error in viewtoken callback: {e}", exc_info=True)
         await callback_query.answer("An error occurred.", show_alert=True)
 
-@app.on_message(filters.command("stats") & filters.private & admin_only)
+@bot.on_message(filters.command("stats") & filters.private & admin_only)
 async def stats_cmd(client: Client, message: Message):
     """Admin command to display bot statistics, including category video counts."""
     user_id = message.from_user.id
@@ -4382,7 +4382,7 @@ async def stats_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to retrieve stats: {e}", exc_info=True)
         await message.reply("❌ An error occurred while fetching stats. Please try again. 🐛")
 
-@app.on_message(filters.command("token_stats") & filters.private & admin_only)
+@bot.on_message(filters.command("token_stats") & filters.private & admin_only)
 async def token_stats_cmd(client: Client, message: Message):
     """Admin command to show URL shortener usage statistics."""
     try:
@@ -4395,7 +4395,7 @@ async def token_stats_cmd(client: Client, message: Message):
         await message.reply("An error occurred while fetching token generation stats.")
 
 
-@app.on_message(filters.command("bypass_limit") & filters.private & admin_only)
+@bot.on_message(filters.command("bypass_limit") & filters.private & admin_only)
 async def bypass_limit_cmd(client: Client, message: Message):
     """Admin command to set the minimum time for URL shortener completion."""
     user_id = message.from_user.id
@@ -4435,13 +4435,13 @@ async def bypass_limit_cmd(client: Client, message: Message):
 
 # --- New Admin Commands ---
 
-@app.on_message(filters.command("addadmin") & filters.private & owner_only)
+@bot.on_message(filters.command("addadmin") & filters.private & owner_only)
 async def add_admin_cmd(client: Client, message: Message):
     """Owner command to add a new admin."""
     owner_add_admin_state[message.from_user.id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to add as an admin. 📝")
 
-@app.on_message(filters.command("removeadmin") & filters.private & owner_only)
+@bot.on_message(filters.command("removeadmin") & filters.private & owner_only)
 async def remove_admin_cmd(client: Client, message: Message):
     """Owner command to remove an admin."""
     buttons = []
@@ -4461,7 +4461,7 @@ async def remove_admin_cmd(client: Client, message: Message):
 
     await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_message(filters.command("deleteuser") & filters.private & admin_only)
+@bot.on_message(filters.command("deleteuser") & filters.private & admin_only)
 async def deleteuser_cmd(client: Client, message: Message):
     """Admin command to delete a user from the database."""
     admin_user_id = message.from_user.id
@@ -4469,7 +4469,7 @@ async def deleteuser_cmd(client: Client, message: Message):
     admin_delete_user_state[admin_user_id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete from the database. 📝\n\n⚠️ This action is irreversible and will delete all their data, including tokens and history.")
 
-@app.on_callback_query(filters.regex(r"^rem_admin_(\d+)$"))
+@bot.on_callback_query(filters.regex(r"^rem_admin_(\d+)$"))
 async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
     """Callback to handle admin removal."""
     if not is_owner(callback_query.from_user.id):
@@ -4494,7 +4494,7 @@ async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.message.edit_text(f"An error occurred: {e}")
         logger.error(f"Error in remove_admin_callback: {e}")
 
-@app.on_message(filters.command("setshortener") & filters.private & admin_only)
+@bot.on_message(filters.command("setshortener") & filters.private & admin_only)
 async def set_shortener_cmd(client: Client, message: Message):
     """Admin command to set the URL shortener API template URL."""
     user_id = message.from_user.id
@@ -4507,7 +4507,7 @@ async def set_shortener_cmd(client: Client, message: Message):
         "If your shortener doesn't use `api=` in the URL, provide the full API endpoint URL that accepts the long URL as a parameter (e.g., `https://api.shortener.com/shorten?url={long_url}&key=YOUR_API_KEY`)."
     )
 
-@app.on_message(filters.command("deletevideo") & filters.private & admin_only)
+@bot.on_message(filters.command("deletevideo") & filters.private & admin_only)
 async def deletevideo_cmd(client: Client, message: Message):
     """Admin command to initiate video deletion mode."""
     user_id = message.from_user.id
@@ -4518,7 +4518,7 @@ async def deletevideo_cmd(client: Client, message: Message):
     admin_delete_video_state[user_id] = True
     await message.reply("Send the <b>video file from the database</b> to delete it. This must be the original video file, not a forwarded one. 🎥")
 
-@app.on_message(filters.command("batchvideoadd") & filters.private & admin_only)
+@bot.on_message(filters.command("batchvideoadd") & filters.private & admin_only)
 async def batch_video_add_cmd(client: Client, message: Message):
     """Admin command to create a shareable link for a batch of videos."""
     user_id = message.from_user.id
@@ -4532,7 +4532,7 @@ async def batch_video_add_cmd(client: Client, message: Message):
         "2. When you are finished, send /createbatchlink to generate the shareable link."
     )
 
-@app.on_message(filters.command("createbatchlink") & filters.private & admin_only)
+@bot.on_message(filters.command("createbatchlink") & filters.private & admin_only)
 async def create_batch_link_cmd(client: Client, message: Message):
     """Admin command to finalize a batch video link."""
     user_id = message.from_user.id
@@ -4560,7 +4560,7 @@ async def create_batch_link_cmd(client: Client, message: Message):
     )
     del admin_batch_link_state[user_id] # Clear state
 
-@app.on_message(filters.command("categoryrename") & filters.private & admin_only)
+@bot.on_message(filters.command("categoryrename") & filters.private & admin_only)
 async def categoryrename_cmd(client: Client, message: Message):
     """Admin command to initiate category renaming flow."""
     user_id = message.from_user.id
@@ -4569,7 +4569,7 @@ async def categoryrename_cmd(client: Client, message: Message):
     await message.reply("Please send the <b>current name</b> of the category you want to rename. 📝")
 
 # NEW: Admin command for setting force subscribe channels
-@app.on_message(filters.command("setfsub") & filters.private & admin_only)
+@bot.on_message(filters.command("setfsub") & filters.private & admin_only)
 async def set_fsub_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated /setfsub command.")
@@ -4588,7 +4588,7 @@ async def set_fsub_cmd(client: Client, message: Message):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-@app.on_callback_query(filters.regex(r"^addfsub_step1$"))
+@bot.on_callback_query(filters.regex(r"^addfsub_step1$"))
 async def add_fsub_step1_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     if not is_admin(user_id):
@@ -4602,7 +4602,7 @@ async def add_fsub_step1_callback(client: Client, callback_query: CallbackQuery)
     )
     await callback_query.answer()
 
-@app.on_callback_query(filters.regex(r"^viewfsub_(-?\d+)$"))
+@bot.on_callback_query(filters.regex(r"^viewfsub_(-?\d+)$"))
 async def view_fsub_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     if not is_admin(user_id):
@@ -4632,7 +4632,7 @@ async def view_fsub_callback(client: Client, callback_query: CallbackQuery):
     await callback_query.message.edit_text(text, reply_markup=reply_markup)
     await callback_query.answer()
 
-@app.on_callback_query(filters.regex(r"^removefsub_(-?\d+)$"))
+@bot.on_callback_query(filters.regex(r"^removefsub_(-?\d+)$"))
 async def remove_fsub_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     if not is_admin(user_id):
@@ -4651,7 +4651,7 @@ async def remove_fsub_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("Channel not found in database.", show_alert=True)
         await set_fsub_cmd(client, callback_query.message) # Refresh menu
 
-@app.on_callback_query(filters.regex(r"^back_to_fsub_list$"))
+@bot.on_callback_query(filters.regex(r"^back_to_fsub_list$"))
 async def back_to_fsub_list_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     if not is_admin(user_id):
@@ -4662,7 +4662,7 @@ async def back_to_fsub_list_callback(client: Client, callback_query: CallbackQue
     await callback_query.answer()
 
 # NEW: Admin command for setting data channel
-@app.on_message(filters.command("setdata") & filters.private & admin_only)
+@bot.on_message(filters.command("setdata") & filters.private & admin_only)
 async def set_data_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} initiated /setdata command.")
@@ -4688,7 +4688,7 @@ async def set_data_cmd(client: Client, message: Message):
 
     await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-@app.on_callback_query(filters.regex(r"^setdatachannel_step1$"))
+@bot.on_callback_query(filters.regex(r"^setdatachannel_step1$"))
 async def set_data_channel_step1_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     if not is_admin(user_id):
@@ -4702,7 +4702,7 @@ async def set_data_channel_step1_callback(client: Client, callback_query: Callba
     )
     await callback_query.answer()
 
-@app.on_callback_query(filters.regex(r"^removedatachannel$"))
+@bot.on_callback_query(filters.regex(r"^removedatachannel$"))
 async def remove_data_channel_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     if not is_admin(user_id):
@@ -4720,7 +4720,7 @@ async def remove_data_channel_callback(client: Client, callback_query: CallbackQ
         await set_data_cmd(client, callback_query.message) # Refresh menu
 
 
-@app.on_message(filters.command(["turnoff_shortener", "turnoff"]) & filters.private & admin_only)
+@bot.on_message(filters.command(["turnoff_shortener", "turnoff"]) & filters.private & admin_only)
 async def turnoff_shortener_cmd(client: Client, message: Message):
     """Admin command to turn off the URL shortener."""
     global SHORTENER_DISABLED
@@ -4743,7 +4743,7 @@ async def turnoff_shortener_cmd(client: Client, message: Message):
         logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
         await message.reply("❌ Failed to turn off the shortener. Check logs.")
 
-@app.on_message(filters.command(["turnon_shortener", "turnon"]) & filters.private & admin_only)
+@bot.on_message(filters.command(["turnon_shortener", "turnon"]) & filters.private & admin_only)
 async def turnon_shortener_cmd(client: Client, message: Message):
     """Admin command to turn on the URL shortener."""
     global SHORTENER_DISABLED
@@ -4766,13 +4766,13 @@ async def turnon_shortener_cmd(client: Client, message: Message):
         logger.error(f"Error in /turnon_shortener: {e}", exc_info=True)
         await message.reply("❌ Failed to turn on the shortener. Check logs.")
 
-@app.on_message(filters.command("shortener_status") & filters.private & admin_only)
+@bot.on_message(filters.command("shortener_status") & filters.private & admin_only)
 async def shortener_status_cmd(client: Client, message: Message):
     """Admin command to check the shortener status."""
     status = "Disabled 🚫" if SHORTENER_DISABLED else "Enabled 🔓"
     await message.reply(f"📊 <b>URL Shortener Status:</b> {status}")
 
-@app.on_message(filters.text & filters.private)
+@bot.on_message(filters.text & filters.private)
 async def handle_text_input(client: Client, message: Message):
     """Handles text input for various multi-step commands for owner and admins."""
     user_id = message.from_user.id
@@ -5066,7 +5066,7 @@ async def handle_text_input(client: Client, message: Message):
     logger.debug(f"User {user_id} sent text message '{message.text}' not part of any active multi-step command. Ignoring.")
 
 # --- Auto-Delete & Protect Content Settings ---
-@app.on_message(filters.command('toggle_auto_delete') & filters.private & admin_only)
+@bot.on_message(filters.command('toggle_auto_delete') & filters.private & admin_only)
 async def toggle_auto_delete(client: Client, message: Message):
     """Admin command to toggle auto-deletion of sent videos."""
     user_id = message.from_user.id
@@ -5081,7 +5081,7 @@ async def toggle_auto_delete(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to toggle auto-delete: {e}", exc_info=True)
         await message.reply("❌ An error occurred while toggling auto-delete. Please try again. 🐛")
 
-@app.on_message(filters.command('toggle_protect') & filters.private & admin_only)
+@bot.on_message(filters.command('toggle_protect') & filters.private & admin_only)
 async def toggle_protect(client: Client, message: Message):
     """Admin command to toggle content protection for sent videos."""
     user_id = message.from_user.id
@@ -5160,16 +5160,16 @@ async def cleanup_expired_menus():
 
                 logger.info(f"Attempting to delete expired menu for user {user_id} (msg_id: {message_id}, chat_id: {chat_id}).")
                 try:
-                    await app.delete_messages(chat_id, message_id)
+                    await bot.delete_messages(chat_id, message_id)
                     logger.info(f"Successfully deleted expired menu message {message_id} for user {user_id}.")
-                    await app.send_message(
+                    await bot.send_message(
                         chat_id,
                         "⏳ Video Expired!\nTap below to get a new video.",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
                     )
                 except MessageIdInvalid:
                     logger.info(f"Expired menu message {message_id} for user {user_id} already deleted or invalid.")
-                    await app.send_message(
+                    await bot.send_message(
                         chat_id,
                         "⏳ Video Expired!\nTap below to get a new video.",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
@@ -5177,7 +5177,7 @@ async def cleanup_expired_menus():
                 except Exception as e:
                     logger.error(f"Failed to delete expired menu message {message_id} for user {user_id}: {e}", exc_info=True)
                     try:
-                        await app.send_message(
+                        await bot.send_message(
                             chat_id,
                             "⏳ Video Expired!\nTap below to get a new video.",
                             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
@@ -5220,7 +5220,7 @@ async def verify_and_cleanup_media():
                     continue
 
                 try:
-                    await app.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
+                    await bot.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
                     logger.debug(f"Verified media {video_uuid} (message_id: {message_id_in_channel}) exists in channel.")
                 except (MessageIdInvalid, ValueError):
                     logger.warning(f"Video {video_uuid} (message_id: {message_id_in_channel}) no longer exists in channel. (Would delete, but deletion is disabled)")
@@ -5246,7 +5246,7 @@ async def keep_alive():
     """Sends a message every 2 minutes to keep the bot alive on Render."""
     while True:
         try:
-            sent_message = await app.send_message(config.OWNER_ID, "Bot is running...")
+            sent_message = await bot.send_message(config.OWNER_ID, "Bot is running...")
             await sent_message.delete()
         except Exception as e:
             logger.error(f"Keep-alive task failed: {e}", exc_info=True)
@@ -5255,12 +5255,12 @@ async def keep_alive():
 
 async def health_check():
     try:
-        me = await app.get_me()
+        me = await bot.get_me()
         logger.info(f"Bot username: {me.username}")
 
         if DATA_CHANNEL_ID:
             try:
-                member = await app.get_chat_member(DATA_CHANNEL_ID, me.id)
+                member = await bot.get_chat_member(DATA_CHANNEL_ID, me.id)
                 logger.info(f"Bot status in data channel ({DATA_CHANNEL_ID}): {member.status}")
             except Exception as e:
                 logger.error(f"Health check failed for data channel {DATA_CHANNEL_ID}: {e}", exc_info=True)
@@ -5270,7 +5270,7 @@ async def health_check():
         if FORCE_SUB_CHANNELS:
             for channel_info in FORCE_SUB_CHANNELS:
                 try:
-                    force_sub_member = await app.get_chat_member(channel_info['channel_id'], me.id)
+                    force_sub_member = await bot.get_chat_member(channel_info['channel_id'], me.id)
                     logger.info(f"Bot status in force subscribe channel ({channel_info['channel_id']}): {force_sub_member.status}")
                 except Exception as e:
                     logger.error(f"Health check failed for force subscribe channel {channel_info['channel_id']}: {e}", exc_info=True)
@@ -5353,20 +5353,20 @@ async def run_bot_background():
         # --- Python 3.14+ Compatibility ---
         # Update client internal loops with the currently running loop
         running_loop = asyncio.get_running_loop()
-        app.loop = running_loop
-        if hasattr(app, "dispatcher"):
-            app.dispatcher.loop = running_loop
-        if hasattr(app, "storage"):
-            app.storage.loop = running_loop
+        bot.loop = running_loop
+        if hasattr(bot, "dispatcher"):
+            bot.dispatcher.loop = running_loop
+        if hasattr(bot, "storage"):
+            bot.storage.loop = running_loop
 
-        await app.start()
+        await bot.start()
         logger.info("Pyrogram client started.")
 
         # If this is the first run, save the session string
         SESSION_STRING = get_session_string()
         if not SESSION_STRING:
             logger.info("Saving session string to DB for future runs...")
-            new_session_string = await app.export_session_string()
+            new_session_string = await bot.export_session_string()
             set_session_string(new_session_string)
 
         # Load admins and run background tasks
@@ -5379,13 +5379,13 @@ async def run_bot_background():
         create_tracked_task(verify_and_cleanup_media())
         create_tracked_task(cleanup_expired_menus())
         create_tracked_task(keep_alive())
-        create_tracked_task(monitor_ssrb_verifications(app))
+        create_tracked_task(monitor_ssrb_verifications(bot))
         logger.info("Bot background initialization complete. Bot is now fully operational.")
     except Exception as e:
         logger.error(f"Error during bot background initialization: {e}", exc_info=True)
 
 
-@fastapi_app.on_event("startup")
+@app.on_event("startup")
 async def startup_event():
     """
     This function runs when the FastAPI server starts.
@@ -5395,7 +5395,7 @@ async def startup_event():
     asyncio.create_task(run_bot_background())
 
 
-@fastapi_app.on_event("shutdown")
+@app.on_event("shutdown")
 async def shutdown_event():
     """
     This function runs when the FastAPI server is shutting down.
@@ -5406,9 +5406,9 @@ async def shutdown_event():
     # Shutdown logic to delete all active menus
     for user_id, menu_info in list(active_video_message.items()):
         try:
-            if app.is_connected:
-                await app.delete_messages(menu_info['chat_id'], menu_info['message_id'])
-                await app.send_message(
+            if bot.is_connected:
+                await bot.delete_messages(menu_info['chat_id'], menu_info['message_id'])
+                await bot.send_message(
                     menu_info['chat_id'],
                     "⏳ Video Expired!\nTap below to get a new video.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Get Video", callback_data="get_default_video")]])
@@ -5416,8 +5416,8 @@ async def shutdown_event():
         except Exception as e:
             logger.error(f"Failed to delete active menu for user {user_id} on shutdown: {e}")
 
-    if app.is_connected:
-        await app.stop()
+    if bot.is_connected:
+        await bot.stop()
     logger.info("Pyrogram client stopped.")
 
 if __name__ == "__main__":
@@ -5431,4 +5431,4 @@ if __name__ == "__main__":
     # NON-BLOCKING: The web server listener starts immediately via uvicorn.
     # The Pyrogram client initialization has been moved to a non-blocking background
     # task in the FastAPI startup event handler.
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
