@@ -5362,7 +5362,13 @@ async def run_bot_background():
         if hasattr(bot, "storage"):
             bot.storage.loop = running_loop
 
-        await bot.start()
+        try:
+            await bot.start()
+        except RPCError as e:
+            if any(err in str(e) for err in ["SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED"]):
+                logger.error(f"Session is invalid ({e}). Clearing session string and restarting.")
+                settings_collection.delete_one({'_id': 'pyrogram_session'})
+            raise e
         logger.info("Pyrogram client started.")
 
         # If this is the first run, save the session string
