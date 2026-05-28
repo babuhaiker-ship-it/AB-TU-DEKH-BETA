@@ -5366,8 +5366,10 @@ async def run_bot_background():
             await bot.start()
         except RPCError as e:
             if any(err in str(e) for err in ["SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED"]):
-                logger.error(f"Session is invalid ({e}). Clearing session string and restarting.")
+                logger.error(f"Session is invalid ({e}). Clearing session string and forcing container restart.")
                 settings_collection.delete_one({'_id': 'pyrogram_session'})
+                # Force exit to trigger container restart on hosting platforms
+                os._exit(1)
             raise e
         logger.info("Pyrogram client started.")
 
