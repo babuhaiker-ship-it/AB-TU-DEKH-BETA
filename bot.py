@@ -153,6 +153,7 @@ bot = Client(
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
+fastapi_app = app # Alias for environments explicitly seeking 'fastapi_app'
 
 
 # --- GLOBAL SET FOR TRACKING ASYNC TASKS ---
