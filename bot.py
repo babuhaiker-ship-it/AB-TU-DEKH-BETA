@@ -145,10 +145,12 @@ def set_session_string(session_string):
 # --- Pyrogram Client Initialization ---
 logger.info("Initializing Pyrogram client...")
 bot = Client(
-    name="spicynyraa_session",  # A name for the session file
+    name="spicynyraa_session",
     api_id=config.API_ID,
     api_hash=config.API_HASH,
-    bot_token=config.BOT_TOKEN
+    bot_token=config.BOT_TOKEN,
+    session_string=get_session_string(),
+    in_memory=True
 )
 
 # --- FastAPI App Initialization ---
@@ -5432,4 +5434,6 @@ if __name__ == "__main__":
     # NON-BLOCKING: The web server listener starts immediately via uvicorn.
     # The Pyrogram client initialization has been moved to a non-blocking background
     # task in the FastAPI startup event handler.
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # We use loop='asyncio' to ensure compatibility with Python 3.14 and
+    # prevent conflicts between uvloop and Pyrogram's internal logic.
+    uvicorn.run(app, host="0.0.0.0", port=port, loop="asyncio")
