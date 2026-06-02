@@ -1,4 +1,4 @@
-hydrogram
+hydrogram>=0.2.0
 TgCrypto>=1.2.5
 pymongo>=4.9.2
 fastapi>=0.115.0
