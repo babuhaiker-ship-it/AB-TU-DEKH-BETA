@@ -6,19 +6,19 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 # --- Python 3.14+ Asyncio Compatibility ---
-# Initialize the event loop early at module scope before Pyrogram import
+# Initialize the event loop early at module scope before Hydrogram import
 # to prevent RuntimeError: There is no current event loop.
 try:
     asyncio.get_running_loop()
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-from pyrogram import Client, filters
-from pyrogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as PyUser, Chat as PyChat
+from hydrogram import Client, filters
+from hydrogram.types import (
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as HyUser, Chat as HyChat
 )
-from pyrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
-from pyrogram.enums import ChatMemberStatus, ChatType
+from hydrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
+from hydrogram.enums import ChatMemberStatus, ChatType
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
 from aiohttp import ClientTimeout
@@ -130,20 +130,20 @@ data_channel_collection.create_index([("_id", ASCENDING)])
 # --- Session Management with MongoDB ---
 def get_session_string():
     """Retrieves the session string from the database."""
-    session_doc = settings_collection.find_one({'_id': 'pyrogram_session'})
+    session_doc = settings_collection.find_one({'_id': 'hydrogram_session'})
     return session_doc.get('session_string') if session_doc else None
 
 def set_session_string(session_string):
     """Saves the session string to the database."""
     settings_collection.update_one(
-        {'_id': 'pyrogram_session'},
+        {'_id': 'hydrogram_session'},
         {'$set': {'session_string': session_string}},
         upsert=True
     )
-    logger.info("Pyrogram session string has been saved to the database.")
+    logger.info("Hydrogram session string has been saved to the database.")
 
-# --- Pyrogram Client Initialization ---
-logger.info("Initializing Pyrogram client...")
+# --- Hydrogram Client Initialization ---
+logger.info("Initializing Hydrogram client...")
 bot = Client(
     name="spicynyraa_session",
     api_id=config.API_ID,
@@ -5326,8 +5326,8 @@ async def monitor_ssrb_verifications(client: Client):
                             id=0,
                             client=client,
                             text=f"/start {pending_command}",
-                            from_user=PyUser(id=user_id, is_bot=False, first_name="User"),
-                            chat=PyChat(id=user_id, type=ChatType.PRIVATE),
+                            from_user=HyUser(id=user_id, is_bot=False, first_name="User"),
+                            chat=HyChat(id=user_id, type=ChatType.PRIVATE),
                             date=datetime.now(timezone.utc)
                         )
                         create_tracked_task(start_cmd(client, mock_msg))
@@ -5347,11 +5347,11 @@ async def monitor_ssrb_verifications(client: Client):
 
 async def run_bot_background():
     """
-    Initializes and starts the Pyrogram client and background tasks.
+    Initializes and starts the Hydrogram client and background tasks.
     This runs in a background task to avoid blocking the FastAPI port binding.
     """
     try:
-        logger.info("Starting Pyrogram client in the background...")
+        logger.info("Starting Hydrogram client in the background...")
 
         # --- Python 3.14+ Compatibility ---
         # Update client internal loops with the currently running loop
@@ -5367,11 +5367,11 @@ async def run_bot_background():
         except RPCError as e:
             if any(err in str(e) for err in ["SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED"]):
                 logger.error(f"Session is invalid ({e}). Clearing session string and forcing container restart.")
-                settings_collection.delete_one({'_id': 'pyrogram_session'})
+                settings_collection.delete_one({'_id': 'hydrogram_session'})
                 # Force exit to trigger container restart on hosting platforms
                 os._exit(1)
             raise e
-        logger.info("Pyrogram client started.")
+        logger.info("Hydrogram client started.")
 
         # If this is the first run, save the session string
         SESSION_STRING = get_session_string()
@@ -5410,7 +5410,7 @@ async def startup_event():
 async def shutdown_event():
     """
     This function runs when the FastAPI server is shutting down.
-    It gracefully stops the Pyrogram client.
+    It gracefully stops the Hydrogram client.
     """
     logger.info("FastAPI server is shutting down...")
 
@@ -5429,7 +5429,7 @@ async def shutdown_event():
 
     if bot.is_connected:
         await bot.stop()
-    logger.info("Pyrogram client stopped.")
+    logger.info("Hydrogram client stopped.")
 
 if __name__ == "__main__":
     # PRIMARY DIRECTIVE: The FastAPI/Web server must bind to the port defined by the
@@ -5440,8 +5440,8 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
 
     # NON-BLOCKING: The web server listener starts immediately via uvicorn.
-    # The Pyrogram client initialization has been moved to a non-blocking background
+    # The Hydrogram client initialization has been moved to a non-blocking background
     # task in the FastAPI startup event handler.
     # We use loop='asyncio' to ensure compatibility with Python 3.14 and
-    # prevent conflicts between uvloop and Pyrogram's internal logic.
+    # prevent conflicts between uvloop and Hydrogram's internal logic.
     uvicorn.run(app, host="0.0.0.0", port=port, loop="asyncio")
