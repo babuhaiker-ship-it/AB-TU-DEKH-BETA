@@ -1,5 +1,13 @@
-import os
 import asyncio
+
+# Ensure an event loop exists before any other imports.
+# This fixes Pyrogram's import-time RuntimeError on Python 3.14+
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+import os
 import uuid
 import base64
 import logging
@@ -5359,10 +5367,20 @@ async def run_bot_background():
             app.storage.loop = running_loop
 
         logger.info("Starting Pyrogram client in the background...")
+        # Explicitly set the loop for the Pyrogram client components to the current running loop.
+        # This is critical for compatibility with FastAPI/Uvicorn on Python 3.14+
+        running_loop = asyncio.get_running_loop()
+        app.loop = running_loop
+        if hasattr(app, 'dispatcher'): app.dispatcher.loop = running_loop
+        if hasattr(app, 'storage'): app.storage.loop = running_loop
+
+        logger.info(f"Using event loop: {running_loop}")
+
         await app.start()
-        logger.info("Pyrogram client started.")
+        logger.info("Pyrogram client started successfully.")
 
         # If this is the first run, save the session string
+        logger.info("Checking for session string...")
         SESSION_STRING = get_session_string()
         if not SESSION_STRING:
             logger.info("Saving session string to DB for future runs...")
@@ -5370,10 +5388,13 @@ async def run_bot_background():
             set_session_string(new_session_string)
 
         # Load admins and run background tasks
+        logger.info("Loading dynamic configurations from DB...")
         await load_admins_from_db()
         await load_data_channel_id()
         await load_force_sub_channels()
         await load_shortener_setting()
+
+        logger.info("Running health check...")
         await health_check()
         create_tracked_task(cleanup_expired_data())
         create_tracked_task(verify_and_cleanup_media())
