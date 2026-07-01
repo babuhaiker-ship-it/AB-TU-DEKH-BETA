@@ -67,6 +67,12 @@ class BotConfig:
     TOKEN_ACCESS_HOURS = float(os.environ.get('TOKEN_ACCESS_HOURS', 6.0))
     VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 6.0))
 
+    # Upload Configuration Defaults
+    UPLOAD_REWARD_HOURS = float(os.environ.get('UPLOAD_REWARD_HOURS', 6.0))
+    UPLOAD_DAILY_MAX = int(os.environ.get('UPLOAD_DAILY_MAX', 100))
+    UPLOAD_TEMP_SCROLLS = int(os.environ.get('UPLOAD_TEMP_SCROLLS', 20))
+    UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS = int(os.environ.get('UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS', 48))
+
 try:
     config = BotConfig()
     # UPDATED: Removed force sub channel checks
@@ -245,6 +251,17 @@ admin_data_channel_state = defaultdict(dict)
 # --- Message Tracking and Immediate Deletion ---
 active_video_message = {}
 
+# --- User Upload State ---
+user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int}
+REVIEW_CHAT_ID = None
+UPLOAD_CONFIG = {
+    'reward_hours': config.UPLOAD_REWARD_HOURS,
+    'daily_max': config.UPLOAD_DAILY_MAX,
+    'auto_give_scrolls': True,
+    'temp_scrolls_amount': config.UPLOAD_TEMP_SCROLLS,
+    'temp_scrolls_expiry_hours': config.UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS
+}
+
 # --- Navigation Spam Control ---
 processing_navigation_lock = set()
 user_session_history = {} # user_id -> {'category': str, 'videos': [uuid], 'position': int, 'is_get_video': bool}
@@ -288,6 +305,17 @@ async def load_shortener_setting():
     settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
     SHORTENER_DISABLED = settings_doc.get('shortener_disabled', False) if settings_doc else False
     logger.info(f"Loaded shortener setting: {'Disabled' if SHORTENER_DISABLED else 'Enabled'}")
+
+async def load_upload_config():
+    """Loads upload configuration and review chat ID from database."""
+    global REVIEW_CHAT_ID, UPLOAD_CONFIG
+    config_doc = settings_collection.find_one({'_id': 'upload_config'})
+    if config_doc:
+        UPLOAD_CONFIG.update(config_doc.get('settings', {}))
+        REVIEW_CHAT_ID = config_doc.get('review_chat_id')
+        logger.info(f"Loaded upload config: {UPLOAD_CONFIG}, Review Chat ID: {REVIEW_CHAT_ID}")
+    else:
+        logger.info("No upload config found in DB, using defaults.")
 
 def is_admin(user_id: int) -> bool:
     """Checks if the given user ID belongs to an administrator."""
@@ -519,7 +547,7 @@ def user_can_access_video(user_id: int) -> bool:
     return is_premium_user(user_id) or user_has_token(user_id)
 
 def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: str = None) -> bool:
-    """Checks if a user has daily free video access remaining."""
+    """Checks if a user has daily free video access remaining, including temporary and permanent scrolls."""
     if is_premium_user(user_id) or user_has_token(user_id):
         return True
 
@@ -528,12 +556,23 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     if current_video_uuid and active_menu and active_menu.get('video_uuid') == current_video_uuid:
         return True
 
-    if limit is None:
-        limit = config.DAILY_FREE_VIDEOS
-
     user = users_collection.find_one({'user_id': user_id})
     if not user:
         return False
+
+    # Check Permanent Scrolls
+    if user.get('permanent_scrolls', 0) > 0:
+        return True
+
+    # Check Temporary Scrolls
+    now = datetime.now(timezone.utc)
+    temp_scrolls = user.get('temp_scrolls', [])
+    valid_temp_scrolls = [s for s in temp_scrolls if s['expires_at'] > now and s.get('amount', 0) > 0]
+    if valid_temp_scrolls:
+        return True
+
+    if limit is None:
+        limit = config.DAILY_FREE_VIDEOS
 
     usage = user.get('free_video_usage')
     now = datetime.now(timezone.utc)
@@ -551,10 +590,39 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     return usage.get('count', 0) < limit
 
 def mark_free_video_used(user_id: int):
-    """Increments the daily free video usage count."""
+    """Consumes a scroll (permanent or temporary) or increments daily free usage."""
     if is_premium_user(user_id) or user_has_token(user_id):
         return
 
+    user = users_collection.find_one({'user_id': user_id})
+    if not user:
+        return
+
+    # 1. Try consuming Permanent Scroll
+    if user.get('permanent_scrolls', 0) > 0:
+        users_collection.update_one({'user_id': user_id}, {'$inc': {'permanent_scrolls': -1}})
+        logger.info(f"Consumed 1 permanent scroll for user {user_id}.")
+        return
+
+    # 2. Try consuming Temporary Scroll
+    now = datetime.now(timezone.utc)
+    temp_scrolls = user.get('temp_scrolls', [])
+    # Find oldest valid temp scroll
+    valid_indices = [i for i, s in enumerate(temp_scrolls) if s['expires_at'] > now and s.get('amount', 0) > 0]
+    if valid_indices:
+        # Sort by expiry to use the one expiring soonest
+        valid_indices.sort(key=lambda i: temp_scrolls[i]['expires_at'])
+        target_idx = valid_indices[0]
+
+        # Decrement amount
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$inc': {f'temp_scrolls.{target_idx}.amount': -1}}
+        )
+        logger.info(f"Consumed 1 temporary scroll for user {user_id}.")
+        return
+
+    # 3. Fallback to daily free usage
     users_collection.update_one(
         {'user_id': user_id},
         {'$inc': {'free_video_usage.count': 1}}
@@ -1717,6 +1785,60 @@ async def health_check_fastapi():
 
 
 # --- Handlers ---
+@bot.on_message(filters.command("upload") & filters.private)
+async def upload_cmd(client: Client, message: Message):
+    """Handles the /upload command for users to contribute videos."""
+    user_id = message.from_user.id
+
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    user_upload_state[user_id]['in_upload_mode'] = True
+    user_upload_state[user_id]['session_uploads'] = 0
+
+    instructions = (
+        "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
+        "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
+        "**How it works:**\n"
+        "1. Send one or multiple videos directly in this chat.\n"
+        "2. Our admins will review your submission.\n"
+        "3. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
+        "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+        "**Note:** Type /done when you are finished uploading.\n\n"
+        "👇 Tap the button below and then send your video(s)!"
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Send Video Now", callback_data="send_video_prompt")]
+    ])
+
+    await message.reply(instructions, reply_markup=reply_markup)
+
+@bot.on_message(filters.command("myuploads") & filters.private)
+async def my_uploads_cmd(client: Client, message: Message):
+    """Shows the user their pending uploads."""
+    user_id = message.from_user.id
+    pending = list(pending_uploads_collection.find({"user_id": user_id, "status": "pending"}).sort("submitted_at", DESCENDING))
+
+    if not pending:
+        await message.reply("You have no pending uploads at the moment. ❤️")
+        return
+
+    text = f"📝 **Your Pending Uploads ({len(pending)})**\n\n"
+    for i, up in enumerate(pending[:10]):
+        text += f"{i+1}. Uploaded on {up['submitted_at'].strftime('%Y-%m-%d %H:%M')} - `Pending` ⏳\n"
+
+    if len(pending) > 10:
+        text += f"\n...and {len(pending)-10} more."
+
+    await message.reply(text)
+
+@bot.on_callback_query(filters.regex(r"^send_video_prompt$"))
+async def send_video_prompt_callback(client: Client, callback_query: CallbackQuery):
+    """Answers the prompt button for uploading."""
+    await callback_query.answer("📤 Send your video(s) directly here! I'm waiting...", show_alert=True)
+
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -2358,6 +2480,236 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("❌ Failed to load video. Please try again.😥", show_alert=True)
         clear_active_video_message(user_id)
         await temp_msg.delete()
+
+@bot.on_callback_query(filters.regex(r"^adm_appr_(.+)$"))
+async def admin_approve_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the initial 'Approve' click by admin, prompting for category."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized.", show_alert=True)
+        return
+
+    upload_id = callback_query.data[9:]
+    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    if not upload_data:
+        await callback_query.answer("❌ Upload data not found.", show_alert=True)
+        return
+
+    if upload_data['status'] != "pending":
+        await callback_query.answer(f"❌ This upload has already been {upload_data['status']}.", show_alert=True)
+        return
+
+    categories = get_categories(for_admin_use=True)
+    buttons = []
+    row = []
+    for i, cat in enumerate(categories):
+        row.append(InlineKeyboardButton(f"🗂️ {cat}", callback_data=f"apr_cat_{upload_id}_{str_to_b64(cat)}"))
+        if (i + 1) % 2 == 0:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"apr_cancel_{upload_id}")])
+
+    await callback_query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
+    await callback_query.answer("Select a category for this video.")
+
+@bot.on_callback_query(filters.regex(r"^apr_cat_(.+?)_(.+)$"))
+async def admin_final_approve_callback(client: Client, callback_query: CallbackQuery):
+    """Finalizes approval after category selection."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized.", show_alert=True)
+        return
+
+    upload_id = callback_query.group(1)
+    category = b64_to_str(callback_query.group(2))
+
+    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    if not upload_data or upload_data['status'] != "pending":
+        await callback_query.answer("❌ Error: Already processed or not found.", show_alert=True)
+        return
+
+    # 1. Move to Main Media Collection
+    if not DATA_CHANNEL_ID:
+        await callback_query.answer("❌ Data channel not set. Cannot approve.", show_alert=True)
+        return
+
+    try:
+        # Copy to data channel officially
+        sent_video = await client.copy_message(
+            chat_id=DATA_CHANNEL_ID,
+            from_chat_id=upload_data['user_id'],
+            message_id=upload_data['message_id_in_user_chat'],
+            caption=f"Approved upload from user {upload_data['user_id']}"
+        )
+
+        # Get next sequence number
+        last_video = media_collection.find_one({'category': category}, sort=[('sequence_number', DESCENDING)])
+        next_seq = (last_video['sequence_number'] + 1) if last_video and 'sequence_number' in last_video else 1
+
+        video_uuid = str(uuid.uuid4())
+        media_doc = {
+            "uuid": video_uuid,
+            "file_id": sent_video.video.file_id,
+            "file_unique_id": upload_data['file_unique_id'],
+            "category": category,
+            "timestamp": get_current_time(),
+            "sequence_number": next_seq,
+            "message_id": sent_video.id,
+            "banned": False,
+            "custom_caption": upload_data.get('caption')
+        }
+        media_collection.insert_one(media_doc)
+
+        # 2. Grant Reward (Token)
+        reward_duration_sec = int(UPLOAD_CONFIG['reward_hours'] * 3600)
+        add_token(upload_data['user_id'], duration_seconds=reward_duration_sec, is_admin_granted=False)
+
+        # 3. Handle Temp Scrolls (Convert to Permanent)
+        user_doc = users_collection.find_one({'user_id': upload_data['user_id']})
+        scroll_reward = 0
+        if user_doc and 'temp_scrolls' in user_doc:
+            for s in user_doc['temp_scrolls']:
+                if s.get('upload_id') == upload_id:
+                    scroll_reward = s.get('amount', 0)
+                    break
+
+        users_collection.update_one(
+            {'user_id': upload_data['user_id']},
+            {
+                '$pull': {'temp_scrolls': {'upload_id': upload_id}},
+                '$inc': {'upload_stats.pending_count': -1, 'permanent_scrolls': scroll_reward}
+            }
+        )
+
+        # 4. Update Pending Record
+        pending_uploads_collection.update_one(
+            {"upload_id": upload_id},
+            {"$set": {"status": "approved", "reviewed_by": user_id, "reviewed_at": datetime.now(timezone.utc), "category": category}}
+        )
+
+        # 5. Notify User
+        try:
+            await client.send_message(
+                upload_data['user_id'],
+                f"🎉 **Good News! Your video has been approved!**\n\n"
+                f"Category: `{category}`\n"
+                f"Reward: **{UPLOAD_CONFIG['reward_hours']} hours** of general access token granted! 🎁\n"
+                "Thank you for contributing to the community! ❤️"
+            )
+            # Update original confirmation message
+            if upload_data.get('confirmation_message_id'):
+                await client.edit_message_text(
+                    chat_id=upload_data['user_id'],
+                    message_id=upload_data['confirmation_message_id'],
+                    text="✅ **Your contribution was approved!** Thank you! ❤️"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to notify user {upload_data['user_id']} of approval: {e}")
+
+        await callback_query.message.edit_text(f"✅ Upload Approved!\nCategory: {category}\nReviewed by: {user_id}")
+        await callback_query.answer("Upload approved successfully!")
+
+    except Exception as e:
+        logger.error(f"Approval error for upload {upload_id}: {e}", exc_info=True)
+        await callback_query.answer("❌ An error occurred during approval.", show_alert=True)
+
+@bot.on_callback_query(filters.regex(r"^adm_rejc_(.+)$"))
+async def admin_reject_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Reject' click by admin, prompting for reason."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized.", show_alert=True)
+        return
+
+    upload_id = callback_query.data[9:]
+    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    if not upload_data or upload_data['status'] != "pending":
+        await callback_query.answer("❌ Already processed or not found.", show_alert=True)
+        return
+
+    reasons = [
+        "Low Quality", "Duplicate", "Wrong Content", "Broken/Short", "Other"
+    ]
+    buttons = []
+    for reason in reasons:
+        buttons.append([InlineKeyboardButton(reason, callback_data=f"rej_res_{upload_id}_{str_to_b64(reason)}")])
+
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"apr_cancel_{upload_id}")])
+
+    await callback_query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
+    await callback_query.answer("Select a reason for rejection.")
+
+@bot.on_callback_query(filters.regex(r"^rej_res_(.+?)_(.+)$"))
+async def admin_final_reject_callback(client: Client, callback_query: CallbackQuery):
+    """Finalizes rejection after reason selection."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized.", show_alert=True)
+        return
+
+    upload_id = callback_query.group(1)
+    reason = b64_to_str(callback_query.group(2))
+
+    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    if not upload_data or upload_data['status'] != "pending":
+        await callback_query.answer("❌ Already processed or not found.", show_alert=True)
+        return
+
+    # 1. Update Pending Record
+    pending_uploads_collection.update_one(
+        {"upload_id": upload_id},
+        {"$set": {"status": "rejected", "reviewed_by": user_id, "reviewed_at": datetime.now(timezone.utc), "review_reason": reason}}
+    )
+
+    # 2. Update User Stats & Remove Temp Scrolls
+    users_collection.update_one(
+        {'user_id': upload_data['user_id']},
+        {
+            '$pull': {'temp_scrolls': {'upload_id': upload_id}},
+            '$inc': {'upload_stats.pending_count': -1}
+        }
+    )
+
+    # 3. Notify User
+    try:
+        await client.send_message(
+            upload_data['user_id'],
+            f"❌ **Your video contribution was not approved.**\n\n"
+            f"Reason: `{reason}`\n"
+            "Feel free to contribute other high-quality videos! ✨"
+        )
+        if upload_data.get('confirmation_message_id'):
+            await client.edit_message_text(
+                chat_id=upload_data['user_id'],
+                message_id=upload_data['confirmation_message_id'],
+                text=f"❌ **Your contribution was not approved.** (Reason: {reason})"
+            )
+    except Exception as e:
+        logger.warning(f"Failed to notify user {upload_data['user_id']} of rejection: {e}")
+
+    await callback_query.message.edit_text(f"❌ Upload Rejected!\nReason: {reason}\nReviewed by: {user_id}")
+    await callback_query.answer("Upload rejected.")
+
+@bot.on_callback_query(filters.regex(r"^apr_cancel_(.+)$"))
+async def admin_cancel_review_callback(client: Client, callback_query: CallbackQuery):
+    """Cancels the approve/reject flow and returns to main buttons."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        return
+
+    upload_id = callback_query.data[11:]
+
+    reply_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"adm_appr_{upload_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
+        ]
+    ])
+    await callback_query.message.edit_reply_markup(reply_markup=reply_markup)
+    await callback_query.answer("Cancelled.")
 
 @bot.on_callback_query(filters.regex(r"^view_saved_cat_(.+)$"))
 async def view_saved_category_callback(client: Client, callback_query: CallbackQuery):
@@ -4177,32 +4529,32 @@ async def stop_cmd(client: Client, message: Message):
         logger.error(f"Admin {user_id} failed to disable batch add mode: {e}", exc_info=True)
         await message.reply("❌ An error occurred while ending batch add mode. Please try again. 🐛")
 
-@bot.on_message(filters.video & filters.private & admin_only)
-async def handle_video_for_admin_modes(client: Client, message: Message):
-    """
-    Handles incoming videos for various admin modes: delete, batch add, batch link creation.
-    """
+@bot.on_message(filters.video & filters.private)
+async def handle_incoming_videos(client: Client, message: Message):
+    """Handles incoming videos for both users (uploads) and admins (modes)."""
     user_id = message.from_user.id
 
-    if admin_delete_video_state.get(user_id):
-        logger.info(f"Admin {user_id} sent a video for deletion.")
-        try:
-            file_unique_id = message.video.file_unique_id
-            video_to_delete = media_collection.find_one({"file_unique_id": file_unique_id})
-            if not video_to_delete:
-                await message.reply_text("❌ Video not found in the database.")
-                return
-            success = await delete_broken_video_from_db_and_channel(
-                client, video_to_delete['uuid'], video_to_delete.get('category'),
-                video_to_delete.get('sequence_number'), video_to_delete.get('message_id')
-            )
-            if success:
-                await message.reply_text(f"✅ Video (UUID: <code>{video_to_delete['uuid']}</code>) deleted.\n\nSend /stop to stop the process.")
-            else:
-                await message.reply_text(f"❌ Failed to delete video (UUID: <code>{video_to_delete['uuid']}</code>).\n\nSend /stop to stop the process.")
-        except Exception as e:
-            logger.error(f"Admin {user_id} error deleting video: {e}", exc_info=True)
-            await message.reply("❌ An error occurred while deleting the video.\n\nSend /stop to stop the process.")
+    # --- Admin Mode Handling ---
+    if is_admin(user_id):
+        if admin_delete_video_state.get(user_id):
+            logger.info(f"Admin {user_id} sent a video for deletion.")
+            try:
+                file_unique_id = message.video.file_unique_id
+                video_to_delete = media_collection.find_one({"file_unique_id": file_unique_id})
+                if not video_to_delete:
+                    await message.reply_text("❌ Video not found in the database.")
+                    return
+                success = await delete_broken_video_from_db_and_channel(
+                    client, video_to_delete['uuid'], video_to_delete.get('category'),
+                    video_to_delete.get('sequence_number'), video_to_delete.get('message_id')
+                )
+                if success:
+                    await message.reply_text(f"✅ Video (UUID: <code>{video_to_delete['uuid']}</code>) deleted.\n\nSend /stop to stop the process.")
+                else:
+                    await message.reply_text(f"❌ Failed to delete video (UUID: <code>{video_to_delete['uuid']}</code>).\n\nSend /stop to stop the process.")
+            except Exception as e:
+                logger.error(f"Admin {user_id} error deleting video: {e}", exc_info=True)
+                await message.reply("❌ An error occurred while deleting the video.\n\nSend /stop to stop the process.")
         # Removed automatic deletion of state for continuous mode
         return
 
@@ -4248,7 +4600,167 @@ async def handle_video_for_admin_modes(client: Client, message: Message):
             logger.info(f"Batch processing task for admin {user_id} is already running.")
         return
 
-    logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
+    # --- User Upload Handling ---
+    if user_upload_state.get(user_id, {}).get('in_upload_mode'):
+        # --- Check Session Cooldown ---
+        now = datetime.now(timezone.utc)
+        recent_uploads = list(pending_uploads_collection.find({
+            "user_id": user_id,
+            "submitted_at": {"$gt": now - timedelta(minutes=10)}
+        }))
+        if len(recent_uploads) >= 10:
+            await message.reply_text("⏳ **Slow down!** You can only upload 10 videos every 10 minutes. Please wait a bit. 🛑")
+            return
+
+        await handle_user_upload(client, message)
+        return
+
+    if is_admin(user_id):
+         logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
+
+async def handle_user_upload(client: Client, message: Message):
+    """Processes a video uploaded by a user."""
+    user_id = message.from_user.id
+    file_unique_id = message.video.file_unique_id
+
+    # 1. Membership check (redundant but safe)
+    if not await check_membership(client, user_id):
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    # 2. Duplicate Check
+    existing_in_media = media_collection.find_one({"file_unique_id": file_unique_id})
+    if existing_in_media:
+        await message.reply_text("🙏 **Thank you!** But this video already exists in our collection. Please send something new! ✨")
+        return
+
+    existing_in_pending = pending_uploads_collection.find_one({"file_unique_id": file_unique_id})
+    if existing_in_pending:
+        await message.reply_text("⏳ This video is already under review! Thank you for your patience. ❤️")
+        return
+
+    # 3. Rate Limiting Check
+    user_doc = users_collection.find_one({'user_id': user_id})
+    stats = user_doc.get('upload_stats', {})
+
+    # Daily max check
+    now = datetime.now(timezone.utc)
+    daily = stats.get('daily_uploads', {})
+    if now > daily.get('reset_at', datetime.min.replace(tzinfo=timezone.utc)):
+        daily = {'count': 0, 'reset_at': now + timedelta(hours=24)}
+
+    if daily['count'] >= UPLOAD_CONFIG['daily_max']:
+        await message.reply_text(f"🛑 You've reached your daily limit of {UPLOAD_CONFIG['daily_max']} uploads. Come back tomorrow! 📅")
+        return
+
+    # Pending count check
+    if stats.get('pending_count', 0) >= 30:
+        await message.reply_text("🛑 You have 30 pending uploads. Please wait for them to be reviewed before sending more! ⏳")
+        return
+
+    # 4. Store in pending_uploads
+    upload_id = str(uuid.uuid4())
+    pending_data = {
+        "upload_id": upload_id,
+        "user_id": user_id,
+        "file_id": message.video.file_id,
+        "file_unique_id": file_unique_id,
+        "status": "pending",
+        "submitted_at": now,
+        "caption": message.caption,
+        "message_id_in_user_chat": message.id
+    }
+    pending_uploads_collection.insert_one(pending_data)
+
+    # 5. Grant Reward (Temp Scrolls)
+    reward_granted = False
+    if UPLOAD_CONFIG['auto_give_scrolls']:
+        temp_scroll_expiry = now + timedelta(hours=UPLOAD_CONFIG['temp_scroll_expiry_hours'])
+        temp_scroll_entry = {
+            'amount': UPLOAD_CONFIG['temp_scrolls_amount'],
+            'expires_at': temp_scroll_expiry,
+            'upload_id': upload_id
+        }
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$push': {'temp_scrolls': temp_scroll_entry}}
+        )
+        reward_granted = True
+
+    # 6. Update User Stats
+    user_upload_state[user_id]['session_uploads'] = user_upload_state[user_id].get('session_uploads', 0) + 1
+    users_collection.update_one(
+        {'user_id': user_id},
+        {
+            '$inc': {'upload_stats.total_uploads': 1, 'upload_stats.pending_count': 1, 'upload_stats.daily_uploads.count': 1},
+            '$set': {'upload_stats.daily_uploads.reset_at': daily['reset_at']}
+        }
+    )
+
+    # 7. Notify User
+    reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting." if reward_granted else ""
+    confirmation = (
+        "✅ **Video received! Thank you for contributing.**\n\n"
+        f"Videos uploaded this session: **{user_upload_state[user_id]['session_uploads']}**\n"
+        f"Status: `Pending Approval` ⏳\n\n"
+        f"Your contribution is under review.{reward_text}"
+    )
+    sent_confirmation = await message.reply_text(confirmation)
+
+    # Store confirmation message ID to edit later
+    pending_uploads_collection.update_one(
+        {"upload_id": upload_id},
+        {"$set": {"confirmation_message_id": sent_confirmation.id}}
+    )
+
+    # 8. Notify Admins
+    await notify_admins_of_upload(client, pending_data)
+
+async def notify_admins_of_upload(client: Client, upload_data: dict):
+    """Sends a notification to the review chat or admins about a new upload."""
+    user_id = upload_data['user_id']
+    upload_id = upload_data['upload_id']
+
+    text = (
+        "🆕 **New Video Uploaded for Review!**\n\n"
+        f"👤 **User:** `{user_id}`\n"
+        f"📅 **Time:** {upload_data['submitted_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        f"📝 **Caption:** {upload_data.get('caption') or 'None'}\n\n"
+        "Select an action below:"
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"adm_appr_{upload_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
+        ]
+    ])
+
+    if REVIEW_CHAT_ID:
+        try:
+            await client.copy_message(
+                chat_id=REVIEW_CHAT_ID,
+                from_chat_id=user_id,
+                message_id=upload_data['message_id_in_user_chat'],
+                caption=text,
+                reply_markup=reply_markup
+            )
+            return
+        except Exception as e:
+            logger.error(f"Failed to forward to review chat {REVIEW_CHAT_ID}: {e}")
+
+    # Fallback: send to all admins
+    for admin_id in BOT_ADMINS:
+        try:
+            await client.copy_message(
+                chat_id=admin_id,
+                from_chat_id=user_id,
+                message_id=upload_data['message_id_in_user_chat'],
+                caption=text,
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.warning(f"Failed to notify admin {admin_id} about upload: {e}")
 
 
 @bot.on_message(filters.command("category") & filters.private & admin_only)
@@ -4732,6 +5244,82 @@ async def back_to_fsub_list_callback(client: Client, callback_query: CallbackQue
     await callback_query.answer()
 
 # NEW: Admin command for setting data channel
+@bot.on_message(filters.command("configupload") & filters.private & admin_only)
+async def config_upload_cmd(client: Client, message: Message):
+    """Admin command to configure upload settings."""
+    text = (
+        "⚙️ **Upload Configuration**\n\n"
+        f"💰 **Reward Duration:** {UPLOAD_CONFIG['reward_hours']} hours\n"
+        f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
+        f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
+        f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
+        f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n\n"
+        "Tap a button to change a setting:"
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Reward Hours", callback_data="cfg_upl_reward"), InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily")],
+        [InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls"), InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt")],
+        [InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")]
+    ])
+
+    await message.reply(text, reply_markup=reply_markup)
+
+@bot.on_callback_query(filters.regex(r"^cfg_upl_(.+)$"))
+async def config_upload_callback(client: Client, callback_query: CallbackQuery):
+    """Handles configuration setting changes."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        return
+
+    setting = callback_query.data[8:]
+
+    if setting == "toggle_scrolls":
+        UPLOAD_CONFIG['auto_give_scrolls'] = not UPLOAD_CONFIG['auto_give_scrolls']
+        settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+        await callback_query.answer(f"Auto-give scrolls: {'Enabled' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled'}")
+        await config_upload_cmd(client, callback_query.message)
+        return
+
+    # For other settings, prompt for input
+    prompt_map = {
+        "reward": "Enter new reward duration in **hours** (e.g., 6):",
+        "daily": "Enter new **daily maximum** videos per user (e.g., 100):",
+        "scroll_amt": "Enter new **temporary scrolls** amount per upload (e.g., 20):",
+        "scroll_exp": "Enter new **scrolls expiry** in hours (e.g., 48):"
+    }
+
+    admin_rename_category_state[user_id] = {'step': f'cfg_upl_{setting}'} # Reusing state dict for simplicity
+    await callback_query.message.reply(prompt_map[setting])
+    await callback_query.answer()
+
+@bot.on_message(filters.command("setreviewchat") & filters.private & admin_only)
+async def set_review_chat_cmd(client: Client, message: Message):
+    """Admin command to set the review chat ID."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /setreviewchat command.")
+
+    args = message.text.split()
+    if len(args) < 2:
+        # Prompt to send ID if not provided in command
+        admin_data_channel_state[user_id] = {'step': 'await_review_chat_id'} # Reuse data channel state conceptually or create new
+        await message.reply("Please send the **Chat ID** of the group/channel where uploads should be reviewed. 📝")
+        return
+
+    try:
+        chat_id = int(args[1])
+        global REVIEW_CHAT_ID
+        REVIEW_CHAT_ID = chat_id
+        settings_collection.update_one(
+            {'_id': 'upload_config'},
+            {'$set': {'review_chat_id': chat_id}},
+            upsert=True
+        )
+        await message.reply(f"✅ Review chat ID set to ` {chat_id} `.")
+        logger.info(f"Admin {user_id} set review chat ID to {chat_id}")
+    except ValueError:
+        await message.reply("Invalid Chat ID. Please provide a valid integer.")
+
 @bot.on_message(filters.command("setdata") & filters.private & admin_only)
 async def set_data_cmd(client: Client, message: Message):
     user_id = message.from_user.id
@@ -5086,6 +5674,47 @@ async def handle_text_input(client: Client, message: Message):
                 logger.error(f"Error in /setfsub flow: {e}")
             finally:
                 del admin_fsub_state[user_id]
+            return
+
+        # NEW: Upload Config state handling
+        if user_id in admin_rename_category_state and admin_rename_category_state[user_id].get('step', '').startswith('cfg_upl_'):
+            setting = admin_rename_category_state[user_id]['step'][8:]
+            try:
+                if setting == "reward":
+                    UPLOAD_CONFIG['reward_hours'] = float(text_input)
+                elif setting == "daily":
+                    UPLOAD_CONFIG['daily_max'] = int(text_input)
+                elif setting == "scroll_amt":
+                    UPLOAD_CONFIG['temp_scrolls_amount'] = int(text_input)
+                elif setting == "scroll_exp":
+                    UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = int(text_input)
+
+                settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+                await message.reply(f"✅ Setting **{setting}** updated successfully!")
+                await config_upload_cmd(client, message)
+            except ValueError:
+                await message.reply("❌ Invalid input. Please provide a numeric value.")
+            finally:
+                del admin_rename_category_state[user_id]
+            return
+
+        # NEW: Admin Review Chat state handling
+        if user_id in admin_data_channel_state and admin_data_channel_state[user_id].get('step') == 'await_review_chat_id':
+            try:
+                chat_id = int(text_input)
+                global REVIEW_CHAT_ID
+                REVIEW_CHAT_ID = chat_id
+                settings_collection.update_one(
+                    {'_id': 'upload_config'},
+                    {'$set': {'review_chat_id': chat_id}},
+                    upsert=True
+                )
+                await message.reply(f"✅ Review chat ID set to ` {chat_id} `.")
+                logger.info(f"Admin {user_id} set review chat ID to {chat_id}")
+            except ValueError:
+                await message.reply("Invalid Chat ID. Please provide a valid integer.")
+            finally:
+                del admin_data_channel_state[user_id]
             return
 
         # NEW: Admin Data Channel state handling
