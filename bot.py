@@ -1903,7 +1903,14 @@ async def start_cmd(client: Client, message: Message):
                 'has_seen_free_scroll_popup': False,
                 'free_scroll_usage': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=config.FREE_SCROLL_RESET_HOURS)},
                 'free_batch_usage': {'claimed_batches': [], 'reset_at': datetime.now(timezone.utc) + timedelta(hours=config.FREE_LIMIT_RESET_HOURS)},
-                'free_video_usage': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)}
+                'free_video_usage': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)},
+                'temp_scrolls': [],
+                'permanent_scrolls': 0,
+                'upload_stats': {
+                    'total_uploads': 0,
+                    'pending_count': 0,
+                    'daily_uploads': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=24)}
+                }
             })
             logger.info(f"New user registered: {user_id} and received {config.NEW_USER_SCROLLS} free scrolls.")
 
@@ -2564,8 +2571,9 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
 
-    upload_id = callback_query.group(1)
-    category = b64_to_str(callback_query.group(2))
+    match = re.match(r"^apr_cat_(.+?)_(.+)$", callback_query.data)
+    upload_id = match.group(1)
+    category = b64_to_str(match.group(2))
 
     upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data or upload_data['status'] != "pending":
@@ -2691,8 +2699,9 @@ async def admin_final_reject_callback(client: Client, callback_query: CallbackQu
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
 
-    upload_id = callback_query.group(1)
-    reason = b64_to_str(callback_query.group(2))
+    match = re.match(r"^rej_res_(.+?)_(.+)$", callback_query.data)
+    upload_id = match.group(1)
+    reason = b64_to_str(match.group(2))
 
     upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data or upload_data['status'] != "pending":
@@ -4718,7 +4727,7 @@ async def handle_user_upload(client: Client, message: Message):
     # 5. Grant Reward (Temp Scrolls)
     reward_granted = False
     if UPLOAD_CONFIG['auto_give_scrolls']:
-        temp_scroll_expiry = now + timedelta(hours=UPLOAD_CONFIG['temp_scroll_expiry_hours'])
+        temp_scroll_expiry = now + timedelta(hours=UPLOAD_CONFIG['temp_scrolls_expiry_hours'])
         temp_scroll_entry = {
             'amount': UPLOAD_CONFIG['temp_scrolls_amount'],
             'expires_at': temp_scroll_expiry,
