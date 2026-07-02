@@ -100,6 +100,7 @@ settings_collection = db['settings']
 refresh_tokens_used_collection = db['refresh_tokens_used']
 video_batches_collection = db['video_batches'] # New collection for batch videos
 ssrb_verifications_collection = db['ssrb_verifications'] # New collection for cross-bot verification
+pending_uploads_collection = db['pending_uploads'] # New collection for user video uploads
 # NEW: Collections for dynamic channel IDs
 force_sub_channels_collection = db['force_sub_channels']
 data_channel_collection = db['data_channel']
@@ -120,6 +121,10 @@ categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True) # Renamed to "used url link" conceptually
 video_batches_collection.create_index([("batch_id", ASCENDING)], unique=True)
 ssrb_verifications_collection.create_index([("user_id", ASCENDING)], unique=True)
+pending_uploads_collection.create_index([("upload_id", ASCENDING)], unique=True)
+pending_uploads_collection.create_index([("user_id", ASCENDING)])
+pending_uploads_collection.create_index([("file_unique_id", ASCENDING)])
+pending_uploads_collection.create_index([("status", ASCENDING)])
 # NEW: Indexes for new collections
 force_sub_channels_collection.create_index([("channel_id", ASCENDING)], unique=True)
 # FIX: Removed unique=True for _id index as it's redundant and causes an error
@@ -1794,26 +1799,62 @@ async def upload_cmd(client: Client, message: Message):
         await send_force_subscribe_message(client, user_id)
         return
 
-    user_upload_state[user_id]['in_upload_mode'] = True
-    user_upload_state[user_id]['session_uploads'] = 0
-
     instructions = (
         "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
         "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
         "**How it works:**\n"
-        "1. Send one or multiple videos directly in this chat.\n"
-        "2. Our admins will review your submission.\n"
-        "3. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
+        "1. Click the button below to select a category.\n"
+        "2. Send one or multiple videos directly in this chat.\n"
+        "3. Our admins will review your submission.\n"
+        "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
         "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
-        "**Note:** Type /done when you are finished uploading.\n\n"
-        "👇 Tap the button below and then send your video(s)!"
+        "**Note:** Type /done when you are finished uploading."
     )
 
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 Send Video Now", callback_data="send_video_prompt")]
+        [InlineKeyboardButton("📤 Send Video Now", callback_data="upl_start_cat")]
     ])
 
     await message.reply(instructions, reply_markup=reply_markup)
+
+@bot.on_callback_query(filters.regex(r"^upl_start_cat$"))
+async def upload_start_category_callback(client: Client, callback_query: CallbackQuery):
+    """Prompt user to select a category before uploading."""
+    user_id = callback_query.from_user.id
+    categories = get_categories(for_admin_use=True)
+    if not categories:
+        await callback_query.answer("😔 No categories available for upload at the moment.", show_alert=True)
+        return
+
+    buttons = []
+    row = []
+    for i, cat in enumerate(categories):
+        row.append(InlineKeyboardButton(f"🗂️ {cat}", callback_data=f"upl_cat_{str_to_b64(cat)}"))
+        if (i + 1) % 2 == 0:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    await callback_query.message.edit_text("🎬 **Select a Category for your Upload:**", reply_markup=InlineKeyboardMarkup(buttons))
+    await callback_query.answer()
+
+@bot.on_callback_query(filters.regex(r"^upl_cat_(.+)$"))
+async def upload_category_selection_callback(client: Client, callback_query: CallbackQuery):
+    """Handles category selection for the /upload command."""
+    user_id = callback_query.from_user.id
+    category = b64_to_str(callback_query.data[8:])
+
+    user_upload_state[user_id]['in_upload_mode'] = True
+    user_upload_state[user_id]['session_uploads'] = 0
+    user_upload_state[user_id]['selected_category'] = category
+
+    await callback_query.message.edit_text(
+        f"✅ **Category selected:** `{category}`\n\n"
+        "📤 **Now, send your video(s) directly here!**\n"
+        "I will process them one by one. Type /done when finished. ✨"
+    )
+    await callback_query.answer(f"Category set to {category}")
 
 @bot.on_message(filters.command("myuploads") & filters.private)
 async def my_uploads_cmd(client: Client, message: Message):
@@ -4660,6 +4701,7 @@ async def handle_user_upload(client: Client, message: Message):
 
     # 4. Store in pending_uploads
     upload_id = str(uuid.uuid4())
+    category = user_upload_state[user_id].get('selected_category')
     pending_data = {
         "upload_id": upload_id,
         "user_id": user_id,
@@ -4668,7 +4710,8 @@ async def handle_user_upload(client: Client, message: Message):
         "status": "pending",
         "submitted_at": now,
         "caption": message.caption,
-        "message_id_in_user_chat": message.id
+        "message_id_in_user_chat": message.id,
+        "category": category
     }
     pending_uploads_collection.insert_one(pending_data)
 
@@ -4725,13 +4768,20 @@ async def notify_admins_of_upload(client: Client, upload_data: dict):
         "🆕 **New Video Uploaded for Review!**\n\n"
         f"👤 **User:** `{user_id}`\n"
         f"📅 **Time:** {upload_data['submitted_at'].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        f"🗂️ **Suggested Category:** `{upload_data.get('category') or 'None'}`\n"
         f"📝 **Caption:** {upload_data.get('caption') or 'None'}\n\n"
         "Select an action below:"
     )
 
+    # Buttons for notification
+    approve_cb = f"adm_appr_{upload_id}"
+    # If category is already selected by user, admin can approve directly
+    if upload_data.get('category'):
+        approve_cb = f"apr_cat_{upload_id}_{str_to_b64(upload_data['category'])}"
+
     reply_markup = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Approve", callback_data=f"adm_appr_{upload_id}"),
+            InlineKeyboardButton("✅ Approve", callback_data=approve_cb),
             InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
         ]
     ])
