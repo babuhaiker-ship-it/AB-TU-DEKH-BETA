@@ -264,7 +264,12 @@ UPLOAD_CONFIG = {
     'daily_max': config.UPLOAD_DAILY_MAX,
     'auto_give_scrolls': True,
     'temp_scrolls_amount': config.UPLOAD_TEMP_SCROLLS,
-    'temp_scrolls_expiry_hours': config.UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS
+    'temp_scrolls_expiry_hours': config.UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS,
+    'milestones_enabled': False,
+    'milestones': {
+        "5": 2.0,
+        "10": 4.0
+    }
 }
 
 # --- Navigation Spam Control ---
@@ -1909,6 +1914,7 @@ async def start_cmd(client: Client, message: Message):
                 'upload_stats': {
                     'total_uploads': 0,
                     'pending_count': 0,
+                    'approved_count': 0,
                     'daily_uploads': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=24)}
                 }
             })
@@ -2613,11 +2619,30 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         media_collection.insert_one(media_doc)
 
         # 2. Grant Reward (Token)
-        reward_duration_sec = int(UPLOAD_CONFIG['reward_hours'] * 3600)
-        add_token(upload_data['user_id'], duration_seconds=reward_duration_sec, is_admin_granted=False)
+        # Fetch updated user stats first
+        user_doc = users_collection.find_one_and_update(
+            {'user_id': upload_data['user_id']},
+            {'$inc': {'upload_stats.approved_count': 1}},
+            return_document=ReturnDocument.AFTER
+        )
+        approved_count = user_doc.get('upload_stats', {}).get('approved_count', 1) if user_doc else 1
+
+        reward_duration_hours = 0
+
+        if UPLOAD_CONFIG.get('milestones_enabled'):
+            milestones = UPLOAD_CONFIG.get('milestones', {})
+            # milestones keys are strings in Mongo, convert count to string for lookup
+            count_str = str(approved_count)
+            if count_str in milestones:
+                reward_duration_hours = float(milestones[count_str])
+        else:
+            reward_duration_hours = UPLOAD_CONFIG['reward_hours']
+
+        if reward_duration_hours > 0:
+            reward_duration_sec = int(reward_duration_hours * 3600)
+            add_token(upload_data['user_id'], duration_seconds=reward_duration_sec, is_admin_granted=False)
 
         # 3. Handle Temp Scrolls (Convert to Permanent)
-        user_doc = users_collection.find_one({'user_id': upload_data['user_id']})
         scroll_reward = 0
         if user_doc and 'temp_scrolls' in user_doc:
             for s in user_doc['temp_scrolls']:
@@ -2641,11 +2666,17 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
 
         # 5. Notify User
         try:
+            reward_text = ""
+            if reward_duration_hours > 0:
+                reward_text = f"Reward: **{reward_duration_hours} hours** of general access token granted! 🎁\n"
+            elif UPLOAD_CONFIG.get('milestones_enabled'):
+                reward_text = f"Progress: **{approved_count}** total approvals. Keep going to reach the next milestone! 🚀\n"
+
             await client.send_message(
                 upload_data['user_id'],
                 f"🎉 **Good News! Your video has been approved!**\n\n"
                 f"Category: `{category}`\n"
-                f"Reward: **{UPLOAD_CONFIG['reward_hours']} hours** of general access token granted! 🎁\n"
+                f"{reward_text}"
                 "Thank you for contributing to the community! ❤️"
             )
             # Update original confirmation message
@@ -5306,20 +5337,27 @@ async def back_to_fsub_list_callback(client: Client, callback_query: CallbackQue
 @bot.on_message(filters.command("configupload") & filters.private & admin_only)
 async def config_upload_cmd(client: Client, message: Message):
     """Admin command to configure upload settings."""
+    milestones_str = "\n".join([f"   • {k} videos -> {v} hours" for k, v in sorted(UPLOAD_CONFIG.get('milestones', {}).items(), key=lambda x: int(x[0]))])
+    if not milestones_str:
+        milestones_str = "   <i>None set</i>"
+
     text = (
         "⚙️ **Upload Configuration**\n\n"
-        f"💰 **Reward Duration:** {UPLOAD_CONFIG['reward_hours']} hours\n"
+        f"💰 **Standard Reward:** {UPLOAD_CONFIG['reward_hours']} hours\n"
         f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
         f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
         f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
         f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n\n"
+        f"🏆 **Milestones:** {'Enabled ✅' if UPLOAD_CONFIG.get('milestones_enabled') else 'Disabled ❌'}\n"
+        f"{milestones_str}\n\n"
         "Tap a button to change a setting:"
     )
 
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("💰 Reward Hours", callback_data="cfg_upl_reward"), InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily")],
         [InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls"), InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt")],
-        [InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")]
+        [InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
+        [InlineKeyboardButton("🏆 Toggle Milestones", callback_data="cfg_upl_toggle_milestones"), InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
     ])
 
     await message.reply(text, reply_markup=reply_markup)
@@ -5340,12 +5378,20 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
         await config_upload_cmd(client, callback_query.message)
         return
 
+    if setting == "toggle_milestones":
+        UPLOAD_CONFIG['milestones_enabled'] = not UPLOAD_CONFIG.get('milestones_enabled', False)
+        settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+        await callback_query.answer(f"Milestones: {'Enabled' if UPLOAD_CONFIG['milestones_enabled'] else 'Disabled'}")
+        await config_upload_cmd(client, callback_query.message)
+        return
+
     # For other settings, prompt for input
     prompt_map = {
         "reward": "Enter new reward duration in **hours** (e.g., 6):",
         "daily": "Enter new **daily maximum** videos per user (e.g., 100):",
         "scroll_amt": "Enter new **temporary scrolls** amount per upload (e.g., 20):",
-        "scroll_exp": "Enter new **scrolls expiry** in hours (e.g., 48):"
+        "scroll_exp": "Enter new **scrolls expiry** in hours (e.g., 48):",
+        "edit_milestones": "Enter milestones in `count:hours` format, separated by commas (e.g., `5:2,10:4`):"
     }
 
     admin_rename_category_state[user_id] = {'step': f'cfg_upl_{setting}'} # Reusing state dict for simplicity
@@ -5747,6 +5793,21 @@ async def handle_text_input(client: Client, message: Message):
                     UPLOAD_CONFIG['temp_scrolls_amount'] = int(text_input)
                 elif setting == "scroll_exp":
                     UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = int(text_input)
+                elif setting == "edit_milestones":
+                    new_milestones = {}
+                    parts = text_input.replace(" ", "").split(",")
+                    for part in parts:
+                        if ":" in part:
+                            k, v = part.split(":", 1)
+                            if k.isdigit():
+                                try:
+                                    new_milestones[k] = float(v)
+                                except ValueError:
+                                    continue
+                    if not new_milestones and text_input.strip().lower() != "none":
+                        await message.reply("❌ Invalid format. Use `count:hours`, e.g., `5:2,10:4`.")
+                        return
+                    UPLOAD_CONFIG['milestones'] = new_milestones
 
                 settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
                 await message.reply(f"✅ Setting **{setting}** updated successfully!")
