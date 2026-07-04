@@ -2672,6 +2672,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
 
         # 5. Notify User
         try:
+            video_share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=video_{video_uuid}_{upload_data['user_id']}"
             reward_text = ""
             if token_threshold_met and reward_duration_hours > 0:
                 reward_text = f"Reward: **{reward_duration_hours} hours** of general access token granted! 🎁\n"
@@ -2685,7 +2686,9 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
                 upload_data['user_id'],
                 f"🎉 **Good News! Your video has been approved!**\n\n"
                 f"Category: `{category}`\n"
-                f"{reward_text}"
+                f"{reward_text}\n"
+                f"🔗 **Your Video Link:**\n`{video_share_link}`\n\n"
+                f"💡 You can earn more by refferaling user with this link! 🤝\n\n"
                 "Thank you for contributing to the community! ❤️"
             )
             # Update original confirmation message
