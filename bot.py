@@ -68,7 +68,6 @@ class BotConfig:
     VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 6.0))
 
     # Upload Configuration Defaults
-    UPLOAD_REWARD_HOURS = float(os.environ.get('UPLOAD_REWARD_HOURS', 6.0))
     UPLOAD_DAILY_MAX = int(os.environ.get('UPLOAD_DAILY_MAX', 100))
     UPLOAD_TEMP_SCROLLS = int(os.environ.get('UPLOAD_TEMP_SCROLLS', 20))
     UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS = int(os.environ.get('UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS', 48))
@@ -262,7 +261,6 @@ active_video_message = {}
 user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int}
 REVIEW_CHAT_ID = None
 UPLOAD_CONFIG = {
-    'reward_hours': config.UPLOAD_REWARD_HOURS,
     'daily_max': config.UPLOAD_DAILY_MAX,
     'auto_give_scrolls': True,
     'temp_scrolls_amount': config.UPLOAD_TEMP_SCROLLS,
@@ -2643,8 +2641,6 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
                 count_str = str(approved_count)
                 if count_str in milestones:
                     reward_duration_hours = float(milestones[count_str])
-            else:
-                reward_duration_hours = UPLOAD_CONFIG['reward_hours']
 
             if reward_duration_hours > 0:
                 reward_duration_sec = int(reward_duration_hours * 3600)
@@ -5370,7 +5366,6 @@ async def config_upload_cmd(client: Client, message: Message):
 
     text = (
         "⚙️ **Upload Configuration**\n\n"
-        f"💰 **Standard Reward:** {UPLOAD_CONFIG['reward_hours']} hours\n"
         f"🔢 **Min Uploads for Reward:** {UPLOAD_CONFIG.get('min_upload_count', 1)} videos\n"
         f"⏳ **Max Pending Uploads:** {UPLOAD_CONFIG.get('max_pending', 30)} videos\n"
         f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
@@ -5383,11 +5378,10 @@ async def config_upload_cmd(client: Client, message: Message):
     )
 
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Reward Hours", callback_data="cfg_upl_reward"), InlineKeyboardButton("🔢 Min Uploads", callback_data="cfg_upl_min_count")],
-        [InlineKeyboardButton("⏳ Max Pending", callback_data="cfg_upl_max_pending"), InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily")],
-        [InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls"), InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt")],
-        [InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp"), InlineKeyboardButton("🏆 Toggle Milestones", callback_data="cfg_upl_toggle_milestones")],
-        [InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
+        [InlineKeyboardButton("🔢 Min Uploads", callback_data="cfg_upl_min_count"), InlineKeyboardButton("⏳ Max Pending", callback_data="cfg_upl_max_pending")],
+        [InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily"), InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls")],
+        [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
+        [InlineKeyboardButton("🏆 Toggle Milestones", callback_data="cfg_upl_toggle_milestones"), InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
     ])
 
     await message.reply(text, reply_markup=reply_markup)
@@ -5417,7 +5411,6 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
 
     # For other settings, prompt for input
     prompt_map = {
-        "reward": "Enter new reward duration in **hours** (e.g., 6):",
         "min_count": "Enter **minimum videos** user must upload to get a reward (e.g., 5):",
         "max_pending": "Enter **maximum pending uploads** allowed per user (e.g., 30):",
         "daily": "Enter new **daily maximum** videos per user (e.g., 100):",
@@ -5817,9 +5810,7 @@ async def handle_text_input(client: Client, message: Message):
         if user_id in admin_rename_category_state and admin_rename_category_state[user_id].get('step', '').startswith('cfg_upl_'):
             setting = admin_rename_category_state[user_id]['step'][8:]
             try:
-                if setting == "reward":
-                    UPLOAD_CONFIG['reward_hours'] = float(text_input)
-                elif setting == "min_count":
+                if setting == "min_count":
                     val = int(text_input)
                     if val < 1:
                         await message.reply("❌ Minimum upload count must be at least 1.")
