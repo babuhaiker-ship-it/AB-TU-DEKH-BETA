@@ -6226,6 +6226,7 @@ async def run_bot_background():
         await load_data_channel_id()
         await load_force_sub_channels()
         await load_shortener_setting()
+        await load_upload_config()
         await health_check()
         create_tracked_task(cleanup_expired_data())
         create_tracked_task(verify_and_cleanup_media())
