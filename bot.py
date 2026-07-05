@@ -2389,8 +2389,14 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
         logger.info(f"User {user_id} {action} video. Jumping to next.")
 
         # Mock callback query for navigate_video
-        callback_query.data = next_data
-        await navigate_video(client, callback_query)
+        # We restore the original data after the call to prevent double triggering
+        # if Pyrogram's dispatcher checks the modified data again.
+        original_data = callback_query.data
+        try:
+            callback_query.data = next_data
+            await navigate_video(client, callback_query)
+        finally:
+            callback_query.data = original_data
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
@@ -2557,8 +2563,12 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
         await callback_query.answer(popup, show_alert=False)
         logger.info(f"User {user_id} {action} default video. Jumping to next.")
 
-        callback_query.data = f"next_default|{video_uuid}"
-        await navigate_default_category(client, callback_query)
+        original_data = callback_query.data
+        try:
+            callback_query.data = f"next_default|{video_uuid}"
+            await navigate_default_category(client, callback_query)
+        finally:
+            callback_query.data = original_data
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_default_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
