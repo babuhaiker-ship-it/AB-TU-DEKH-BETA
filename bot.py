@@ -1582,6 +1582,8 @@ def video_nav_keyboard(
     elif is_saved:
         row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
     else: # Regular navigation
+        if category == "default (all)":
+            buttons.append([InlineKeyboardButton("📤 Upload and Earn", callback_data="upload_btn")])
         row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
 
     if row_3_buttons:
@@ -1823,6 +1825,35 @@ async def upload_cmd(client: Client, message: Message):
     ])
 
     await message.reply(instructions, reply_markup=reply_markup)
+
+@bot.on_callback_query(filters.regex(r"^upload_btn$"))
+async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Upload and Earn' button from the video menu."""
+    user_id = callback_query.from_user.id
+
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channels first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    instructions = (
+        "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
+        "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
+        "**How it works:**\n"
+        "1. Click the button below to select a category.\n"
+        "2. Send one or multiple videos directly in this chat.\n"
+        "3. Our admins will review your submission.\n"
+        "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
+        "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+        "**Note:** Type /done when you are finished uploading."
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Send Video Now", callback_data="upl_start_cat")]
+    ])
+
+    await callback_query.message.reply(instructions, reply_markup=reply_markup)
+    await callback_query.answer()
 
 @bot.on_callback_query(filters.regex(r"^upl_start_cat$"))
 async def upload_start_category_callback(client: Client, callback_query: CallbackQuery):
