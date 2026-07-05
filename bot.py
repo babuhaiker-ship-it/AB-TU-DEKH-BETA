@@ -259,6 +259,17 @@ active_video_message = {}
 
 # --- User Upload State ---
 user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int}
+UPLOAD_INSTRUCTIONS = (
+    "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
+    "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
+    "**How it works:**\n"
+    "1. Click the button below to select a category.\n"
+    "2. Send one or multiple videos directly in this chat.\n"
+    "3. Our admins will review your submission.\n"
+    "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
+    "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+    "**Note:** Type /done when you are finished uploading."
+)
 REVIEW_CHAT_ID = None
 UPLOAD_CONFIG = {
     'daily_max': config.UPLOAD_DAILY_MAX,
@@ -1587,6 +1598,10 @@ def video_nav_keyboard(
     if row_3_buttons:
         buttons.append(row_3_buttons)
 
+    # --- Fourth Row (Upload and Earn) ---
+    if category == "default (all)" and not any([is_batch, is_shared_link, is_saved]):
+        buttons.append([InlineKeyboardButton("📤 Upload", callback_data="upload_btn")])
+
     return InlineKeyboardMarkup(buttons)
 
 def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
@@ -1806,23 +1821,28 @@ async def upload_cmd(client: Client, message: Message):
         await send_force_subscribe_message(client, user_id)
         return
 
-    instructions = (
-        "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
-        "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
-        "**How it works:**\n"
-        "1. Click the button below to select a category.\n"
-        "2. Send one or multiple videos directly in this chat.\n"
-        "3. Our admins will review your submission.\n"
-        "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
-        "**Note:** Type /done when you are finished uploading."
-    )
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Send Video Now", callback_data="upl_start_cat")]
+    ])
+
+    await message.reply(UPLOAD_INSTRUCTIONS, reply_markup=reply_markup)
+
+@bot.on_callback_query(filters.regex(r"^upload_btn$"))
+async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the '📤 Upload' button callback from the video menu."""
+    user_id = callback_query.from_user.id
+
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channels first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
 
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Send Video Now", callback_data="upl_start_cat")]
     ])
 
-    await message.reply(instructions, reply_markup=reply_markup)
+    await callback_query.message.reply(UPLOAD_INSTRUCTIONS, reply_markup=reply_markup)
+    await callback_query.answer()
 
 @bot.on_callback_query(filters.regex(r"^upl_start_cat$"))
 async def upload_start_category_callback(client: Client, callback_query: CallbackQuery):
