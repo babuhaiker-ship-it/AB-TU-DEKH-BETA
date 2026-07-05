@@ -1583,7 +1583,7 @@ def video_nav_keyboard(
         row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
     else: # Regular navigation
         if category == "default (all)":
-            buttons.append([InlineKeyboardButton("📤 Upload and Earn", callback_data="upload_btn")])
+            row_3_buttons.append(InlineKeyboardButton("💰 Upload and Earn", callback_data="upload_btn"))
         row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
 
     if row_3_buttons:
