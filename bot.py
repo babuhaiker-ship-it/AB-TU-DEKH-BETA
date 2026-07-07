@@ -655,7 +655,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         text = (
             "🛑 **Access Token Required** 🛑\n\n"
             "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            "Unlock 6 hours of uninterrupted access and keep the vibe going. ✨"
+            f"Unlock {int(config.TOKEN_ACCESS_HOURS)} hours of uninterrupted access and keep the vibe going. ✨"
         )
     reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
@@ -1455,7 +1455,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons = []
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("🔓 Unlock 6-Hour Access (Watch Ad)", url=ad_url)])
+        buttons.append([InlineKeyboardButton(f"🔓 Unlock {int(config.TOKEN_ACCESS_HOURS)}-Hour Access (Watch Ad)", url=ad_url)])
 
     if user_id:
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
@@ -1466,7 +1466,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("📚 6-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
+        buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
         buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
 
     if is_pending_content:
@@ -1816,7 +1816,7 @@ async def upload_cmd(client: Client, message: Message):
         "2. Send one or multiple videos directly in this chat.\n"
         "3. Our admins will review your submission.\n"
         "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
         "**Note:** Type /done when you are finished uploading."
     )
 
@@ -1844,7 +1844,7 @@ async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
         "2. Send one or multiple videos directly in this chat.\n"
         "3. Our admins will review your submission.\n"
         "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
         "**Note:** Type /done when you are finished uploading."
     )
 
@@ -5451,8 +5451,8 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
         "min_count": "Enter **minimum videos** user must upload to get a reward (e.g., 5):",
         "max_pending": "Enter **maximum pending uploads** allowed per user (e.g., 30):",
         "daily": "Enter new **daily maximum** videos per user (e.g., 100):",
-        "scroll_amt": "Enter new **temporary scrolls** amount per upload (e.g., 20):",
-        "scroll_exp": "Enter new **scrolls expiry** in hours (e.g., 48):",
+        "scroll_amt": f"Enter new **temporary scrolls** amount per upload (Current: {UPLOAD_CONFIG['temp_scrolls_amount']}):",
+        "scroll_exp": f"Enter new **scrolls expiry** in hours (Current: {UPLOAD_CONFIG['temp_scrolls_expiry_hours']}):",
         "edit_milestones": "Enter milestones in `count:hours` format, separated by commas (e.g., `5:2,10:4`):"
     }
 
@@ -5562,7 +5562,7 @@ async def turnoff_shortener_cmd(client: Client, message: Message):
             upsert=True
         )
         SHORTENER_DISABLED = True
-        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 6-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
+        await message.reply(f"✅ URL Shortener has been <b>turned OFF</b>. 'Unlock {int(config.TOKEN_ACCESS_HOURS)}-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
         logger.info(f"Admin {message.from_user.id} turned off the shortener.")
     except Exception as e:
         logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
