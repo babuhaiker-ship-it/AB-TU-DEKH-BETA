@@ -5,7 +5,7 @@ import base64
 import logging
 from datetime import datetime, timedelta, timezone
 
-from hydrogram import Client, filters
+from hydrogram import Client, filters, StopPropagation
 from hydrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as HyUser, Chat as HyChat
 )
@@ -2974,6 +2974,9 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
         # Mock callback query for navigate_video
         callback_query.data = next_data
         await navigate_video(client, callback_query)
+        raise StopPropagation
+    except StopPropagation:
+        raise
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
@@ -3177,6 +3180,9 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
 
         callback_query.data = f"next_default|{video_uuid}"
         await navigate_default_category(client, callback_query)
+        raise StopPropagation
+    except StopPropagation:
+        raise
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_default_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
