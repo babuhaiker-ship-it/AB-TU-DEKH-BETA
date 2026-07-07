@@ -1816,7 +1816,7 @@ async def upload_cmd(client: Client, message: Message):
         "2. Send one or multiple videos directly in this chat.\n"
         "3. Our admins will review your submission.\n"
         "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately for each upload enjoy while you wait for approval! ⏳\n\n"
         "**Note:** Type /done when you are finished uploading."
     )
 
@@ -1844,7 +1844,7 @@ async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
         "2. Send one or multiple videos directly in this chat.\n"
         "3. Our admins will review your submission.\n"
         "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately for each upload enjoy while you wait for approval! ⏳\n\n"
         "**Note:** Type /done when you are finished uploading."
     )
 
