@@ -68,10 +68,11 @@ class BotConfig:
     VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 6.0))
 
     # Upload Configuration Defaults
-    UPLOAD_REWARD_HOURS = float(os.environ.get('UPLOAD_REWARD_HOURS', 6.0))
     UPLOAD_DAILY_MAX = int(os.environ.get('UPLOAD_DAILY_MAX', 100))
     UPLOAD_TEMP_SCROLLS = int(os.environ.get('UPLOAD_TEMP_SCROLLS', 20))
     UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS = int(os.environ.get('UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS', 48))
+    UPLOAD_MIN_COUNT = int(os.environ.get('UPLOAD_MIN_COUNT', 1))
+    UPLOAD_MAX_PENDING = int(os.environ.get('UPLOAD_MAX_PENDING', 30))
 
 try:
     config = BotConfig()
@@ -260,11 +261,12 @@ active_video_message = {}
 user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int}
 REVIEW_CHAT_ID = None
 UPLOAD_CONFIG = {
-    'reward_hours': config.UPLOAD_REWARD_HOURS,
     'daily_max': config.UPLOAD_DAILY_MAX,
     'auto_give_scrolls': True,
     'temp_scrolls_amount': config.UPLOAD_TEMP_SCROLLS,
     'temp_scrolls_expiry_hours': config.UPLOAD_TEMP_SCROLLS_EXPIRY_HOURS,
+    'min_upload_count': config.UPLOAD_MIN_COUNT,
+    'max_pending': config.UPLOAD_MAX_PENDING,
     'milestones_enabled': False,
     'milestones': {
         "5": 2.0,
@@ -2627,20 +2629,22 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         )
         approved_count = user_doc.get('upload_stats', {}).get('approved_count', 1) if user_doc else 1
 
+        min_req = UPLOAD_CONFIG.get('min_upload_count', 1)
+        token_threshold_met = (approved_count % min_req == 0) if min_req > 0 else True
+
         reward_duration_hours = 0
 
-        if UPLOAD_CONFIG.get('milestones_enabled'):
-            milestones = UPLOAD_CONFIG.get('milestones', {})
-            # milestones keys are strings in Mongo, convert count to string for lookup
-            count_str = str(approved_count)
-            if count_str in milestones:
-                reward_duration_hours = float(milestones[count_str])
-        else:
-            reward_duration_hours = UPLOAD_CONFIG['reward_hours']
+        if token_threshold_met:
+            if UPLOAD_CONFIG.get('milestones_enabled'):
+                milestones = UPLOAD_CONFIG.get('milestones', {})
+                # milestones keys are strings in Mongo, convert count to string for lookup
+                count_str = str(approved_count)
+                if count_str in milestones:
+                    reward_duration_hours = float(milestones[count_str])
 
-        if reward_duration_hours > 0:
-            reward_duration_sec = int(reward_duration_hours * 3600)
-            add_token(upload_data['user_id'], duration_seconds=reward_duration_sec, is_admin_granted=False)
+            if reward_duration_hours > 0:
+                reward_duration_sec = int(reward_duration_hours * 3600)
+                add_token(upload_data['user_id'], duration_seconds=reward_duration_sec, is_admin_granted=False)
 
         # 3. Handle Temp Scrolls (Convert to Permanent)
         scroll_reward = 0
@@ -2666,9 +2670,13 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
 
         # 5. Notify User
         try:
+            video_share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=video_{video_uuid}_{upload_data['user_id']}"
             reward_text = ""
-            if reward_duration_hours > 0:
+            if token_threshold_met and reward_duration_hours > 0:
                 reward_text = f"Reward: **{reward_duration_hours} hours** of general access token granted! 🎁\n"
+            elif not token_threshold_met:
+                more_needed = min_req - (approved_count % min_req)
+                reward_text = f"Progress: **{approved_count}** total approvals. Need **{more_needed} more** videos approved to get your next reward! 🚀\n"
             elif UPLOAD_CONFIG.get('milestones_enabled'):
                 reward_text = f"Progress: **{approved_count}** total approvals. Keep going to reach the next milestone! 🚀\n"
 
@@ -2676,8 +2684,11 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
                 upload_data['user_id'],
                 f"🎉 **Good News! Your video has been approved!**\n\n"
                 f"Category: `{category}`\n"
-                f"{reward_text}"
-                "Thank you for contributing to the community! ❤️"
+                f"{reward_text}\n"
+                f"🔗 **Your Video Link:**\n`{video_share_link}`\n\n"
+                f"💡 You can earn more by refferaling user with this link! 🤝\n\n"
+                "Thank you for contributing to the community! ❤️",
+                reply_to_message_id=upload_data.get('message_id_in_user_chat')
             )
             # Update original confirmation message
             if upload_data.get('confirmation_message_id'):
@@ -2760,7 +2771,8 @@ async def admin_final_reject_callback(client: Client, callback_query: CallbackQu
             upload_data['user_id'],
             f"❌ **Your video contribution was not approved.**\n\n"
             f"Reason: `{reason}`\n"
-            "Feel free to contribute other high-quality videos! ✨"
+            "Feel free to contribute other high-quality videos! ✨",
+            reply_to_message_id=upload_data.get('message_id_in_user_chat')
         )
         if upload_data.get('confirmation_message_id'):
             await client.edit_message_text(
@@ -4735,8 +4747,9 @@ async def handle_user_upload(client: Client, message: Message):
         return
 
     # Pending count check
-    if stats.get('pending_count', 0) >= 30:
-        await message.reply_text("🛑 You have 30 pending uploads. Please wait for them to be reviewed before sending more! ⏳")
+    max_pend = UPLOAD_CONFIG.get('max_pending', 30)
+    if stats.get('pending_count', 0) >= max_pend:
+        await message.reply_text(f"🛑 You have {max_pend} pending uploads. Please wait for them to be reviewed before sending more! ⏳")
         return
 
     # 4. Store in pending_uploads
@@ -4755,9 +4768,24 @@ async def handle_user_upload(client: Client, message: Message):
     }
     pending_uploads_collection.insert_one(pending_data)
 
-    # 5. Grant Reward (Temp Scrolls)
+    # 5. Update User Stats & Session Count
+    user_upload_state[user_id]['session_uploads'] = user_upload_state[user_id].get('session_uploads', 0) + 1
+    session_count = user_upload_state[user_id]['session_uploads']
+    min_req = UPLOAD_CONFIG.get('min_upload_count', 1)
+
+    users_collection.update_one(
+        {'user_id': user_id},
+        {
+            '$inc': {'upload_stats.total_uploads': 1, 'upload_stats.pending_count': 1, 'upload_stats.daily_uploads.count': 1},
+            '$set': {'upload_stats.daily_uploads.reset_at': daily['reset_at']}
+        }
+    )
+
+    # 6. Grant Reward (Temp Scrolls) if threshold met
     reward_granted = False
-    if UPLOAD_CONFIG['auto_give_scrolls']:
+    threshold_met = (session_count % min_req == 0) if min_req > 0 else True
+
+    if UPLOAD_CONFIG['auto_give_scrolls'] and threshold_met:
         temp_scroll_expiry = now + timedelta(hours=UPLOAD_CONFIG['temp_scrolls_expiry_hours'])
         temp_scroll_entry = {
             'amount': UPLOAD_CONFIG['temp_scrolls_amount'],
@@ -4770,21 +4798,16 @@ async def handle_user_upload(client: Client, message: Message):
         )
         reward_granted = True
 
-    # 6. Update User Stats
-    user_upload_state[user_id]['session_uploads'] = user_upload_state[user_id].get('session_uploads', 0) + 1
-    users_collection.update_one(
-        {'user_id': user_id},
-        {
-            '$inc': {'upload_stats.total_uploads': 1, 'upload_stats.pending_count': 1, 'upload_stats.daily_uploads.count': 1},
-            '$set': {'upload_stats.daily_uploads.reset_at': daily['reset_at']}
-        }
-    )
-
     # 7. Notify User
-    reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting." if reward_granted else ""
+    if threshold_met:
+        reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting." if UPLOAD_CONFIG['auto_give_scrolls'] else ""
+    else:
+        more_needed = min_req - (session_count % min_req)
+        reward_text = f"\n\n🚀 **Upload {more_needed} more video(s)** to receive your waiting reward!"
+
     confirmation = (
         "✅ **Video received! Thank you for contributing.**\n\n"
-        f"Videos uploaded this session: **{user_upload_state[user_id]['session_uploads']}**\n"
+        f"Videos uploaded this session: **{session_count}**\n"
         f"Status: `Pending Approval` ⏳\n\n"
         f"Your contribution is under review.{reward_text}"
     )
@@ -5343,7 +5366,8 @@ async def config_upload_cmd(client: Client, message: Message):
 
     text = (
         "⚙️ **Upload Configuration**\n\n"
-        f"💰 **Standard Reward:** {UPLOAD_CONFIG['reward_hours']} hours\n"
+        f"🔢 **Min Uploads for Reward:** {UPLOAD_CONFIG.get('min_upload_count', 1)} videos\n"
+        f"⏳ **Max Pending Uploads:** {UPLOAD_CONFIG.get('max_pending', 30)} videos\n"
         f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
         f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
         f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
@@ -5354,9 +5378,9 @@ async def config_upload_cmd(client: Client, message: Message):
     )
 
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💰 Reward Hours", callback_data="cfg_upl_reward"), InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily")],
-        [InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls"), InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt")],
-        [InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
+        [InlineKeyboardButton("🔢 Min Uploads", callback_data="cfg_upl_min_count"), InlineKeyboardButton("⏳ Max Pending", callback_data="cfg_upl_max_pending")],
+        [InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily"), InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls")],
+        [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
         [InlineKeyboardButton("🏆 Toggle Milestones", callback_data="cfg_upl_toggle_milestones"), InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
     ])
 
@@ -5387,7 +5411,8 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
 
     # For other settings, prompt for input
     prompt_map = {
-        "reward": "Enter new reward duration in **hours** (e.g., 6):",
+        "min_count": "Enter **minimum videos** user must upload to get a reward (e.g., 5):",
+        "max_pending": "Enter **maximum pending uploads** allowed per user (e.g., 30):",
         "daily": "Enter new **daily maximum** videos per user (e.g., 100):",
         "scroll_amt": "Enter new **temporary scrolls** amount per upload (e.g., 20):",
         "scroll_exp": "Enter new **scrolls expiry** in hours (e.g., 48):",
@@ -5785,8 +5810,18 @@ async def handle_text_input(client: Client, message: Message):
         if user_id in admin_rename_category_state and admin_rename_category_state[user_id].get('step', '').startswith('cfg_upl_'):
             setting = admin_rename_category_state[user_id]['step'][8:]
             try:
-                if setting == "reward":
-                    UPLOAD_CONFIG['reward_hours'] = float(text_input)
+                if setting == "min_count":
+                    val = int(text_input)
+                    if val < 1:
+                        await message.reply("❌ Minimum upload count must be at least 1.")
+                        return
+                    UPLOAD_CONFIG['min_upload_count'] = val
+                elif setting == "max_pending":
+                    val = int(text_input)
+                    if val < 1:
+                        await message.reply("❌ Maximum pending count must be at least 1.")
+                        return
+                    UPLOAD_CONFIG['max_pending'] = val
                 elif setting == "daily":
                     UPLOAD_CONFIG['daily_max'] = int(text_input)
                 elif setting == "scroll_amt":
@@ -6191,6 +6226,7 @@ async def run_bot_background():
         await load_data_channel_id()
         await load_force_sub_channels()
         await load_shortener_setting()
+        await load_upload_config()
         await health_check()
         create_tracked_task(cleanup_expired_data())
         create_tracked_task(verify_and_cleanup_media())
