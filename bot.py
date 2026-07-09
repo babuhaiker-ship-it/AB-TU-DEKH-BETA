@@ -271,7 +271,8 @@ UPLOAD_CONFIG = {
     'milestones': {
         "5": 2.0,
         "10": 4.0
-    }
+    },
+    'reward_tokens_hours': 2.0
 }
 
 # --- Navigation Spam Control ---
@@ -2674,12 +2675,16 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         reward_duration_hours = 0
 
         if token_threshold_met:
+            # Check for milestone rewards first
             if UPLOAD_CONFIG.get('milestones_enabled'):
                 milestones = UPLOAD_CONFIG.get('milestones', {})
-                # milestones keys are strings in Mongo, convert count to string for lookup
                 count_str = str(approved_count)
                 if count_str in milestones:
                     reward_duration_hours = float(milestones[count_str])
+
+            # Fallback to base reward if no milestone hit
+            if reward_duration_hours == 0:
+                reward_duration_hours = UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)
 
             if reward_duration_hours > 0:
                 reward_duration_sec = int(reward_duration_hours * 3600)
@@ -2711,7 +2716,9 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         try:
             video_share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=video_{video_uuid}_{upload_data['user_id']}"
             reward_text = ""
+            goal_reached_header = ""
             if token_threshold_met and reward_duration_hours > 0:
+                goal_reached_header = "🎯 **Goal Reached! Special Reward Unlocked!** 🎊\n\n"
                 reward_text = f"Reward: **{reward_duration_hours} hours** of general access token granted! 🎁\n"
             elif not token_threshold_met:
                 more_needed = min_req - (approved_count % min_req)
@@ -2719,14 +2726,19 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
             elif UPLOAD_CONFIG.get('milestones_enabled'):
                 reward_text = f"Progress: **{approved_count}** total approvals. Keep going to reach the next milestone! 🚀\n"
 
-            await client.send_message(
-                upload_data['user_id'],
+            approval_message = (
+                f"{goal_reached_header}"
                 f"🎉 **Good News! Your video has been approved!**\n\n"
                 f"Category: `{category}`\n"
                 f"{reward_text}\n"
                 f"🔗 **Your Video Link:**\n`{video_share_link}`\n\n"
                 f"💡 You can earn more by refferaling user with this link! 🤝\n\n"
-                "Thank you for contributing to the community! ❤️",
+                "Thank you for contributing to the community! ❤️"
+            )
+
+            await client.send_message(
+                upload_data['user_id'],
+                approval_message,
                 reply_to_message_id=upload_data.get('message_id_in_user_chat')
             )
             # Update original confirmation message
@@ -5416,7 +5428,8 @@ async def config_upload_cmd(client: Client, message: Message):
         f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
         f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
         f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
-        f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n\n"
+        f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n"
+        f"🎁 **Base Token Reward:** {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)} hours\n\n"
         f"🏆 **Milestones:** {'Enabled ✅' if UPLOAD_CONFIG.get('milestones_enabled') else 'Disabled ❌'}\n"
         f"{milestones_str}\n\n"
         "Tap a button to change a setting:"
@@ -5426,7 +5439,8 @@ async def config_upload_cmd(client: Client, message: Message):
         [InlineKeyboardButton("🔢 Min Uploads", callback_data="cfg_upl_min_count"), InlineKeyboardButton("⏳ Max Pending", callback_data="cfg_upl_max_pending")],
         [InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily"), InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls")],
         [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
-        [InlineKeyboardButton("🏆 Toggle Milestones", callback_data="cfg_upl_toggle_milestones"), InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
+        [InlineKeyboardButton("🎁 Token Reward", callback_data="cfg_upl_reward_tokens"), InlineKeyboardButton("🏆 Milestones", callback_data="cfg_upl_toggle_milestones")],
+        [InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
     ])
 
     await message.reply(text, reply_markup=reply_markup)
@@ -5461,6 +5475,7 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
         "daily": "Enter new **daily maximum** videos per user (e.g., 100):",
         "scroll_amt": f"Enter new **temporary scrolls** amount per upload (Current: {UPLOAD_CONFIG['temp_scrolls_amount']}):",
         "scroll_exp": f"Enter new **scrolls expiry** in hours (Current: {UPLOAD_CONFIG['temp_scrolls_expiry_hours']}):",
+        "reward_tokens": f"Enter **token reward hours** for reaching min uploads (Current: {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)}):",
         "edit_milestones": "Enter milestones in `count:hours` format, separated by commas (e.g., `5:2,10:4`):"
     }
 
@@ -5873,6 +5888,8 @@ async def handle_text_input(client: Client, message: Message):
                     UPLOAD_CONFIG['temp_scrolls_amount'] = int(text_input)
                 elif setting == "scroll_exp":
                     UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = int(text_input)
+                elif setting == "reward_tokens":
+                    UPLOAD_CONFIG['reward_tokens_hours'] = float(text_input)
                 elif setting == "edit_milestones":
                     new_milestones = {}
                     parts = text_input.replace(" ", "").split(",")
