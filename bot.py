@@ -1464,6 +1464,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
         v_btn_text = "✅ 𝐈'𝐦 𝐇𝐮𝐦𝐚𝐧" if SHORTENER_DISABLED else "🔐 human verification"
         buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
+        buttons.append([InlineKeyboardButton("💰 Upload and Earn", callback_data="upload_btn")])
 
     vip_text = "🧚𝑩𝒚𝒑𝒂𝒔𝒔 𝒗𝒆𝒓𝒊𝒇𝒊𝒄𝒂𝒕𝒊𝒐𝒏" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free Access)"
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
