@@ -272,7 +272,9 @@ UPLOAD_CONFIG = {
         "5": 2.0,
         "10": 4.0
     },
-    'reward_tokens_hours': 2.0
+    'reward_tokens_hours': 2.0,
+    'session_limit_count': 10,
+    'session_limit_minutes': 10
 }
 
 # --- Navigation Spam Control ---
@@ -4754,12 +4756,15 @@ async def handle_incoming_videos(client: Client, message: Message):
     if user_upload_state.get(user_id, {}).get('in_upload_mode'):
         # --- Check Session Cooldown ---
         now = datetime.now(timezone.utc)
+        limit_mins = UPLOAD_CONFIG.get('session_limit_minutes', 10)
+        limit_count = UPLOAD_CONFIG.get('session_limit_count', 10)
+
         recent_uploads = list(pending_uploads_collection.find({
             "user_id": user_id,
-            "submitted_at": {"$gt": now - timedelta(minutes=10)}
+            "submitted_at": {"$gt": now - timedelta(minutes=limit_mins)}
         }))
-        if len(recent_uploads) >= 10:
-            await message.reply_text("⏳ **Slow down!** You can only upload 10 videos every 10 minutes. Please wait a bit. 🛑")
+        if len(recent_uploads) >= limit_count:
+            await message.reply_text(f"⏳ **Slow down!** You can only upload {limit_count} videos every {limit_mins} minutes. Please wait a bit. 🛑")
             return
 
         await handle_user_upload(client, message)
@@ -5429,7 +5434,8 @@ async def config_upload_cmd(client: Client, message: Message):
         f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
         f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
         f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n"
-        f"🎁 **Base Token Reward:** {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)} hours\n\n"
+        f"🎁 **Base Token Reward:** {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)} hours\n"
+        f"⏳ **Session Limit:** {UPLOAD_CONFIG.get('session_limit_count', 10)} vids / {UPLOAD_CONFIG.get('session_limit_minutes', 10)} mins\n\n"
         f"🏆 **Milestones:** {'Enabled ✅' if UPLOAD_CONFIG.get('milestones_enabled') else 'Disabled ❌'}\n"
         f"{milestones_str}\n\n"
         "Tap a button to change a setting:"
@@ -5440,6 +5446,7 @@ async def config_upload_cmd(client: Client, message: Message):
         [InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily"), InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls")],
         [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
         [InlineKeyboardButton("🎁 Token Reward", callback_data="cfg_upl_reward_tokens"), InlineKeyboardButton("🏆 Milestones", callback_data="cfg_upl_toggle_milestones")],
+        [InlineKeyboardButton("⏲️ Session Limit", callback_data="cfg_upl_sess_cnt"), InlineKeyboardButton("⏱️ Session Time", callback_data="cfg_upl_sess_min")],
         [InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
     ])
 
@@ -5476,6 +5483,8 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
         "scroll_amt": f"Enter new **temporary scrolls** amount per upload (Current: {UPLOAD_CONFIG['temp_scrolls_amount']}):",
         "scroll_exp": f"Enter new **scrolls expiry** in hours (Current: {UPLOAD_CONFIG['temp_scrolls_expiry_hours']}):",
         "reward_tokens": f"Enter **token reward hours** for reaching min uploads (Current: {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)}):",
+        "sess_cnt": f"Enter **max videos** allowed per session (Current: {UPLOAD_CONFIG.get('session_limit_count', 10)}):",
+        "sess_min": f"Enter **session duration** in minutes (Current: {UPLOAD_CONFIG.get('session_limit_minutes', 10)}):",
         "edit_milestones": "Enter milestones in `count:hours` format, separated by commas (e.g., `5:2,10:4`):"
     }
 
@@ -5890,6 +5899,10 @@ async def handle_text_input(client: Client, message: Message):
                     UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = int(text_input)
                 elif setting == "reward_tokens":
                     UPLOAD_CONFIG['reward_tokens_hours'] = float(text_input)
+                elif setting == "sess_cnt":
+                    UPLOAD_CONFIG['session_limit_count'] = int(text_input)
+                elif setting == "sess_min":
+                    UPLOAD_CONFIG['session_limit_minutes'] = int(text_input)
                 elif setting == "edit_milestones":
                     new_milestones = {}
                     parts = text_input.replace(" ", "").split(",")
