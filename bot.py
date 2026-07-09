@@ -2338,6 +2338,13 @@ async def profile_cmd(client: Client, message: Message):
         referral_count = user.get('referral_count', 0)
         bookmarked_videos = user.get('bookmarked_videos', [])
 
+        # Calculate total scrolls
+        now = datetime.now(timezone.utc)
+        permanent_scrolls = user.get('permanent_scrolls', 0)
+        temp_scrolls = user.get('temp_scrolls', [])
+        valid_temp_scrolls_count = sum(s.get('amount', 0) for s in temp_scrolls if s.get('expires_at') and s['expires_at'] > now)
+        total_scrolls = permanent_scrolls + valid_temp_scrolls_count
+
         is_premium = is_premium_user(user_id)
         user_status = "💎 Premium User" if is_premium else "✨ Free User"
 
@@ -2352,6 +2359,7 @@ async def profile_cmd(client: Client, message: Message):
             f"👤 <b>Your Profile</b>\n\n"
             f"📌 Status: {user_status}\n"
             f"🪙 Active Tokens: {tokens_count}\n"
+            f"📜 Scrolls Remaining: {total_scrolls}\n"
             f"❤️ Saved Videos: {save_limit_display}\n"
             f"👥 Total Referrals: {referral_count}\n"
             f"───────────────────────\n"
