@@ -5261,11 +5261,55 @@ async def remove_admin_cmd(client: Client, message: Message):
 
     await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
 
+async def perform_user_deletion(client: Client, admin_user_id: int, target_user_id: int) -> str:
+    """Helper function to delete a user's data from all collections."""
+    if is_owner(target_user_id):
+        return "❌ You cannot delete the bot owner."
+
+    if is_admin(target_user_id) and admin_user_id != config.OWNER_ID:
+        return "❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin."
+
+    try:
+        user_deleted = users_collection.delete_one({'user_id': target_user_id})
+        tokens_deleted = tokens_collection.delete_one({'user_id': target_user_id})
+        history_deleted = history_collection.delete_one({'user_id': target_user_id})
+        ssrb_deleted = ssrb_verifications_collection.delete_one({'user_id': target_user_id})
+        pending_uploads_deleted = pending_uploads_collection.delete_many({'user_id': target_user_id})
+        shortener_logs_deleted = shortener_logs_collection.delete_many({'user_id': target_user_id})
+
+        if user_deleted.deleted_count > 0:
+            logger.info(f"Admin {admin_user_id} successfully deleted user {target_user_id}.")
+            return (f"✅ Successfully deleted user {target_user_id} from the database.\n"
+                    f"- User record: {'Deleted' if user_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- Tokens record: {'Deleted' if tokens_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- History record: {'Deleted' if history_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- SSRB Record: {'Deleted' if ssrb_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- Pending Uploads: {pending_uploads_deleted.deleted_count} removed\n"
+                    f"- Shortener Logs: {shortener_logs_deleted.deleted_count} removed")
+        else:
+            logger.warning(f"Admin {admin_user_id} tried to delete non-existent user {target_user_id}.")
+            return f"🤷 User {target_user_id} not found in the database."
+    except Exception as e:
+        logger.error(f"Error in perform_user_deletion for {target_user_id}: {e}", exc_info=True)
+        return f"❌ An error occurred during deletion: {e}"
+
 @bot.on_message(filters.command("deleteuser") & filters.private & admin_only)
 async def deleteuser_cmd(client: Client, message: Message):
     """Admin command to delete a user from the database."""
     admin_user_id = message.from_user.id
     logger.info(f"Admin {admin_user_id} initiated /deleteuser command.")
+
+    args = message.text.split()
+    if len(args) > 1:
+        try:
+            target_user_id = int(args[1])
+            result_msg = await perform_user_deletion(client, admin_user_id, target_user_id)
+            await message.reply(result_msg)
+            return
+        except ValueError:
+            await message.reply("Invalid User ID format. Please provide a numeric ID.")
+            return
+
     admin_delete_user_state[admin_user_id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete from the database. 📝\n\n⚠️ This action is irreversible and will delete all their data, including tokens and history.")
 
@@ -5710,36 +5754,14 @@ async def handle_text_input(client: Client, message: Message):
     if is_admin(user_id):
         if user_id in admin_delete_user_state and admin_delete_user_state[user_id].get('step') == 'await_user_id':
             try:
-                user_id_to_delete = int(text_input)
-
-                if is_owner(user_id_to_delete):
-                    await message.reply("❌ You cannot delete the bot owner.")
-                    return
-
-                if is_admin(user_id_to_delete):
-                    await message.reply("❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin.")
-                    return
-
-                # Perform deletions
-                user_deleted = users_collection.delete_one({'user_id': user_id_to_delete})
-                tokens_deleted = tokens_collection.delete_one({'user_id': user_id_to_delete})
-                history_deleted = history_collection.delete_one({'user_id': user_id_to_delete})
-
-                if user_deleted.deleted_count > 0:
-                    await message.reply(f"✅ Successfully deleted user {user_id_to_delete} from the database.\n"
-                                      f"- User record deleted: {user_deleted.deleted_count > 0}\n"
-                                      f"- Tokens record deleted: {tokens_deleted.deleted_count > 0}\n"
-                                      f"- History record deleted: {history_deleted.deleted_count > 0}")
-                    logger.info(f"Admin {user_id} successfully deleted user {user_id_to_delete}.")
-                else:
-                    await message.reply(f"🤷 User {user_id_to_delete} not found in the database.")
-                    logger.warning(f"Admin {user_id} tried to delete non-existent user {user_id_to_delete}.")
-
+                target_user_id = int(text_input)
+                result_msg = await perform_user_deletion(client, user_id, target_user_id)
+                await message.reply(result_msg)
             except ValueError:
                 await message.reply("Invalid User ID. Please send a valid integer ID.")
             except Exception as e:
                 await message.reply(f"An error occurred: {e}")
-                logger.error(f"Error in /deleteuser flow: {e}")
+                logger.error(f"Error in /deleteuser interactive flow: {e}")
             finally:
                 del admin_delete_user_state[user_id]
             return
