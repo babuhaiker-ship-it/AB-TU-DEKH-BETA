@@ -2294,6 +2294,48 @@ async def help_cmd(client: Client, message: Message):
         reply_markup=reply_markup
     )
 
+@bot.on_message(filters.command("helpadmin") & filters.private & admin_only)
+async def help_admin_cmd(client: Client, message: Message):
+    """Admin command to list all admin-only commands."""
+    help_text = (
+        "🛠️ **Admin Help Menu** 🛠️\n\n"
+        "**User Management:**\n"
+        "- /addpremium <id> <days>: Grant premium\n"
+        "- /removepremium <id>: Revoke access\n"
+        "- /deleteuser <id>: Wipe user data\n"
+        "- /viewtoken: Token leaderboard\n\n"
+        "**Content Management:**\n"
+        "- /addcategory <name>: Create category\n"
+        "- /deletecategory: Remove category\n"
+        "- /categoryrename: Rename category\n"
+        "- /batchadd: Continuous video upload\n"
+        "- /deletevideo: Interactive deletion\n"
+        "- /batchvideoadd: Create shareable batch\n\n"
+        "**Bot Configuration:**\n"
+        "- /configupload: Manage rewards/limits\n"
+        "- /setdata: Set video storage channel\n"
+        "- /setfsub: Manage join-to-use channels\n"
+        "- /setreviewchat: Set upload review group\n"
+        "- /setshortener: Configure URL shortener\n"
+        "- /bypass_limit <sec>: Shortener anti-cheat\n"
+        "- /turnoff_shortener / /turnon_shortener\n\n"
+        "**Utility & Stats:**\n"
+        "- /broadcast (reply): Global broadcast\n"
+        "- /stats: General bot stats\n"
+        "- /token_stats: Shortener usage stats\n"
+        "- /toggle_auto_delete / /toggle_protect\n"
+        "- /stop / /done: End active admin modes\n"
+    )
+
+    if is_owner(message.from_user.id):
+        help_text += (
+            "\n**Owner Commands:**\n"
+            "- /addadmin <id>: Promote user\n"
+            "- /removeadmin: Demote user\n"
+        )
+
+    await message.reply(help_text)
+
 @bot.on_message(filters.command("profile") & filters.private)
 async def profile_cmd(client: Client, message: Message):
     """Handles the /profile command to show user statistics."""
