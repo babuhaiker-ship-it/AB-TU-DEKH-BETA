@@ -511,15 +511,22 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
 def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admin_granted: bool = False):
     """
     Adds a new token for a user with a specified duration.
-    If is_admin_granted is True, this token signifies premium access.
+    Admin-granted tokens (Premium) are activated immediately.
+    Others are banked until manually activated by the user.
     """
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=duration_seconds)
+    # Admin granted tokens activate immediately.
+    should_activate = is_admin_granted
+
+    expires_at = now + timedelta(seconds=duration_seconds) if should_activate else None
+
     token = {
         'token_id': str(uuid.uuid4()),
         'created_at': now,
         'expires_at': expires_at,
-        'is_admin_granted': is_admin_granted
+        'duration_seconds': duration_seconds,
+        'is_admin_granted': is_admin_granted,
+        'is_activated': should_activate
     }
     try:
         tokens_collection.update_one(
@@ -527,7 +534,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
             {'$push': {'tokens': token}},
             upsert=True
         )
-        logger.info(f"Token added for user {user_id}. Admin granted: {is_admin_granted}, expires at {expires_at}")
+        logger.info(f"Token added for user {user_id}. Admin granted: {is_admin_granted}, Activated: {should_activate}")
         return token
     except Exception as e:
         logger.error(f"Error adding token for user {user_id}: {e}", exc_info=True)
@@ -541,7 +548,8 @@ def is_premium_user(user_id: int) -> bool:
         return False
 
     for token in doc['tokens']:
-        if token.get('is_admin_granted', False) and token.get('expires_at') and token['expires_at'] > now:
+        # Consider both is_activated field and legacy tokens (where field might be missing)
+        if token.get('is_activated', True) and token.get('is_admin_granted', False) and token.get('expires_at') and token['expires_at'] > now:
             return True
     return False
 
@@ -553,9 +561,55 @@ def user_has_token(user_id: int) -> bool:
         return False
 
     for token in doc['tokens']:
-        if token.get('expires_at') and token['expires_at'] > now:
+        # Consider both is_activated field and legacy tokens (where field might be missing)
+        if token.get('is_activated', True) and token.get('expires_at') and token['expires_at'] > now:
             return True
     return False
+
+def get_banked_tokens_count(user_id: int) -> int:
+    """Returns the number of unactivated tokens a user has."""
+    doc = tokens_collection.find_one({'user_id': user_id})
+    if not doc or 'tokens' not in doc:
+        return 0
+    return sum(1 for t in doc['tokens'] if not t.get('is_activated', False))
+
+async def activate_bank_token(user_id: int) -> tuple[bool, str]:
+    """Activates one banked token for the user."""
+    doc = tokens_collection.find_one({'user_id': user_id})
+    if not doc or 'tokens' not in doc:
+        return False, "You don't have any tokens to activate."
+
+    banked_tokens = [t for t in doc['tokens'] if not t.get('is_activated', False)]
+    if not banked_tokens:
+        return False, "Your token bank is empty."
+
+    # Sort by creation date to activate the oldest one first
+    banked_tokens.sort(key=lambda x: x.get('created_at', datetime.min.replace(tzinfo=timezone.utc)))
+    target_token = banked_tokens[0]
+
+    now = datetime.now(timezone.utc)
+    duration = target_token.get('duration_seconds', config.TOKEN_EXPIRY)
+    expires_at = now + timedelta(seconds=duration)
+
+    try:
+        # Atomically update the specific token in the array
+        result = tokens_collection.update_one(
+            {'user_id': user_id, 'tokens.token_id': target_token['token_id']},
+            {'$set': {
+                'tokens.$.is_activated': True,
+                'tokens.$.expires_at': expires_at,
+                'tokens.$.activated_at': now
+            }}
+        )
+
+        if result.modified_count > 0:
+            hours = int(duration / 3600)
+            return True, f"✅ **Token Activated!**\n\nYou now have **{hours} hours** of full access. Enjoy! 🍿"
+        else:
+            return False, "Failed to activate token. Please try again."
+    except Exception as e:
+        logger.error(f"Error activating token for user {user_id}: {e}", exc_info=True)
+        return False, "An error occurred during activation."
 
 def user_can_access_video(user_id: int) -> bool:
     """Checks if a user can access video content (is premium or has a token)."""
@@ -1457,6 +1511,11 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = []
 
+    if user_id:
+        banked_count = get_banked_tokens_count(user_id)
+        if banked_count > 0:
+            buttons.append([InlineKeyboardButton(f"🔋 Activate Token (Bank: {banked_count})", callback_data="activate_bank_token")])
+
     if not SHORTENER_DISABLED:
         buttons.append([InlineKeyboardButton(f"🔓 Unlock {int(config.TOKEN_ACCESS_HOURS)}-Hour Access (Watch Ad)", url=ad_url)])
 
@@ -1736,8 +1795,8 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         added_token = add_token(user_id, config.REFRESH_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
         if added_token:
             refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
-            logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
-            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {int(config.REFRESH_BONUS * config.TOKEN_EXPIRY / 3600)} hours. Enjoy! 🍿"
+            logger.info(f"Token added for user {user_id} via refresh. Token is banked.")
+            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. It has been added to your bank. Activate it whenever you need access! 🏦"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
     except Exception as e:
@@ -1858,6 +1917,28 @@ async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
 
     await callback_query.message.reply(instructions, reply_markup=reply_markup)
     await callback_query.answer()
+
+@bot.on_callback_query(filters.regex(r"^activate_bank_token$"))
+async def activate_bank_token_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the manual activation of a banked token."""
+    user_id = callback_query.from_user.id
+    success, message = await activate_bank_token(user_id)
+
+    if success:
+        await callback_query.answer(message, show_alert=True)
+        # Refresh the keyboard to reflect updated bank count or remove the button
+        ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
+
+        # Check if we should use the "pending content" version of the keyboard
+        is_pending = "Access Token Required" in callback_query.message.text or "Almost there" in callback_query.message.text
+
+        await callback_query.message.edit_reply_markup(
+            reply_markup=generate_token_earning_keyboard(ad_url, is_pending_content=is_pending, user_id=user_id)
+        )
+    else:
+        await callback_query.answer(message, show_alert=True)
 
 @bot.on_callback_query(filters.regex(r"^upl_start_cat$"))
 async def upload_start_category_callback(client: Client, callback_query: CallbackQuery):
@@ -2377,9 +2458,11 @@ async def profile_cmd(client: Client, message: Message):
         tokens_doc = tokens_collection.find_one({'user_id': user_id})
 
         tokens_count = 0
+        banked_tokens = 0
         if tokens_doc and 'tokens' in tokens_doc:
             now = datetime.now(timezone.utc)
-            tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
+            tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('is_activated', True) and token.get('expires_at') and token['expires_at'] > now)
+            banked_tokens = sum(1 for token in tokens_doc['tokens'] if not token.get('is_activated', False))
 
         referral_count = user.get('referral_count', 0)
         bookmarked_videos = user.get('bookmarked_videos', [])
@@ -2405,6 +2488,7 @@ async def profile_cmd(client: Client, message: Message):
             f"👤 <b>Your Profile</b>\n\n"
             f"📌 Status: {user_status}\n"
             f"🪙 Active Tokens: {tokens_count}\n"
+            f"🏦 Banked Tokens: {banked_tokens}\n"
             f"📜 Scrolls Remaining: {total_scrolls}\n"
             f"❤️ Saved Videos: {save_limit_display}\n"
             f"👥 Total Referrals: {referral_count}\n"
@@ -2764,7 +2848,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
             goal_reached_header = ""
             if token_threshold_met and reward_duration_hours > 0:
                 goal_reached_header = "🎯 **Goal Reached! Special Reward Unlocked!** 🎊\n\n"
-                reward_text = f"Reward: **{reward_duration_hours} hours** of general access token granted! 🎁\n"
+                reward_text = f"Reward: **{reward_duration_hours} hours** of general access token added to your bank! 🎁\n"
             elif not token_threshold_met:
                 more_needed = min_req - (approved_count % min_req)
                 reward_text = f"Progress: **{approved_count}** total approvals. Need **{more_needed} more** videos approved to get your next reward! 🚀\n"
@@ -6296,7 +6380,7 @@ async def monitor_ssrb_verifications(client: Client):
                     await client.send_message(
                         user_id,
                         f"✅ <b>Verification Successful!</b>\n\n"
-                        f"You have received your token from Save Restrict Bot verification! Enjoy! 🍿"
+                        f"You have received your token! It has been added to your bank. Activate it whenever you need access! 🏦"
                     )
                 except Exception as e:
                     logger.warning(f"Failed to notify user {user_id} about ATDB token: {e}")
