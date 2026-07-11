@@ -1507,7 +1507,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
-def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None) -> InlineKeyboardMarkup:
+def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None, remove_tutorial: bool = False) -> InlineKeyboardMarkup:
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = []
 
@@ -1529,11 +1529,12 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
-        buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
+        if not remove_tutorial:
+            buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
+        buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
 
-    if is_pending_content:
-        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
+    # Always append the Refresh button when we display the token required/earning screen
+    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -2251,7 +2252,29 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
         return
 
     if not user_can_access_video(user_id):
-        await callback_query.answer("You still haven't received a token. Please complete the task first.", show_alert=True)
+        ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
+
+        info_text = (
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
+        )
+        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content=True, user_id=user_id, remove_tutorial=True)
+
+        await callback_query.message.reply(
+            info_text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+        await callback_query.answer()
         return
 
     user_doc = users_collection.find_one_and_update(
@@ -3670,15 +3693,16 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
 
         if SHORTENER_DISABLED:
             text = "🌟 Almost there! Just one quick step…\nVerify you're human (takes a few seconds) ❤️"
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         elif is_pending_content:
             text = (
                 "❌ <b>Token Required To View Content!</b>\n\n"
                 "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
             )
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         else:
             text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
-
-        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
         await message.reply(
             text,
@@ -4970,11 +4994,11 @@ async def handle_user_upload(client: Client, message: Message):
         }
     )
 
-    # 6. Grant Reward (Temp Scrolls) if threshold met
+    # 6. Grant Reward (Temp Scrolls) immediately on every upload
     reward_granted = False
     threshold_met = (session_count % min_req == 0) if min_req > 0 else True
 
-    if UPLOAD_CONFIG['auto_give_scrolls'] and threshold_met:
+    if UPLOAD_CONFIG['auto_give_scrolls']:
         temp_scroll_expiry = now + timedelta(hours=UPLOAD_CONFIG['temp_scrolls_expiry_hours'])
         temp_scroll_entry = {
             'amount': UPLOAD_CONFIG['temp_scrolls_amount'],
@@ -4988,11 +5012,14 @@ async def handle_user_upload(client: Client, message: Message):
         reward_granted = True
 
     # 7. Notify User
-    if threshold_met:
-        reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting." if UPLOAD_CONFIG['auto_give_scrolls'] else ""
+    if UPLOAD_CONFIG['auto_give_scrolls']:
+        reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting."
     else:
-        more_needed = min_req - (session_count % min_req)
-        reward_text = f"\n\n🚀 **Upload {more_needed} more video(s)** to receive your waiting reward!"
+        if threshold_met:
+            reward_text = ""
+        else:
+            more_needed = min_req - (session_count % min_req)
+            reward_text = f"\n\n🚀 **Upload {more_needed} more video(s)** to receive your waiting reward!"
 
     confirmation = (
         "✅ **Video received! Thank you for contributing.**\n\n"
