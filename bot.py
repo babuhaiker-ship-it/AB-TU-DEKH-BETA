@@ -636,7 +636,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     # Check Temporary Scrolls
     now = datetime.now(timezone.utc)
     temp_scrolls = user.get('temp_scrolls', [])
-    valid_temp_scrolls = [s for s in temp_scrolls if s['expires_at'] > now and s.get('amount', 0) > 0]
+    valid_temp_scrolls = [s for s in temp_scrolls if (s.get('expires_at') is None or s['expires_at'] > now) and s.get('amount', 0) > 0]
     if valid_temp_scrolls:
         return True
 
@@ -677,10 +677,10 @@ def mark_free_video_used(user_id: int):
     now = datetime.now(timezone.utc)
     temp_scrolls = user.get('temp_scrolls', [])
     # Find oldest valid temp scroll
-    valid_indices = [i for i, s in enumerate(temp_scrolls) if s['expires_at'] > now and s.get('amount', 0) > 0]
+    valid_indices = [i for i, s in enumerate(temp_scrolls) if (s.get('expires_at') is None or s['expires_at'] > now) and s.get('amount', 0) > 0]
     if valid_indices:
-        # Sort by expiry to use the one expiring soonest
-        valid_indices.sort(key=lambda i: temp_scrolls[i]['expires_at'])
+        # Sort by expiry to use the one expiring soonest, with permanent scrolls used last
+        valid_indices.sort(key=lambda i: temp_scrolls[i].get('expires_at') or datetime.max.replace(tzinfo=timezone.utc))
         target_idx = valid_indices[0]
 
         # Decrement amount
@@ -2494,7 +2494,7 @@ async def profile_cmd(client: Client, message: Message):
         now = datetime.now(timezone.utc)
         permanent_scrolls = user.get('permanent_scrolls', 0)
         temp_scrolls = user.get('temp_scrolls', [])
-        valid_temp_scrolls_count = sum(s.get('amount', 0) for s in temp_scrolls if s.get('expires_at') and s['expires_at'] > now)
+        valid_temp_scrolls_count = sum(s.get('amount', 0) for s in temp_scrolls if s.get('amount', 0) > 0 and (s.get('expires_at') is None or s['expires_at'] > now))
         total_scrolls = permanent_scrolls + valid_temp_scrolls_count
 
         is_premium = is_premium_user(user_id)
@@ -4999,7 +4999,8 @@ async def handle_user_upload(client: Client, message: Message):
     threshold_met = (session_count % min_req == 0) if min_req > 0 else True
 
     if UPLOAD_CONFIG['auto_give_scrolls']:
-        temp_scroll_expiry = now + timedelta(hours=UPLOAD_CONFIG['temp_scrolls_expiry_hours'])
+        expiry_hours = UPLOAD_CONFIG.get('temp_scrolls_expiry_hours', 0)
+        temp_scroll_expiry = (now + timedelta(hours=expiry_hours)) if expiry_hours > 0 else None
         temp_scroll_entry = {
             'amount': UPLOAD_CONFIG['temp_scrolls_amount'],
             'expires_at': temp_scroll_expiry,
@@ -5624,6 +5625,7 @@ async def config_upload_cmd(client: Client, message: Message):
     if not milestones_str:
         milestones_str = "   <i>None set</i>"
 
+    expiry_text = "Disabled (Permanent) ♾️" if UPLOAD_CONFIG.get('temp_scrolls_expiry_hours', 0) == 0 else f"{UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours"
     text = (
         "⚙️ **Upload Configuration**\n\n"
         f"🔢 **Min Uploads for Reward:** {UPLOAD_CONFIG.get('min_upload_count', 1)} videos\n"
@@ -5631,7 +5633,7 @@ async def config_upload_cmd(client: Client, message: Message):
         f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
         f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
         f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
-        f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n"
+        f"🕒 **Scrolls Expiry:** {expiry_text}\n"
         f"🎁 **Base Token Reward:** {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)} hours\n"
         f"⏳ **Session Limit:** {UPLOAD_CONFIG.get('session_limit_count', 10)} vids / {UPLOAD_CONFIG.get('session_limit_minutes', 10)} mins\n\n"
         f"🏆 **Milestones:** {'Enabled ✅' if UPLOAD_CONFIG.get('milestones_enabled') else 'Disabled ❌'}\n"
@@ -5642,7 +5644,7 @@ async def config_upload_cmd(client: Client, message: Message):
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔢 Min Uploads", callback_data="cfg_upl_min_count"), InlineKeyboardButton("⏳ Max Pending", callback_data="cfg_upl_max_pending")],
         [InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily"), InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls")],
-        [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
+        [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp"), InlineKeyboardButton("📴 Disable Expiry", callback_data="cfg_upl_disable_expiry")],
         [InlineKeyboardButton("🎁 Token Reward", callback_data="cfg_upl_reward_tokens"), InlineKeyboardButton("🏆 Milestones", callback_data="cfg_upl_toggle_milestones")],
         [InlineKeyboardButton("⏲️ Session Limit", callback_data="cfg_upl_sess_cnt"), InlineKeyboardButton("⏱️ Session Time", callback_data="cfg_upl_sess_min")],
         [InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
@@ -5658,6 +5660,13 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
         return
 
     setting = callback_query.data[8:]
+
+    if setting == "disable_expiry":
+        UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = 0
+        settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+        await callback_query.answer("Scrolls expiry disabled (scrolls are now permanent)!")
+        await config_upload_cmd(client, callback_query.message)
+        return
 
     if setting == "toggle_scrolls":
         UPLOAD_CONFIG['auto_give_scrolls'] = not UPLOAD_CONFIG['auto_give_scrolls']
