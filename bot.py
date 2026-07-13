@@ -3758,9 +3758,21 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed to send share link for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
+async def auto_delete_download(client: Client, chat_id: int, video_message: Message, info_message: Message):
+    """Automatically deletes the downloaded video and its info warning message after 10 minutes and notifies the user."""
+    await asyncio.sleep(600)  # Wait 10 minutes
+    try:
+        await client.delete_messages(chat_id, [video_message.id, info_message.id])
+    except Exception as e:
+        logger.warning(f"Failed to delete download messages in auto_delete_download: {e}")
+    try:
+        await client.send_message(chat_id, "🗑️ **The downloaded video has been auto-deleted to protect content privacy.**")
+    except Exception as e:
+        logger.warning(f"Failed to send deletion confirmation message: {e}")
+
 @bot.on_callback_query(filters.regex(r"^download_(.+)$"))
 async def download_video_callback(client: Client, callback_query: CallbackQuery):
-    """Handles 'Download' video callback for premium users."""
+    """Handles 'Download' video callback for premium users with auto-delete after 10 minutes."""
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
     chat_id = callback_query.message.chat.id
@@ -3796,12 +3808,17 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             return
 
         try:
-            await client.send_video(
+            sent_video = await client.send_video(
                 chat_id,
                 video=video['file_id'],
-                caption=None,
+                caption="⚠️ This video is for temporary download only and will be deleted in 10 minutes! Please save or forward it if you want to keep it.",
                 protect_content=False
             )
+            sent_info = await client.send_message(
+                chat_id,
+                "⏳ **Temporary Download Link Generated!**\n\nThis video and this message will be automatically deleted in **10 minutes** to protect privacy. Please download, save, or forward it now! 🚀"
+            )
+            create_tracked_task(auto_delete_download(client, chat_id, sent_video, sent_info))
             await callback_query.answer("Download initiated! 🚀")
             logger.info(f"Premium user {user_id} successfully received download for video {video_uuid}.")
         except FileReferenceExpired:
@@ -3819,12 +3836,17 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                 media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
                 logger.info(f"Database updated with new file_id for video {video['uuid']} during download.")
 
-                await client.send_video(
+                sent_video = await client.send_video(
                     chat_id,
                     video=new_file_id,
-                    caption=None,
+                    caption="⚠️ This video is for temporary download only and will be deleted in 10 minutes! Please save or forward it if you want to keep it.",
                     protect_content=False
                 )
+                sent_info = await client.send_message(
+                    chat_id,
+                    "⏳ **Temporary Download Link Generated!**\n\nThis video and this message will be automatically deleted in **10 minutes** to protect privacy. Please download, save, or forward it now! 🚀"
+                )
+                create_tracked_task(auto_delete_download(client, chat_id, sent_video, sent_info))
                 await callback_query.answer("Download initiated! 🚀")
                 logger.info(f"Premium user {user_id} successfully received download for video {video_uuid} after self-healing.")
             except Exception as heal_e:
