@@ -636,7 +636,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     # Check Temporary Scrolls
     now = datetime.now(timezone.utc)
     temp_scrolls = user.get('temp_scrolls', [])
-    valid_temp_scrolls = [s for s in temp_scrolls if s['expires_at'] > now and s.get('amount', 0) > 0]
+    valid_temp_scrolls = [s for s in temp_scrolls if (s.get('expires_at') is None or s['expires_at'] > now) and s.get('amount', 0) > 0]
     if valid_temp_scrolls:
         return True
 
@@ -677,10 +677,10 @@ def mark_free_video_used(user_id: int):
     now = datetime.now(timezone.utc)
     temp_scrolls = user.get('temp_scrolls', [])
     # Find oldest valid temp scroll
-    valid_indices = [i for i, s in enumerate(temp_scrolls) if s['expires_at'] > now and s.get('amount', 0) > 0]
+    valid_indices = [i for i, s in enumerate(temp_scrolls) if (s.get('expires_at') is None or s['expires_at'] > now) and s.get('amount', 0) > 0]
     if valid_indices:
-        # Sort by expiry to use the one expiring soonest
-        valid_indices.sort(key=lambda i: temp_scrolls[i]['expires_at'])
+        # Sort by expiry to use the one expiring soonest, with permanent scrolls used last
+        valid_indices.sort(key=lambda i: temp_scrolls[i].get('expires_at') or datetime.max.replace(tzinfo=timezone.utc))
         target_idx = valid_indices[0]
 
         # Decrement amount
@@ -1507,7 +1507,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
-def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None) -> InlineKeyboardMarkup:
+def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None, remove_tutorial: bool = False) -> InlineKeyboardMarkup:
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = []
 
@@ -1529,11 +1529,12 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
-        buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
+        if not remove_tutorial:
+            buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
+        buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
 
-    if is_pending_content:
-        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
+    # Always append the Refresh button when we display the token required/earning screen
+    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -2251,7 +2252,29 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
         return
 
     if not user_can_access_video(user_id):
-        await callback_query.answer("You still haven't received a token. Please complete the task first.", show_alert=True)
+        ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
+
+        info_text = (
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
+        )
+        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content=True, user_id=user_id, remove_tutorial=True)
+
+        await callback_query.message.reply(
+            info_text,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True
+        )
+        await callback_query.answer()
         return
 
     user_doc = users_collection.find_one_and_update(
@@ -2471,7 +2494,7 @@ async def profile_cmd(client: Client, message: Message):
         now = datetime.now(timezone.utc)
         permanent_scrolls = user.get('permanent_scrolls', 0)
         temp_scrolls = user.get('temp_scrolls', [])
-        valid_temp_scrolls_count = sum(s.get('amount', 0) for s in temp_scrolls if s.get('expires_at') and s['expires_at'] > now)
+        valid_temp_scrolls_count = sum(s.get('amount', 0) for s in temp_scrolls if s.get('amount', 0) > 0 and (s.get('expires_at') is None or s['expires_at'] > now))
         total_scrolls = permanent_scrolls + valid_temp_scrolls_count
 
         is_premium = is_premium_user(user_id)
@@ -3670,15 +3693,16 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
 
         if SHORTENER_DISABLED:
             text = "🌟 Almost there! Just one quick step…\nVerify you're human (takes a few seconds) ❤️"
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         elif is_pending_content:
             text = (
                 "❌ <b>Token Required To View Content!</b>\n\n"
                 "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
             )
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         else:
             text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
-
-        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
         await message.reply(
             text,
@@ -3734,9 +3758,21 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed to send share link for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
+async def auto_delete_download(client: Client, chat_id: int, video_message: Message, info_message: Message):
+    """Automatically deletes the downloaded video and its info warning message after 10 minutes and notifies the user."""
+    await asyncio.sleep(600)  # Wait 10 minutes
+    try:
+        await client.delete_messages(chat_id, [video_message.id, info_message.id])
+    except Exception as e:
+        logger.warning(f"Failed to delete download messages in auto_delete_download: {e}")
+    try:
+        await client.send_message(chat_id, "🗑️ **The downloaded video has been auto-deleted to protect content privacy.**")
+    except Exception as e:
+        logger.warning(f"Failed to send deletion confirmation message: {e}")
+
 @bot.on_callback_query(filters.regex(r"^download_(.+)$"))
 async def download_video_callback(client: Client, callback_query: CallbackQuery):
-    """Handles 'Download' video callback for premium users."""
+    """Handles 'Download' video callback for premium users with auto-delete after 10 minutes."""
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
     chat_id = callback_query.message.chat.id
@@ -3772,12 +3808,17 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             return
 
         try:
-            await client.send_video(
+            sent_video = await client.send_video(
                 chat_id,
                 video=video['file_id'],
-                caption=None,
+                caption="⚠️ This video is for temporary download only and will be deleted in 10 minutes! Please save or forward it if you want to keep it.",
                 protect_content=False
             )
+            sent_info = await client.send_message(
+                chat_id,
+                "⏳ **Temporary Download Link Generated!**\n\nThis video and this message will be automatically deleted in **10 minutes** to protect privacy. Please download, save, or forward it now! 🚀"
+            )
+            create_tracked_task(auto_delete_download(client, chat_id, sent_video, sent_info))
             await callback_query.answer("Download initiated! 🚀")
             logger.info(f"Premium user {user_id} successfully received download for video {video_uuid}.")
         except FileReferenceExpired:
@@ -3795,12 +3836,17 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                 media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
                 logger.info(f"Database updated with new file_id for video {video['uuid']} during download.")
 
-                await client.send_video(
+                sent_video = await client.send_video(
                     chat_id,
                     video=new_file_id,
-                    caption=None,
+                    caption="⚠️ This video is for temporary download only and will be deleted in 10 minutes! Please save or forward it if you want to keep it.",
                     protect_content=False
                 )
+                sent_info = await client.send_message(
+                    chat_id,
+                    "⏳ **Temporary Download Link Generated!**\n\nThis video and this message will be automatically deleted in **10 minutes** to protect privacy. Please download, save, or forward it now! 🚀"
+                )
+                create_tracked_task(auto_delete_download(client, chat_id, sent_video, sent_info))
                 await callback_query.answer("Download initiated! 🚀")
                 logger.info(f"Premium user {user_id} successfully received download for video {video_uuid} after self-healing.")
             except Exception as heal_e:
@@ -4970,12 +5016,13 @@ async def handle_user_upload(client: Client, message: Message):
         }
     )
 
-    # 6. Grant Reward (Temp Scrolls) if threshold met
+    # 6. Grant Reward (Temp Scrolls) immediately on every upload
     reward_granted = False
     threshold_met = (session_count % min_req == 0) if min_req > 0 else True
 
-    if UPLOAD_CONFIG['auto_give_scrolls'] and threshold_met:
-        temp_scroll_expiry = now + timedelta(hours=UPLOAD_CONFIG['temp_scrolls_expiry_hours'])
+    if UPLOAD_CONFIG['auto_give_scrolls']:
+        expiry_hours = UPLOAD_CONFIG.get('temp_scrolls_expiry_hours', 0)
+        temp_scroll_expiry = (now + timedelta(hours=expiry_hours)) if expiry_hours > 0 else None
         temp_scroll_entry = {
             'amount': UPLOAD_CONFIG['temp_scrolls_amount'],
             'expires_at': temp_scroll_expiry,
@@ -4988,11 +5035,14 @@ async def handle_user_upload(client: Client, message: Message):
         reward_granted = True
 
     # 7. Notify User
-    if threshold_met:
-        reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting." if UPLOAD_CONFIG['auto_give_scrolls'] else ""
+    if UPLOAD_CONFIG['auto_give_scrolls']:
+        reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting."
     else:
-        more_needed = min_req - (session_count % min_req)
-        reward_text = f"\n\n🚀 **Upload {more_needed} more video(s)** to receive your waiting reward!"
+        if threshold_met:
+            reward_text = ""
+        else:
+            more_needed = min_req - (session_count % min_req)
+            reward_text = f"\n\n🚀 **Upload {more_needed} more video(s)** to receive your waiting reward!"
 
     confirmation = (
         "✅ **Video received! Thank you for contributing.**\n\n"
@@ -5597,6 +5647,7 @@ async def config_upload_cmd(client: Client, message: Message):
     if not milestones_str:
         milestones_str = "   <i>None set</i>"
 
+    expiry_text = "Disabled (Permanent) ♾️" if UPLOAD_CONFIG.get('temp_scrolls_expiry_hours', 0) == 0 else f"{UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours"
     text = (
         "⚙️ **Upload Configuration**\n\n"
         f"🔢 **Min Uploads for Reward:** {UPLOAD_CONFIG.get('min_upload_count', 1)} videos\n"
@@ -5604,7 +5655,7 @@ async def config_upload_cmd(client: Client, message: Message):
         f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
         f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
         f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
-        f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n"
+        f"🕒 **Scrolls Expiry:** {expiry_text}\n"
         f"🎁 **Base Token Reward:** {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)} hours\n"
         f"⏳ **Session Limit:** {UPLOAD_CONFIG.get('session_limit_count', 10)} vids / {UPLOAD_CONFIG.get('session_limit_minutes', 10)} mins\n\n"
         f"🏆 **Milestones:** {'Enabled ✅' if UPLOAD_CONFIG.get('milestones_enabled') else 'Disabled ❌'}\n"
@@ -5615,7 +5666,7 @@ async def config_upload_cmd(client: Client, message: Message):
     reply_markup = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔢 Min Uploads", callback_data="cfg_upl_min_count"), InlineKeyboardButton("⏳ Max Pending", callback_data="cfg_upl_max_pending")],
         [InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily"), InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls")],
-        [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
+        [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp"), InlineKeyboardButton("📴 Disable Expiry", callback_data="cfg_upl_disable_expiry")],
         [InlineKeyboardButton("🎁 Token Reward", callback_data="cfg_upl_reward_tokens"), InlineKeyboardButton("🏆 Milestones", callback_data="cfg_upl_toggle_milestones")],
         [InlineKeyboardButton("⏲️ Session Limit", callback_data="cfg_upl_sess_cnt"), InlineKeyboardButton("⏱️ Session Time", callback_data="cfg_upl_sess_min")],
         [InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
@@ -5631,6 +5682,13 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
         return
 
     setting = callback_query.data[8:]
+
+    if setting == "disable_expiry":
+        UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = 0
+        settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+        await callback_query.answer("Scrolls expiry disabled (scrolls are now permanent)!")
+        await config_upload_cmd(client, callback_query.message)
+        return
 
     if setting == "toggle_scrolls":
         UPLOAD_CONFIG['auto_give_scrolls'] = not UPLOAD_CONFIG['auto_give_scrolls']
