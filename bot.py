@@ -5154,8 +5154,6 @@ async def notify_admins_of_upload(client: Client, upload_data: dict):
     )
 
     # Buttons for notification
-    approve_cb = f"adm_appr_{upload_id}"
-    # If category is already selected by user, admin can approve directly
     if upload_data.get('category'):
         categories = get_categories(for_admin_use=True)
         if upload_data['category'] in categories:
@@ -5164,12 +5162,22 @@ async def notify_admins_of_upload(client: Client, upload_data: dict):
         else:
             approve_cb = f"apr_cat_{upload_id}_{str_to_b64(upload_data['category'])}"
 
-    reply_markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=approve_cb),
-            InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
-        ]
-    ])
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=approve_cb),
+                InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
+            ],
+            [
+                InlineKeyboardButton("🗂️ Change Category", callback_data=f"adm_appr_{upload_id}")
+            ]
+        ])
+    else:
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"adm_appr_{upload_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
+            ]
+        ])
 
     if REVIEW_CHAT_ID:
         try:
