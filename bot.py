@@ -564,6 +564,33 @@ def user_has_token(user_id: int) -> bool:
         # Consider both is_activated field and legacy tokens (where field might be missing)
         if token.get('is_activated', True) and token.get('expires_at') and token['expires_at'] > now:
             return True
+
+    # No active token found! Check if they have any banked tokens to automatically activate
+    banked_tokens = [t for t in doc['tokens'] if not t.get('is_activated', False)]
+    if banked_tokens:
+        # Sort by creation date to activate the oldest one first
+        banked_tokens.sort(key=lambda x: x.get('created_at', datetime.min.replace(tzinfo=timezone.utc)))
+        target_token = banked_tokens[0]
+
+        duration = target_token.get('duration_seconds', config.TOKEN_EXPIRY)
+        expires_at = now + timedelta(seconds=duration)
+
+        try:
+            # Atomically update the specific token in the array
+            result = tokens_collection.update_one(
+                {'user_id': user_id, 'tokens.token_id': target_token['token_id']},
+                {'$set': {
+                    'tokens.$.is_activated': True,
+                    'tokens.$.expires_at': expires_at,
+                    'tokens.$.activated_at': now
+                }}
+            )
+            if result.modified_count > 0:
+                logger.info(f"Automatically activated banked token {target_token['token_id']} for user {user_id}.")
+                return True
+        except Exception as e:
+            logger.error(f"Error automatically activating banked token for user {user_id}: {e}", exc_info=True)
+
     return False
 
 def get_banked_tokens_count(user_id: int) -> int:
@@ -5463,6 +5490,32 @@ async def bypass_limit_cmd(client: Client, message: Message):
 @bot.on_message(filters.command("addadmin") & filters.private & owner_only)
 async def add_admin_cmd(client: Client, message: Message):
     """Owner command to add a new admin."""
+    args = message.text.split()
+    if len(args) > 1:
+        try:
+            user_id_to_add = int(args[1])
+            if user_id_to_add in BOT_ADMINS:
+                await message.reply("This user is already an admin.")
+                return
+
+            BOT_ADMINS.add(user_id_to_add)
+            # Persist change to DB
+            settings_collection.update_one(
+                {'_id': 'bot_settings'},
+                {'$addToSet': {'admins': user_id_to_add}},
+                upsert=True
+            )
+            await message.reply(f"✅ User {user_id_to_add} has been promoted to admin.")
+            logger.info(f"Owner {message.from_user.id} added new admin: {user_id_to_add}")
+            return
+        except ValueError:
+            await message.reply("Invalid User ID format. Please send a valid integer ID.")
+            return
+        except Exception as e:
+            await message.reply(f"An error occurred: {e}")
+            logger.error(f"Error in /addadmin flow: {e}")
+            return
+
     owner_add_admin_state[message.from_user.id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to add as an admin. 📝")
 
