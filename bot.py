@@ -2434,7 +2434,8 @@ async def help_admin_cmd(client: Client, message: Message):
         "- /addpremium <id> <days>: Grant premium\n"
         "- /removepremium <id>: Revoke access\n"
         "- /deleteuser <id>: Wipe user data\n"
-        "- /viewtoken: Token leaderboard\n\n"
+        "- /viewtoken: Token leaderboard\n"
+        "- /showuserscrolls: Scrolls leaderboard\n\n"
         "**Content Management:**\n"
         "- /addcategory <name>: Create category\n"
         "- /deletecategory: Remove category\n"
@@ -5402,6 +5403,101 @@ async def view_token_callback(client: Client, callback_query: CallbackQuery):
         await view_token_page(client, callback_query, page)
     except Exception as e:
         logger.error(f"Error in viewtoken callback: {e}", exc_info=True)
+        await callback_query.answer("An error occurred.", show_alert=True)
+
+@bot.on_message(filters.command("showuserscrolls") & filters.private & admin_only)
+async def show_user_scrolls_cmd(client: Client, message: Message):
+    """Admin command to show all users and their scrolls remaining with pagination."""
+    try:
+        await show_user_scrolls_page(client, message)
+    except Exception as e:
+        logger.error(f"Error in /showuserscrolls command: {e}", exc_info=True)
+        await message.reply("An error occurred while fetching user scrolls stats.")
+
+async def show_user_scrolls_page(client: Client, message_or_query, page: int = 0):
+    """Helper function to display a page of the users and their scrolls remaining."""
+    now = datetime.now(timezone.utc)
+    all_users = list(users_collection.find({}, {
+        "user_id": 1,
+        "username": 1,
+        "first_name": 1,
+        "permanent_scrolls": 1,
+        "temp_scrolls": 1
+    }))
+
+    calculated_users = []
+    for user in all_users:
+        user_id = user['user_id']
+        perm = user.get('permanent_scrolls', 0)
+        temp = user.get('temp_scrolls', [])
+        valid_temp_count = sum(
+            s.get('amount', 0) for s in temp
+            if s.get('amount', 0) > 0 and (s.get('expires_at') is None or s['expires_at'] > now)
+        )
+        total = perm + valid_temp_count
+
+        username = f"@{user['username']}" if user.get('username') else (user.get('first_name') or "User")
+        calculated_users.append({
+            'user_id': user_id,
+            'username': username,
+            'scrolls': total
+        })
+
+    # Sort users by scrolls count descending
+    calculated_users.sort(key=lambda x: x['scrolls'], reverse=True)
+
+    total_users = len(calculated_users)
+    if total_users == 0:
+        text = "No registered users found."
+        if isinstance(message_or_query, Message):
+            await message_or_query.reply(text)
+        else:
+            await message_or_query.answer(text, show_alert=True)
+        return
+
+    start_index = page * 10
+    end_index = start_index + 10
+    users_on_page = calculated_users[start_index:end_index]
+
+    text = "📜 **User Scrolls Leaderboard** 📜\n\n"
+
+    for i, user_data in enumerate(users_on_page):
+        rank = start_index + i + 1
+        username_display = html.escape(user_data['username'])
+        text += f"**{rank}.** `{user_data['user_id']}` ({username_display}) - **{user_data['scrolls']}** scrolls remaining\n"
+
+    total_pages = (total_users + 9) // 10
+    text += f"\nPage {page + 1} of {total_pages} (Total Users: {total_users})"
+
+    buttons = []
+    row = []
+    if page > 0:
+        row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"showscrolls_{page - 1}"))
+    if end_index < total_users:
+        row.append(InlineKeyboardButton("➡️ Next", callback_data=f"showscrolls_{page + 1}"))
+    if row:
+        buttons.append(row)
+
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if isinstance(message_or_query, Message):
+        await message_or_query.reply(text, reply_markup=reply_markup)
+    else: # CallbackQuery
+        await message_or_query.message.edit_text(text, reply_markup=reply_markup)
+        await message_or_query.answer()
+
+@bot.on_callback_query(filters.regex(r"^showscrolls_(\d+)$"))
+async def show_user_scrolls_callback(client: Client, callback_query: CallbackQuery):
+    """Callback query handler for showuserscrolls pagination."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("Not authorized.", show_alert=True)
+        return
+
+    page = int(callback_query.data.split("_")[1])
+    try:
+        await show_user_scrolls_page(client, callback_query, page)
+    except Exception as e:
+        logger.error(f"Error in showscrolls callback: {e}", exc_info=True)
         await callback_query.answer("An error occurred.", show_alert=True)
 
 @bot.on_message(filters.command("stats") & filters.private & admin_only)
