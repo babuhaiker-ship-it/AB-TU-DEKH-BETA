@@ -821,6 +821,56 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
 
     return None
 
+async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
+    """
+    Checks if the referrer has reached a milestone and grants premium rewards.
+    Milestones:
+    - 5 referrals -> 1 Day Premium (+86400 seconds, is_admin_granted=True)
+    - 10 referrals -> 3 Days Premium (+259200 seconds, is_admin_granted=True)
+    - 20 referrals -> 7 Days Premium (+604800 seconds, is_admin_granted=True)
+    - 50 referrals -> 30 Days Premium (+2592000 seconds, is_admin_granted=True)
+    """
+    try:
+        user_doc = users_collection.find_one({'user_id': referrer_id})
+        if not user_doc:
+            return
+
+        referral_count = user_doc.get('referral_count', 0)
+        claimed_milestones = user_doc.get('claimed_referral_milestones', [])
+
+        milestones = [
+            (5, 1, 86400, "Tier 1"),
+            (10, 3, 259200, "Tier 2"),
+            (20, 7, 604800, "Tier 3"),
+            (50, 30, 2592000, "Tier 4")
+        ]
+
+        for req_count, days_reward, duration_seconds, tier_name in milestones:
+            if referral_count >= req_count and req_count not in claimed_milestones:
+                # Grant the token
+                add_token_info = add_token(referrer_id, duration_seconds=duration_seconds, is_admin_granted=True)
+                if add_token_info:
+                    # Update claimed list
+                    users_collection.update_one(
+                        {'user_id': referrer_id},
+                        {
+                            '$addToSet': {'claimed_referral_milestones': req_count},
+                            '$set': {'last_premium_check_status': True}
+                        }
+                    )
+                    logger.info(f"Referrer {referrer_id} reached {req_count} referrals and won {days_reward} days premium!")
+                    try:
+                        await client.send_message(
+                            referrer_id,
+                            f"🏆 <b>Referral Milestone Reached!</b> ({tier_name}) 🎉\n\n"
+                            f"Outstanding job! You have reached <b>{req_count} successful referrals</b>.\n\n"
+                            f"🎁 As a reward, you have been granted <b>{days_reward} Days of unlimited VIP Premium Access</b> for free! Enjoy your ad-free, download-ready experience! 💎"
+                        )
+                    except Exception as notify_e:
+                        logger.warning(f"Could not notify referrer {referrer_id} about milestone reward: {notify_e}")
+    except Exception as e:
+        logger.error(f"Error checking referral milestones for {referrer_id}: {e}", exc_info=True)
+
 # --- Category Management ---
 def validate_category_name(name: str) -> tuple[bool, str]:
     """
@@ -2082,6 +2132,9 @@ async def start_cmd(client: Client, message: Message):
                     except Exception as e:
                         logger.warning(f"Failed to notify referrer {referrer_id}: {e}")
 
+                    # Check and grant any unlocked milestone rewards
+                    create_tracked_task(check_and_grant_referral_milestones(client, referrer_id))
+
         # --- Step 2: Check channel membership for ALL users ---
         has_joined = await check_membership(client, user_id)
         if not has_joined:
@@ -2552,6 +2605,14 @@ async def profile_cmd(client: Client, message: Message):
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
 
+        # Determine next milestone
+        milestone_tiers = [5, 10, 20, 50]
+        next_milestone = "All Milestone Rewards Unlocked! 🏆"
+        for m in milestone_tiers:
+            if referral_count < m:
+                next_milestone = f"<code>{referral_count}/{m}</code> for next Milestone reward! 🎁"
+                break
+
         profile_text = (
             f"👤 <b>USER PROFILE</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2560,11 +2621,17 @@ async def profile_cmd(client: Client, message: Message):
             f"🏦 <b>Banked Tokens:</b> <code>{banked_tokens}</code>\n"
             f"📜 <b>Remaining Scrolls:</b> <code>{total_scrolls}</code>\n"
             f"🔖 <b>Saved Videos:</b> <code>{save_limit_display}</code>\n"
-            f"👥 <b>Total Referrals:</b> <code>{referral_count}</code>\n\n"
+            f"👥 <b>Total Referrals:</b> <code>{referral_count}</code>\n"
+            f"🏆 <b>Milestones:</b> {next_milestone}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🔗 <b>Your Referral Link:</b>\n"
             f"<code>{html.escape(ref_link)}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎁 <i>Milestone Rewards:</i>\n"
+            f"• 5 Referrals: 1 Day Premium 💎\n"
+            f"• 10 Referrals: 3 Days Premium 💎\n"
+            f"• 20 Referrals: 7 Days Premium 💎\n"
+            f"• 50 Referrals: 30 Days Premium 💎\n\n"
             f"🎁 <i>Share your link with friends to earn additional tokens and scrolls automatically!</i>"
         )
 
