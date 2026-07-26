@@ -402,12 +402,12 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
     logger.info(f"Sending force subscribe message to user {chat_id}.")
 
     if not FORCE_SUB_CHANNELS:
-        await client.send_message(chat_id, "No force subscribe channels are configured. Please contact an admin.")
+        await client.send_message(chat_id, "⚠️ No force subscribe channels are configured. Please contact an admin.")
         return
 
     buttons = []
     for channel_info in FORCE_SUB_CHANNELS:
-        buttons.append([InlineKeyboardButton(channel_info.get('name', f"Channel {channel_info['channel_id']}"), url=channel_info.get('link', 'https://t.me/telegram'))])
+        buttons.append([InlineKeyboardButton(f"📢 Join {channel_info.get('name', 'Updates Channel')}", url=channel_info.get('link', 'https://t.me/telegram'))])
     buttons.append([InlineKeyboardButton("🔄 Try Again", callback_data="check_join_status")])
 
     reply_markup = InlineKeyboardMarkup(buttons)
@@ -415,8 +415,9 @@ async def send_force_subscribe_message(client: Client, chat_id: int, custom_text
     text_to_send = custom_text
     if not text_to_send:
         text_to_send = (
-            "<b>⚠️ You must join our channels to use this bot.</b>\n\n"
-            "Please join the channels below and then try again. Once you join, click the '🔄 Try Again' button or send /start again."
+            "⚠️ <b>Access Requirement</b> ⚠️\n\n"
+            "To enjoy our exclusive collection, you need to join our updates channels first.\n\n"
+            "Please join the channels listed below, then tap the <b>🔄 Try Again</b> button to unlock full access! 🚀"
         )
 
     await client.send_message(
@@ -734,12 +735,15 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
     ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
     if SHORTENER_DISABLED:
-        text = "🌟 Almost there! Just one quick step…\nVerify you're human (takes a few seconds) ❤️"
+        text = (
+            "✨ <b>Almost there! Just one quick step...</b>\n\n"
+            "Please verify you're human to instantly unlock the next video and keep watching! ❤️"
+        )
     else:
         text = (
-            "🛑 **Access Token Required** 🛑\n\n"
+            "🛑 <b>Access Token Required</b> 🛑\n\n"
             "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            f"Unlock {int(config.TOKEN_ACCESS_HOURS)} hours of uninterrupted access and keep the vibe going. ✨"
+            f"Unlock <b>{int(config.TOKEN_ACCESS_HOURS)} hours</b> of uninterrupted, premium access and keep the vibe going! ✨"
         )
     reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
@@ -1548,11 +1552,11 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
 
     if user_id:
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
-        v_btn_text = "✅ 𝐈'𝐦 𝐇𝐮𝐦𝐚𝐧" if SHORTENER_DISABLED else "🔐 human verification"
+        v_btn_text = "✅ Verify You're Human" if SHORTENER_DISABLED else "🔐 Human Verification"
         buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
-        buttons.append([InlineKeyboardButton("💰 Upload and Earn", callback_data="upload_btn")])
+        buttons.append([InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn")])
 
-    vip_text = "🧚𝑩𝒚𝒑𝒂𝒔𝒔 𝒗𝒆𝒓𝒊𝒇𝒊𝒄𝒂𝒕𝒊𝒐𝒏" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free Access)"
+    vip_text = "⚡ Bypass Verification" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free)"
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
@@ -1561,7 +1565,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
 
     # Always append the Refresh button when we display the token required/earning screen
-    buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="reload_pending_content")])
+    buttons.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -1616,27 +1620,27 @@ def video_nav_keyboard(
                 like_cb = f"like|{video_uuid}|{int(is_saved)}"
 
         buttons.append([
-            InlineKeyboardButton("👎 Dislike", callback_data=dislike_cb),
-            InlineKeyboardButton("👍 Like", callback_data=like_cb)
+            InlineKeyboardButton("❤️ Like", callback_data=like_cb),
+            InlineKeyboardButton("💔 Dislike", callback_data=dislike_cb)
         ])
 
     # --- Navigation Row (Previous/Next) ---
     if category == "default (all)":
-        nav_buttons = [InlineKeyboardButton("➡️ Next", callback_data=f"next_default|{video_uuid}")]
+        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_default|{video_uuid}")]
         # Disable previous button if there is no history
         if user_id in user_session_history and user_session_history[user_id]['position'] > 0:
-            nav_buttons.insert(0, InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_default|{video_uuid}"))
+            nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_default|{video_uuid}"))
         buttons.append(nav_buttons)
     elif is_shared_link:
         buttons.append([
-            InlineKeyboardButton("⬅️ Previous", callback_data="shared_nav"),
-            InlineKeyboardButton("➡️ Next", callback_data="shared_nav")
+            InlineKeyboardButton("⏪ Prev Video", callback_data="shared_nav"),
+            InlineKeyboardButton("⏩ Next Video", callback_data="shared_nav")
         ])
     elif is_batch:
-        nav_buttons = [InlineKeyboardButton("➡️ Next", callback_data=f"next_batch|{batch_id}|{batch_index}")]
+        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}")]
         # Disable previous button if there is no history or at start
         if user_id in user_session_history and user_session_history[user_id].get('batch_id') == batch_id and user_session_history[user_id]['position'] > 0:
-            nav_buttons.insert(0, InlineKeyboardButton("⬅️ Previous", callback_data=f"prev_batch|{batch_id}|{batch_index}"))
+            nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_batch|{batch_id}|{batch_index}"))
         buttons.append(nav_buttons)
     else:
         cat_payload = str_to_b64(category)
@@ -1648,34 +1652,34 @@ def video_nav_keyboard(
             prev_cb = f"prev|{video_uuid}|{int(is_saved)}"
             next_cb = f"next|{video_uuid}|{int(is_saved)}"
 
-        nav_buttons = [InlineKeyboardButton("➡️ Next", callback_data=next_cb)]
+        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=next_cb)]
         # Disable previous button if there is no history or at start
         if user_id in user_session_history and user_session_history[user_id].get('category') == category and user_session_history[user_id]['position'] > 0:
-            nav_buttons.insert(0, InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
+            nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=prev_cb))
         buttons.append(nav_buttons)
 
     # --- Action Row (Bookmark/Share/Download) ---
     row_2_buttons = []
     if is_saved:
         # For saved videos, the "Bookmark" button is replaced by "Remove"
-        row_2_buttons.append(InlineKeyboardButton("🗑️ Remove", callback_data=f"remove_saved_{video_uuid}"))
+        row_2_buttons.append(InlineKeyboardButton("🗑️ Unsave", callback_data=f"remove_saved_{video_uuid}"))
     else:
-        row_2_buttons.append(InlineKeyboardButton("💾 Bookmark", callback_data=f"bookmark_{video_uuid}"))
+        row_2_buttons.append(InlineKeyboardButton("🔖 Save Video", callback_data=f"bookmark_{video_uuid}"))
 
-    row_2_buttons.append(InlineKeyboardButton("📲 Share", callback_data=f"share_{video_uuid}"))
-    row_2_buttons.append(InlineKeyboardButton("⬇️ Download", callback_data=f"download_{video_uuid}"))
+    row_2_buttons.append(InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}"))
+    row_2_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
 
     # --- Third Row (Context-dependent) ---
     row_3_buttons = []
     if is_batch or is_shared_link:
-        row_3_buttons.append(InlineKeyboardButton("👀 Watch More", callback_data="watch_more"))
+        row_3_buttons.append(InlineKeyboardButton("👀 Discover More", callback_data="watch_more"))
     elif is_saved:
-        row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
+        row_3_buttons.append(InlineKeyboardButton("🔙 Go Back", callback_data="back_to_saved_cats"))
     else: # Regular navigation
         if category == "default (all)":
-            row_3_buttons.append(InlineKeyboardButton("💰 Upload and Earn", callback_data="upload_btn"))
-        row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
+            row_3_buttons.append(InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn"))
+        row_3_buttons.append(InlineKeyboardButton("🗂️ Browse Categories", callback_data="change_cat"))
 
     if row_3_buttons:
         buttons.append(row_3_buttons)
@@ -1701,7 +1705,7 @@ def get_premium_only_text() -> str:
 
 def buy_token_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for buying tokens."""
-    btn_text = "🧚𝑩𝒚𝒑𝒂𝒔𝒔 𝒗𝒆𝒓𝒊𝒇𝒊𝒄𝒂𝒕𝒊𝒐𝒏" if SHORTENER_DISABLED else "💳 Buy Premium Access"
+    btn_text = "⚡ Bypass Verification" if SHORTENER_DISABLED else "💳 Buy VIP Premium Access"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(btn_text, url=config.BUY_BOT_URL)]
     ])
@@ -2088,8 +2092,14 @@ async def start_cmd(client: Client, message: Message):
             # Prepare custom force-sub message based on user state
             custom_text = None
             if is_new_user:
-                part1 = f"🎉 Congratulations {first_name_safe}! Welcome to our spicy collection! 🌶️\n\n"
-                part2 = "To watch the video you requested, you just need to join our channels first. Once you've joined, tap the '🔄 Try Again' button below, and I'll take you straight to your video! 🚀" if deep_link_arg else "Please join our channels to continue. Once you've joined, tap the '🔄 Try Again' button below! 🚀"
+                part1 = f"✨ <b>Welcome {first_name_safe} to our Spicy Collection!</b> 🌶️\n\n"
+                part2 = (
+                    "To watch the video you requested, you just need to join our updates channels first.\n\n"
+                    "Once joined, tap the <b>🔄 Try Again</b> button below and I will immediately deliver your video! 🚀"
+                ) if deep_link_arg else (
+                    "Please join our updates channels below to access the ultimate video library.\n\n"
+                    "Once you join, tap the <b>🔄 Try Again</b> button to unlock everything! 🚀"
+                )
                 custom_text = part1 + part2
 
             await send_force_subscribe_message(client, user_id, custom_text=custom_text)
@@ -2174,7 +2184,8 @@ async def start_cmd(client: Client, message: Message):
                             save_history(user_id, video['uuid'], video['category'])
                             await client.send_message(
                                 message.chat.id,
-                                "🫣Tap \"watch more\" you don't need to wait for links anymore",
+                                "🍿 <b>Enjoying the video?</b>\n\n"
+                                "✨ Tap <b>'👀 Watch More'</b> below or choose from the keyboard to browse unlimited spicy content instantly without waiting for links! 🚀",
                                 reply_markup=await get_main_keyboard(user_id)
                             )
 
@@ -2196,7 +2207,8 @@ async def start_cmd(client: Client, message: Message):
                                 user_session_history[user_id] = {'category': video['category'], 'videos': [video['uuid']], 'position': 0, 'is_get_video': False, 'batch_id': deep_link_data}
                                 await client.send_message(
                                     message.chat.id,
-                                    "🫣Tap \"watch more\" you don't need to wait for links anymore",
+                                    "🍿 <b>Enjoying the video?</b>\n\n"
+                                    "✨ Tap <b>'👀 Watch More'</b> below or choose from the keyboard to browse unlimited spicy content instantly without waiting for links! 🚀",
                                     reply_markup=await get_main_keyboard(user_id)
                                 )
 
@@ -2219,20 +2231,25 @@ async def start_cmd(client: Client, message: Message):
                             save_history(user_id, video['uuid'], "default (all)")
                             await client.send_message(
                                 message.chat.id,
-                                "🫣Tap \"watch more\" you don't need to wait for links anymore",
+                                "🍿 <b>Enjoying the video?</b>\n\n"
+                                "✨ Tap <b>'👀 Watch More'</b> below or choose from the keyboard to browse unlimited spicy content instantly without waiting for links! 🚀",
                                 reply_markup=await get_main_keyboard(user_id)
                             )
             finally:
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
             await message.reply(
-                f"🎉 Congratulations {first_name_safe}!\n\n"
-                f"Welcome to the most exclusive spicy collection. 🌶️\n\n"
-                f"🔥 Tap ‘🎞️ Get Video’ now to explore and dive into your favorite category! 🚀",
+                f"🎉 <b>Welcome {first_name_safe} to our Spicy Collection!</b> 🌶️\n\n"
+                f"You have unlocked exclusive access to our premium library. Enjoy unlimited content on demand! ✨\n\n"
+                f"👉 <b>Tap '🎞️ Get Video' below</b> to instantly launch a random video or browse by categories! 🚀",
                 reply_markup=await get_main_keyboard(user_id)
             )
         else: # Existing user, no deep link
-            await message.reply(f"👋 Welcome back, {first_name_safe}! 🌶️\n\nReady for more? Tap '🎞️ Get Video' to dive in.", reply_markup=await get_main_keyboard(user_id))
+            await message.reply(
+                f"👋 <b>Welcome back, {first_name_safe}!</b> 🌶️\n\n"
+                f"Ready for your next watch? Tap <b>'🎞️ Get Video'</b> below to start exploring your favorites! 🍿",
+                reply_markup=await get_main_keyboard(user_id)
+            )
 
     except FloodWait as e:
         await handle_error(client, message, e)
@@ -2417,11 +2434,11 @@ async def help_cmd(client: Client, message: Message):
     ])
 
     await message.reply(
-        f"👋 Hey {user_mention_safe}! Here's how to use the bot: 📚\n\n"
-        "- **🎞️ Get Video**: The classic button to browse and watch content.\n"
-        "- **👤 Profile**: Check your status and tokens.\n"
-        "- **🔖 Saved Videos**: Access all your bookmarked videos.\n\n"
-        "If you have any issues, feel free to contact our support. Enjoy! 🌶️",
+        f"👋 <b>Hey {user_mention_safe}! Here's how to use the bot:</b> 📚\n\n"
+        f"• <b>🎞️ Get Video</b>: Browse, watch, and discover premium spicy content on-demand.\n"
+        f"• <b>👤 Profile</b>: Check your status, session tokens, scrolls remaining, and referrals.\n"
+        f"• <b>🔖 Saved Videos</b>: View or manage your personalized bookmark collection.\n\n"
+        f"💡 <i>Have any issues or questions? Click below to contact our support team. Enjoy! 🌶️</i>",
         reply_markup=reply_markup
     )
 
@@ -2536,17 +2553,19 @@ async def profile_cmd(client: Client, message: Message):
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
 
         profile_text = (
-            f"👤 <b>Your Profile</b>\n\n"
-            f"📌 Status: {user_status}\n"
-            f"🪙 Active Tokens: {tokens_count}\n"
-            f"🏦 Banked Tokens: {banked_tokens}\n"
-            f"📜 Scrolls Remaining: {total_scrolls}\n"
-            f"❤️ Saved Videos: {save_limit_display}\n"
-            f"👥 Total Referrals: {referral_count}\n"
-            f"───────────────────────\n"
-            f"🔗 Your Referral Link:\n{html.escape(ref_link)}\n"
-            f"───────────────────────\n\n"
-            f"💡 Share this link with friends to earn free tokens! 🎁"
+            f"👤 <b>USER PROFILE</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👑 <b>Status:</b> {user_status}\n"
+            f"🪙 <b>Active Session Tokens:</b> <code>{tokens_count}</code>\n"
+            f"🏦 <b>Banked Tokens:</b> <code>{banked_tokens}</code>\n"
+            f"📜 <b>Remaining Scrolls:</b> <code>{total_scrolls}</code>\n"
+            f"🔖 <b>Saved Videos:</b> <code>{save_limit_display}</code>\n"
+            f"👥 <b>Total Referrals:</b> <code>{referral_count}</code>\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 <b>Your Referral Link:</b>\n"
+            f"<code>{html.escape(ref_link)}</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎁 <i>Share your link with friends to earn additional tokens and scrolls automatically!</i>"
         )
 
         await message.reply(profile_text, reply_markup=await get_main_keyboard(user_id))
@@ -3773,16 +3792,23 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
         if SHORTENER_DISABLED:
-            text = "🌟 Almost there! Just one quick step…\nVerify you're human (takes a few seconds) ❤️"
+            text = (
+                "✨ <b>Almost there! Just one quick step...</b>\n\n"
+                "Please verify you're human to instantly unlock the next video and keep watching! ❤️"
+            )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         elif is_pending_content:
             text = (
-                "❌ <b>Token Required To View Content!</b>\n\n"
-                "Once You Have Successfully Passed The Ads Verification, Click The Refresh Button Below To View The Content You Requested."
+                "🔒 <b>Access Token Required!</b>\n\n"
+                "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
+                "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         else:
-            text = "❌ <b>No Tokens Left!</b> 😔\nUse any of these methods to gain tokens and continue watching spicy content! 👇"
+            text = (
+                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
+                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
+            )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
         await message.reply(
