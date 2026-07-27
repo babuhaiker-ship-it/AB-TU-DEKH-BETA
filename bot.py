@@ -293,7 +293,16 @@ async def load_admins_from_db():
     global BOT_ADMINS
     settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
     db_admins = settings_doc.get('admins', []) if settings_doc else []
-    BOT_ADMINS = set(db_admins)
+
+    # Cast all loaded admin IDs to int to guarantee type safety for comparison
+    valid_admins = set()
+    for admin_id in db_admins:
+        try:
+            valid_admins.add(int(admin_id))
+        except (ValueError, TypeError):
+            logger.warning(f"Ignored invalid admin ID in database configuration: {admin_id}")
+
+    BOT_ADMINS = valid_admins
     BOT_ADMINS.add(config.OWNER_ID) # Ensure owner is always an admin
     logger.info(f"Loaded admins from DB. Current admins: {BOT_ADMINS}")
 
@@ -341,13 +350,13 @@ def is_owner(user_id: int) -> bool:
     return user_id == config.OWNER_ID
 
 # MODIFIED: Custom filter for admin commands to allow dynamic admin list
-async def admin_filter(_, __, message: Message):
-    return is_admin(message.from_user.id)
+def admin_filter(_, __, message: Message):
+    return bool(message.from_user and is_admin(message.from_user.id))
 
 admin_only = filters.create(admin_filter)
 
-async def owner_filter(_, __, message: Message):
-    return is_owner(message.from_user.id)
+def owner_filter(_, __, message: Message):
+    return bool(message.from_user and is_owner(message.from_user.id))
 
 owner_only = filters.create(owner_filter)
 
@@ -6327,7 +6336,7 @@ async def shortener_status_cmd(client: Client, message: Message):
     status = "Disabled 🚫" if SHORTENER_DISABLED else "Enabled 🔓"
     await message.reply(f"📊 <b>URL Shortener Status:</b> {status}")
 
-@bot.on_message(filters.text & filters.private)
+@bot.on_message(filters.text & filters.private & ~filters.command)
 async def handle_text_input(client: Client, message: Message):
     """Handles text input for various multi-step commands for owner and admins."""
     user_id = message.from_user.id
