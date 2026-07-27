@@ -360,6 +360,11 @@ def owner_filter(_, __, message: Message):
 
 owner_only = filters.create(owner_filter)
 
+def non_command_filter(_, __, message: Message):
+    return not bool(message.text and message.text.startswith("/"))
+
+non_command = filters.create(non_command_filter)
+
 
 def create_tracked_task(coro):
     """
@@ -6336,7 +6341,7 @@ async def shortener_status_cmd(client: Client, message: Message):
     status = "Disabled 🚫" if SHORTENER_DISABLED else "Enabled 🔓"
     await message.reply(f"📊 <b>URL Shortener Status:</b> {status}")
 
-@bot.on_message(filters.text & filters.private & ~filters.command)
+@bot.on_message(filters.text & filters.private & non_command)
 async def handle_text_input(client: Client, message: Message):
     """Handles text input for various multi-step commands for owner and admins."""
     user_id = message.from_user.id
