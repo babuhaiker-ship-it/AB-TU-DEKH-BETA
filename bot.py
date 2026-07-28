@@ -1618,7 +1618,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
         v_btn_text = "✅ Verify You're Human" if SHORTENER_DISABLED else "🔐 Human Verification"
         buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
-        buttons.append([InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn")])
+        buttons.append([InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn")])
 
     vip_text = "⚡ Bypass Verification" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free)"
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
@@ -1742,7 +1742,7 @@ def video_nav_keyboard(
         row_3_buttons.append(InlineKeyboardButton("🔙 Go Back", callback_data="back_to_saved_cats"))
     else: # Regular navigation
         if category == "default (all)":
-            row_3_buttons.append(InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn"))
+            row_3_buttons.append(InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn"))
         row_3_buttons.append(InlineKeyboardButton("🗂️ Browse Categories", callback_data="change_cat"))
 
     if row_3_buttons:
@@ -1968,15 +1968,13 @@ async def upload_cmd(client: Client, message: Message):
         return
 
     instructions = (
-        "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
-        "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
-        "**How it works:**\n"
-        "1. Click the button below to select a category.\n"
-        "2. Send one or multiple videos directly in this chat.\n"
-        "3. Our admins will review your submission.\n"
-        "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately for each upload enjoy while you wait for approval! ⏳\n\n"
-        "**Note:** Type /done when you are finished uploading."
+        "📤 <b>Contribute & Earn!</b> 🌶️\n\n"
+        "Share your videos to earn exclusive access tokens! 🎁\n\n"
+        "<b>Steps:</b>\n"
+        "1. Tap '📤 Send Video Now' below to pick a category.\n"
+        "2. Send your video(s) directly to this chat.\n"
+        "3. Type /done when finished.\n\n"
+        f"⚡ <b>Instant Reward:</b> You get <b>{UPLOAD_CONFIG['temp_scrolls_amount']} scrolls</b> immediately for each upload! ⏳"
     )
 
     reply_markup = InlineKeyboardMarkup([
@@ -1996,15 +1994,13 @@ async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
         return
 
     instructions = (
-        "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
-        "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
-        "**How it works:**\n"
-        "1. Click the button below to select a category.\n"
-        "2. Send one or multiple videos directly in this chat.\n"
-        "3. Our admins will review your submission.\n"
-        "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately for each upload enjoy while you wait for approval! ⏳\n\n"
-        "**Note:** Type /done when you are finished uploading."
+        "📤 <b>Contribute & Earn!</b> 🌶️\n\n"
+        "Share your videos to earn exclusive access tokens! 🎁\n\n"
+        "<b>Steps:</b>\n"
+        "1. Tap '📤 Send Video Now' below to pick a category.\n"
+        "2. Send your video(s) directly to this chat.\n"
+        "3. Type /done when finished.\n\n"
+        f"⚡ <b>Instant Reward:</b> You get <b>{UPLOAD_CONFIG['temp_scrolls_amount']} scrolls</b> immediately for each upload! ⏳"
     )
 
     reply_markup = InlineKeyboardMarkup([
@@ -2308,7 +2304,7 @@ async def start_cmd(client: Client, message: Message):
             welcome_inline_keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🎞️ Get Video", callback_data="get_default_video"),
-                    InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn")
+                    InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn")
                 ]
             ])
             await message.reply(
@@ -2327,7 +2323,7 @@ async def start_cmd(client: Client, message: Message):
             welcome_inline_keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🎞️ Get Video", callback_data="get_default_video"),
-                    InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn")
+                    InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn")
                 ]
             ])
             await message.reply(
