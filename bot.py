@@ -453,6 +453,35 @@ def b64_to_str(b64: str) -> str:
         logger.error(f"Failed to decode base64 string: {e}")
         return ""
 
+def get_fake_like_ratio(video_uuid: str) -> int:
+    """Generates a deterministic base like ratio between 45% and 95% based on the video UUID."""
+    import random
+    state = random.getstate()
+    random.seed(video_uuid)
+    ratio = random.randint(45, 95)
+    random.setstate(state)
+    return ratio
+
+def get_user_adjusted_fake_ratio(user_id: int, video_uuid: str) -> int:
+    """Calculates the fake ratio adjusted dynamically by +1-2% or -1-2% if the user has liked/disliked."""
+    import random
+    base_ratio = get_fake_like_ratio(video_uuid)
+
+    user_doc = users_collection.find_one({'user_id': user_id})
+    user_ratings = user_doc.get('ratings', {}) if user_doc else {}
+    user_rating = user_ratings.get(video_uuid)
+
+    state = random.getstate()
+    random.seed(video_uuid + str(user_id))
+    adjustment = random.randint(1, 2)
+    random.setstate(state)
+
+    if user_rating == "like":
+        return min(99, base_ratio + adjustment)
+    elif user_rating == "dislike":
+        return max(40, base_ratio - adjustment)
+    return base_ratio
+
 def get_channel_msg_link(channel_id, message_id):
     """Generates a t.me link for a message in a channel, handling private channels."""
     if not channel_id or not message_id:
@@ -1419,13 +1448,46 @@ async def send_and_replace_message(
             )
 
         custom_caption = video_data.get('custom_caption')
-        category_caption = f"Category: {html.escape(video_data['category'])}" if video_data.get('category') else ""
+        category_name = video_data.get('category') or 'Default'
 
-        position_caption = ""
-        if total_videos > 0 and current_position > 0:
-            position_caption = f"#{current_position} of {total_videos}\n"
-
-        caption_text = f"{position_caption}{custom_caption or category_caption}".strip()
+        if not is_batch and not is_saved_from_markup:
+            # It's the Get Video menu! Use our premium layout with fake like ratio
+            fake_ratio = get_user_adjusted_fake_ratio(chat_id, video_data['uuid'])
+            caption_text = (
+                f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
+                f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            )
+            if custom_caption:
+                caption_text += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
+            caption_text += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+        else:
+            # Other menus (saved, batch, shared links)
+            if is_batch:
+                caption_text = (
+                    f"🎬 <b>Batch Video Playing</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                )
+            elif is_saved_from_markup:
+                caption_text = (
+                    f"🔖 <b>Saved Videos: {html.escape(category_name)}</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                )
+            else:
+                caption_text = (
+                    f"🔗 <b>Shared Video</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🍿 <i>Enjoy your watch!</i>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                )
+            if custom_caption:
+                caption_text += f"📝 <i>{html.escape(custom_caption)}</i>\n"
 
     # --- Delete Old Message if Forced ---
     if force_new_message and message_id_to_edit_or_delete:
@@ -1668,7 +1730,7 @@ def video_nav_keyboard(
     buttons = []
 
     # --- Interaction Row (Like/Dislike) ---
-    if not is_batch and not is_shared_link:
+    if not is_saved and not is_batch and not is_shared_link:
         if category == "default (all)":
             dislike_cb = f"dislike_default|{video_uuid}"
             like_cb = f"like_default|{video_uuid}"
@@ -2316,7 +2378,7 @@ async def start_cmd(client: Client, message: Message):
             # Send small follow-up message to initialize the custom main reply keyboard
             await client.send_message(
                 message.chat.id,
-                "✨ <i>Use the menu keyboard below to navigate anytime!</i>",
+                "✨",
                 reply_markup=await get_main_keyboard(user_id)
             )
         else: # Existing user, no deep link
@@ -2334,7 +2396,7 @@ async def start_cmd(client: Client, message: Message):
             # Send small follow-up message to initialize the custom main reply keyboard
             await client.send_message(
                 message.chat.id,
-                "✨ <i>Use the menu keyboard below to navigate anytime!</i>",
+                "✨",
                 reply_markup=await get_main_keyboard(user_id)
             )
 
@@ -3322,38 +3384,68 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
 
 @bot.on_callback_query(filters.regex(r"^(dislike|like)\|(.+)\|"))
 async def interaction_callback(client: Client, callback_query: CallbackQuery):
-    """Handles 'Like' and 'Dislike' video callbacks by jumping to the next video."""
+    """Handles 'Like' and 'Dislike' video callbacks in-place by adjusting rating."""
     user_id = callback_query.from_user.id
     parts = callback_query.data.split('|')
-    current_uuid = parts[1]
+    video_uuid = parts[1]
 
-    if not has_free_video_access(user_id, current_video_uuid=current_uuid):
+    if not has_free_video_access(user_id, current_video_uuid=video_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
 
-    action = "liked" if callback_query.data.startswith("like") else "disliked"
-    popup = "You liked this video! ❤️" if action == "liked" else "Skipping video... 👎"
+    is_like = callback_query.data.startswith("like")
+    popup = "You liked this video! ❤️" if is_like else "You disliked this video! 💔"
     try:
-        parts = callback_query.data.split('|')
-        # Reconstruct next callback data
-        if len(parts) == 4: # action|uuid|cat|is_saved
-            next_data = f"next|{parts[1]}|{parts[2]}|{parts[3]}"
-        else: # action|uuid|is_saved (truncated)
-            next_data = f"next|{parts[1]}|{parts[2]}"
+        # Save rating to DB
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {f'ratings.{video_uuid}': "like" if is_like else "dislike"}},
+            upsert=True
+        )
 
         await callback_query.answer(popup, show_alert=False)
-        logger.info(f"User {user_id} {action} video. Jumping to next.")
 
-        # Mock callback query for navigate_video
-        callback_query.data = next_data
-        await navigate_video(client, callback_query)
+        video_data = get_video_by_uuid(video_uuid)
+        if not video_data:
+            return
+
+        is_saved_from_markup = False
+        if len(parts) >= 4:
+            is_saved_from_markup = bool(int(parts[3]))
+
+        _, current_position, total_videos = get_video_and_position(
+            video_uuid, video_data.get('category'), is_saved_from_markup, user_id
+        )
+
+        fake_ratio = get_user_adjusted_fake_ratio(user_id, video_uuid)
+        custom_caption = video_data.get('custom_caption')
+        category_name = video_data.get('category') or 'Default'
+
+        # Since it is a category-specific video in the get video menu, format it with the rating
+        new_caption = (
+            f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
+            f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+        if custom_caption:
+            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
+        new_caption += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+
+        await client.edit_message_caption(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.id,
+            caption=new_caption,
+            reply_markup=callback_query.message.reply_markup
+        )
         raise StopPropagation
     except StopPropagation:
         raise
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_callback: {e}", exc_info=True)
-        await callback_query.answer("❌ Failed to skip.", show_alert=True)
+        await callback_query.answer("❌ Failed to register reaction.", show_alert=True)
 
 @bot.on_callback_query(filters.regex(r"^(next|prev)\|(.+)\|")) # Updated regex to capture is_saved flag
 async def navigate_video(client: Client, callback_query: CallbackQuery):
@@ -3536,7 +3628,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 
 @bot.on_callback_query(filters.regex(r"^(dislike_default|like_default)\|(.+)$"))
 async def interaction_default_callback(client: Client, callback_query: CallbackQuery):
-    """Handles 'Like' and 'Dislike' for default category by jumping next."""
+    """Handles 'Like' and 'Dislike' for default category in-place by adjusting rating."""
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('|')[1]
 
@@ -3545,21 +3637,53 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
         await send_token_earning_options(client, callback_query.message)
         return
 
-    action = "liked" if callback_query.data.startswith("like") else "disliked"
-    popup = "You liked this video! ❤️" if action == "liked" else "Skipping video... 👎"
+    is_like = callback_query.data.startswith("like_default")
+    popup = "You liked this video! ❤️" if is_like else "You disliked this video! 💔"
     try:
-        video_uuid = callback_query.data.split('|')[1]
-        await callback_query.answer(popup, show_alert=False)
-        logger.info(f"User {user_id} {action} default video. Jumping to next.")
+        # Save rating to DB
+        users_collection.update_one(
+            {'user_id': user_id},
+            {'$set': {f'ratings.{video_uuid}': "like" if is_like else "dislike"}},
+            upsert=True
+        )
 
-        callback_query.data = f"next_default|{video_uuid}"
-        await navigate_default_category(client, callback_query)
+        await callback_query.answer(popup, show_alert=False)
+
+        video_data = get_video_by_uuid(video_uuid)
+        if not video_data:
+            return
+
+        _, current_position, total_videos = get_video_and_position(
+            video_uuid, "default (all)", False, user_id
+        )
+
+        fake_ratio = get_user_adjusted_fake_ratio(user_id, video_uuid)
+        custom_caption = video_data.get('custom_caption')
+        category_name = video_data.get('category') or 'Default'
+
+        new_caption = (
+            f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
+            f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+        if custom_caption:
+            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
+        new_caption += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+
+        await client.edit_message_caption(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.id,
+            caption=new_caption,
+            reply_markup=callback_query.message.reply_markup
+        )
         raise StopPropagation
     except StopPropagation:
         raise
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_default_callback: {e}", exc_info=True)
-        await callback_query.answer("❌ Failed to skip.", show_alert=True)
+        await callback_query.answer("❌ Failed to register reaction.", show_alert=True)
 
 @bot.on_callback_query(filters.regex(r"^(next_default|prev_default)\|(.+)$"))
 async def navigate_default_category(client: Client, callback_query: CallbackQuery):
@@ -3957,15 +4081,114 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
 
         await callback_query.answer()
         logger.info(f"User {user_id} requested share link for video {video_uuid}.")
-        await callback_query.message.reply(
-            f"🔗 <b>Share this video and earn!</b> 🎁\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(share_link)}</code>\n\nShare this link to new users only to get the token! 📢",
-            quote=True,
-            disable_web_page_preview=True
+
+        # Build in-place edit with share details and back button
+        share_caption = (
+            f"🔗 <b>Share this Video & Earn!</b> 🎁\n\n"
+            f"Send this link to your friends or post it in groups. When a new user joins through your link, you'll receive <b>{config.REFERRAL_BONUS} token</b> instantly! It's a win-win! 🎉\n\n"
+            f"<code>{html.escape(share_link)}</code>\n\n"
+            f"📢 <i>Note: You only earn tokens for introducing new users! Enjoy!</i>"
         )
-        logger.info(f"User {user_id}: Share link for video {video_uuid} sent successfully with referral data.")
+
+        back_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Back to Video", callback_data=f"back_from_share|{video_uuid}")]
+        ])
+
+        await client.edit_message_caption(
+            chat_id=callback_query.message.chat.id,
+            message_id=callback_query.message.id,
+            caption=share_caption,
+            reply_markup=back_keyboard
+        )
+        logger.info(f"User {user_id}: Menu edited with share link for video {video_uuid} in-place.")
     except Exception as e:
-        logger.error(f"User {user_id} failed to send share link for video {video_uuid}: {e}", exc_info=True)
+        logger.error(f"User {user_id} failed to edit menu with share link for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
+
+@bot.on_callback_query(filters.regex(r"^back_from_share\|(.+)$"))
+async def back_from_share_callback(client: Client, callback_query: CallbackQuery):
+    """Restores the video navigation menu and caption from share state."""
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('|')[1]
+
+    video_data = get_video_by_uuid(video_uuid)
+    if not video_data:
+        await callback_query.answer("Video not found.")
+        return
+
+    category_name = video_data.get('category') or 'Default'
+
+    # Load user session
+    session = user_session_history.get(user_id) or {}
+    is_batch = session.get('batch_id') is not None
+    batch_id = session.get('batch_id')
+    batch_index = session.get('position', 1) - 1
+
+    user_doc = users_collection.find_one({'user_id': user_id})
+    is_saved = any(b['uuid'] == video_uuid for b in user_doc.get('bookmarked_videos', [])) if user_doc else False
+
+    is_shared_link = not session.get('is_get_video', False) and not is_batch and not is_saved
+
+    _, current_position, total_videos = get_video_and_position(
+        video_uuid, category_name, is_saved, user_id
+    )
+
+    # Build back caption
+    fake_ratio = get_user_adjusted_fake_ratio(user_id, video_uuid)
+    custom_caption = video_data.get('custom_caption')
+
+    # Rebuild caption text
+    if not is_batch and not is_saved:
+        new_caption = (
+            f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
+            f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+        if custom_caption:
+            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
+        new_caption += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+    else:
+        if is_batch:
+            new_caption = (
+                f"🎬 <b>Batch Video Playing</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            )
+        elif is_saved:
+            new_caption = (
+                f"🔖 <b>Saved Videos: {html.escape(category_name)}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            )
+        else:
+            new_caption = (
+                f"🔗 <b>Shared Video</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🍿 <i>Enjoy your watch!</i>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            )
+        if custom_caption:
+            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
+
+    # Restore original navigation keyboard
+    back_keyboard = video_nav_keyboard(
+        video_uuid, category_name, user_id,
+        is_saved=is_saved, is_batch=is_batch,
+        batch_id=batch_id, batch_index=batch_index,
+        is_shared_link=is_shared_link
+    )
+
+    await client.edit_message_caption(
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.id,
+        caption=new_caption,
+        reply_markup=back_keyboard
+    )
+    await callback_query.answer()
 
 async def auto_delete_download(client: Client, chat_id: int, video_message: Message, info_message: Message):
     """Automatically deletes the downloaded video and its info warning message after 10 minutes and notifies the user."""
