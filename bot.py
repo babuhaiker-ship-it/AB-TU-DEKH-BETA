@@ -2305,16 +2305,40 @@ async def start_cmd(client: Client, message: Message):
             finally:
                 if loading_msg: await loading_msg.delete()
         elif is_new_user: # New user, already joined, no deep link
+            welcome_inline_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🎞️ Get Video", callback_data="get_default_video"),
+                    InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn")
+                ]
+            ])
             await message.reply(
                 f"🎉 <b>Welcome {first_name_safe} to our Spicy Collection!</b> 🌶️\n\n"
                 f"You have unlocked exclusive access to our premium library. Enjoy unlimited content on demand! ✨\n\n"
                 f"👉 <b>Tap '🎞️ Get Video' below</b> to instantly launch a random video or browse by categories! 🚀",
+                reply_markup=welcome_inline_keyboard
+            )
+            # Send small follow-up message to initialize the custom main reply keyboard
+            await client.send_message(
+                message.chat.id,
+                "✨ <i>Use the menu keyboard below to navigate anytime!</i>",
                 reply_markup=await get_main_keyboard(user_id)
             )
         else: # Existing user, no deep link
+            welcome_inline_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🎞️ Get Video", callback_data="get_default_video"),
+                    InlineKeyboardButton("💸 Upload & Earn", callback_data="upload_btn")
+                ]
+            ])
             await message.reply(
                 f"👋 <b>Welcome back, {first_name_safe}!</b> 🌶️\n\n"
                 f"Ready for your next watch? Tap <b>'🎞️ Get Video'</b> below to start exploring your favorites! 🍿",
+                reply_markup=welcome_inline_keyboard
+            )
+            # Send small follow-up message to initialize the custom main reply keyboard
+            await client.send_message(
+                message.chat.id,
+                "✨ <i>Use the menu keyboard below to navigate anytime!</i>",
                 reply_markup=await get_main_keyboard(user_id)
             )
 
@@ -2936,19 +2960,20 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
 
     try:
         # Copy to data channel officially with robust fallback to send_video
+        caption_to_use = upload_data.get('caption') or f"Category: {category}"
         try:
             sent_video = await client.copy_message(
                 chat_id=DATA_CHANNEL_ID,
                 from_chat_id=upload_data['user_id'],
                 message_id=upload_data['message_id_in_user_chat'],
-                caption=f"Approved upload from user {upload_data['user_id']}"
+                caption=caption_to_use
             )
         except Exception as copy_err:
             logger.warning(f"copy_message failed for upload approval: {copy_err}. Retrying with direct send_video...")
             sent_video = await client.send_video(
                 chat_id=DATA_CHANNEL_ID,
                 video=upload_data['file_id'],
-                caption=f"Approved upload from user {upload_data['user_id']}"
+                caption=caption_to_use
             )
 
         # Get next sequence number
@@ -4866,9 +4891,10 @@ async def process_batch_queue(user_id: int, client: Client):
                 await message.reply_text(f"⚠️ This video has already been added. Skipping.{link_text}")
                 continue
 
+            caption_to_use = message.caption or f"Category: {category}"
             sent_video_message = await client.send_video(
                 chat_id=DATA_CHANNEL_ID, video=message.video.file_id,
-                caption=f"Added by admin {user_id} for category {category}"
+                caption=caption_to_use
             )
             if not sent_video_message or not sent_video_message.video:
                 raise Exception("send_video did not return a valid video message.")
