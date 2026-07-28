@@ -1455,14 +1455,10 @@ async def send_and_replace_message(
             fake_ratio = get_user_adjusted_fake_ratio(chat_id, video_data['uuid'])
             caption_text = (
                 f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
-                f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📦 <code>#{current_position}/{total_videos}</code> • ❤️ <code>{fake_ratio}% liked</code>\n"
             )
             if custom_caption:
-                caption_text += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
-            caption_text += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+                caption_text += f"📝 <i>{html.escape(custom_caption)}</i>\n"
         else:
             # Other menus (saved, batch, shared links)
             if is_batch:
@@ -3425,14 +3421,10 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
         # Since it is a category-specific video in the get video menu, format it with the rating
         new_caption = (
             f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
-            f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 <code>#{current_position}/{total_videos}</code> • ❤️ <code>{fake_ratio}% liked</code>\n"
         )
         if custom_caption:
-            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
-        new_caption += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
 
         await client.edit_message_caption(
             chat_id=callback_query.message.chat.id,
@@ -3663,14 +3655,10 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
 
         new_caption = (
             f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
-            f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 <code>#{current_position}/{total_videos}</code> • ❤️ <code>{fake_ratio}% liked</code>\n"
         )
         if custom_caption:
-            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
-        new_caption += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
 
         await client.edit_message_caption(
             chat_id=callback_query.message.chat.id,
@@ -4141,14 +4129,10 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     if not is_batch and not is_saved:
         new_caption = (
             f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n"
-            f"📈 <b>Community Rating:</b> <code>{fake_ratio}%</code> of users liked this ❤️\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📦 <code>#{current_position}/{total_videos}</code> • ❤️ <code>{fake_ratio}% liked</code>\n"
         )
         if custom_caption:
-            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n\n"
-        new_caption += f"🍿 <i>Enjoy your watch! Use the controls below to browse.</i>"
+            new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
     else:
         if is_batch:
             new_caption = (
