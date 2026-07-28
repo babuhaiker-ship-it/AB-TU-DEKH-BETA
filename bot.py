@@ -4104,10 +4104,14 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
         await callback_query.answer("Video not found.")
         return
 
-    category_name = video_data.get('category') or 'Default'
-
     # Load user session
     session = user_session_history.get(user_id) or {}
+
+    if session.get('is_get_video', False):
+        category_name = "default (all)"
+    else:
+        category_name = session.get('category') or video_data.get('category') or 'Default'
+
     is_batch = session.get('batch_id') is not None
     batch_id = session.get('batch_id')
     batch_index = session.get('position', 1) - 1
