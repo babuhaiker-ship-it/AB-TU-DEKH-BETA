@@ -1719,89 +1719,81 @@ def video_nav_keyboard(
     """
     buttons = []
 
-    # --- Interaction Row (Like/Dislike) ---
+    # --- Row 1: Interaction (Like/Dislike) & Download ---
     if not is_saved and not is_batch and not is_shared_link:
         if category == "default (all)":
             dislike_cb = f"dislike_default|{video_uuid}"
             like_cb = f"like_default|{video_uuid}"
         else:
-            # Shorten "default (all)" to "def" to save space in callback data
             cat_payload = "def" if category == "default (all)" else str_to_b64(category)
             dislike_cb = f"dislike|{video_uuid}|{cat_payload}|{int(is_saved)}"
             like_cb = f"like|{video_uuid}|{cat_payload}|{int(is_saved)}"
 
-            # TRUNCATION: If still over 64 bytes, we MUST omit category and rely on DB lookup
             if len(dislike_cb) > 64 or len(like_cb) > 64:
                 dislike_cb = f"dislike|{video_uuid}|{int(is_saved)}"
                 like_cb = f"like|{video_uuid}|{int(is_saved)}"
 
         buttons.append([
             InlineKeyboardButton("❤️ Like", callback_data=like_cb),
-            InlineKeyboardButton("💔 Dislike", callback_data=dislike_cb)
+            InlineKeyboardButton("💔 Dislike", callback_data=dislike_cb),
+            InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}")
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}")
         ])
 
-    # --- Navigation Row (Previous/Next/Download) ---
+    # --- Row 2: Navigation (Previous/Next) & Share Middle ---
     if category == "default (all)":
-        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_default|{video_uuid}")]
-        # Disable previous button if there is no history
+        nav_buttons = [InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}")]
         if user_id in user_session_history and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_default|{video_uuid}"))
-        nav_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
+        nav_buttons.append(InlineKeyboardButton("⏩ Next Video", callback_data=f"next_default|{video_uuid}"))
         buttons.append(nav_buttons)
     elif is_shared_link:
         buttons.append([
             InlineKeyboardButton("⏪ Prev Video", callback_data="shared_nav"),
-            InlineKeyboardButton("⏩ Next Video", callback_data="shared_nav"),
-            InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}")
+            InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}"),
+            InlineKeyboardButton("⏩ Next Video", callback_data="shared_nav")
         ])
     elif is_batch:
-        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}")]
-        # Disable previous button if there is no history or at start
+        nav_buttons = [InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}")]
         if user_id in user_session_history and user_session_history[user_id].get('batch_id') == batch_id and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_batch|{batch_id}|{batch_index}"))
-        nav_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
+        nav_buttons.append(InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}"))
         buttons.append(nav_buttons)
     else:
         cat_payload = str_to_b64(category)
         prev_cb = f"prev|{video_uuid}|{cat_payload}|{int(is_saved)}"
         next_cb = f"next|{video_uuid}|{cat_payload}|{int(is_saved)}"
 
-        # TRUNCATION: Ensure we stay under Telegram's 64-byte limit
         if len(prev_cb) > 64 or len(next_cb) > 64:
             prev_cb = f"prev|{video_uuid}|{int(is_saved)}"
             next_cb = f"next|{video_uuid}|{int(is_saved)}"
 
-        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=next_cb)]
-        # Disable previous button if there is no history or at start
+        nav_buttons = [InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}")]
         if user_id in user_session_history and user_session_history[user_id].get('category') == category and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=prev_cb))
-        nav_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
+        nav_buttons.append(InlineKeyboardButton("⏩ Next Video", callback_data=next_cb))
         buttons.append(nav_buttons)
 
-    # --- Action Row (Bookmark/Share) ---
-    row_2_buttons = []
-    if is_saved:
-        # For saved videos, the "Bookmark" button is replaced by "Remove"
-        row_2_buttons.append(InlineKeyboardButton("🗑️ Unsave", callback_data=f"remove_saved_{video_uuid}"))
-    else:
-        row_2_buttons.append(InlineKeyboardButton("🔖 Save Video", callback_data=f"bookmark_{video_uuid}"))
-
-    row_2_buttons.append(InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}"))
-    buttons.append(row_2_buttons)
-
-    # --- Third Row (Context-dependent) ---
+    # --- Row 3: Action (Bookmark/Unsave) & Context Row ---
     row_3_buttons = []
+    if is_saved:
+        row_3_buttons.append(InlineKeyboardButton("🗑️ Unsave", callback_data=f"remove_saved_{video_uuid}"))
+    else:
+        row_3_buttons.append(InlineKeyboardButton("🔖 Save Video", callback_data=f"bookmark_{video_uuid}"))
+
     if is_batch or is_shared_link:
         row_3_buttons.append(InlineKeyboardButton("👀 Discover More", callback_data="watch_more"))
     elif is_saved:
         row_3_buttons.append(InlineKeyboardButton("🔙 Go Back", callback_data="back_to_saved_cats"))
-    else: # Regular navigation
+    else:
         if category == "default (all)":
             row_3_buttons.append(InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn"))
         row_3_buttons.append(InlineKeyboardButton("🗂️ Browse Categories", callback_data="change_cat"))
 
-    if row_3_buttons:
-        buttons.append(row_3_buttons)
+    buttons.append(row_3_buttons)
 
     return InlineKeyboardMarkup(buttons)
 
@@ -4085,28 +4077,14 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
             f"🔗 <code>{html.escape(share_link)}</code>"
         )
 
-        close_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🗑️ Close", callback_data="close_share")]
-        ])
-
         await client.send_message(
             chat_id=callback_query.message.chat.id,
-            text=share_caption,
-            reply_markup=close_keyboard
+            text=share_caption
         )
         logger.info(f"User {user_id}: Separate share link message sent.")
     except Exception as e:
         logger.error(f"User {user_id} failed to send separate share link message for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
-
-@bot.on_callback_query(filters.regex(r"^close_share$"))
-async def close_share_callback(client: Client, callback_query: CallbackQuery):
-    """Deletes the separate share link message."""
-    try:
-        await callback_query.message.delete()
-    except Exception as e:
-        logger.warning(f"Failed to delete share message: {e}")
-    await callback_query.answer()
 
 @bot.on_callback_query(filters.regex(r"^back_from_share\|(.+)$"))
 async def back_from_share_callback(client: Client, callback_query: CallbackQuery):
