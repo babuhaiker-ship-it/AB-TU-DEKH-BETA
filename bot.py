@@ -552,15 +552,15 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         return long_url
 
 # --- Token and Premium Management ---
-def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admin_granted: bool = False):
+def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admin_granted: bool = False, is_activated: bool = False):
     """
     Adds a new token for a user with a specified duration.
     Admin-granted tokens (Premium) are activated immediately.
     Others are banked until manually activated by the user.
     """
     now = datetime.now(timezone.utc)
-    # Admin granted tokens activate immediately.
-    should_activate = is_admin_granted
+    # Admin granted tokens or explicitly activated tokens activate immediately.
+    should_activate = is_admin_granted or is_activated
 
     expires_at = now + timedelta(seconds=duration_seconds) if should_activate else None
 
@@ -806,8 +806,8 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
 
     if last_known_premium_status and not current_premium_status:
         try:
-            await client.send_message(user_id, "⚠️ <b>Your Premium Access Has Expired!</b>💔\n\nYour premium token has expired. You are no longer a premium user. Enjoy regular features or purchase new premium access! 🛒")
-            logger.info(f"Notified user {user_id} about premium expiry.")
+            await client.send_message(user_id, "⚠️ <b>Your Red Token Access Has Expired!</b>💔\n\nYour Red Token has expired. You are no longer a Red Token user. Enjoy regular features or get a new Red Token! 🛒")
+            logger.info(f"Notified user {user_id} about Red Token expiry.")
         except (UserIsBlocked, ChatInvalid):
             logger.warning(f"Could not notify user {user_id} about premium expiry; user blocked or chat invalid.")
         except Exception as e:
@@ -907,7 +907,7 @@ async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
                             referrer_id,
                             f"🏆 <b>Referral Milestone Reached!</b> ({tier_name}) 🎉\n\n"
                             f"Outstanding job! You have reached <b>{req_count} successful referrals</b>.\n\n"
-                            f"🎁 As a reward, you have been granted <b>{days_reward} Days of unlimited VIP Premium Access</b> for free! Enjoy your ad-free, download-ready experience! 💎"
+                            f"🎁 As a reward, you have been granted <b>{days_reward} Days of unlimited Red Token Access</b> for free! Enjoy your ad-free, download-ready experience! 🔴"
                         )
                     except Exception as notify_e:
                         logger.warning(f"Could not notify referrer {referrer_id} about milestone reward: {notify_e}")
@@ -1463,24 +1463,18 @@ async def send_and_replace_message(
             # Other menus (saved, batch, shared links)
             if is_batch:
                 caption_text = (
-                    f"🎬 <b>Batch Video Playing</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🎬 <b>Batch Playlist</b>\n"
+                    f"📦 <code>#{current_position}/{total_videos}</code>\n"
                 )
             elif is_saved_from_markup:
                 caption_text = (
-                    f"🔖 <b>Saved Videos: {html.escape(category_name)}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🔖 <b>Saved Videos: {html.escape(category_name)} Collection</b>\n"
+                    f"📦 <code>#{current_position}/{total_videos}</code>\n"
                 )
             else:
                 caption_text = (
                     f"🔗 <b>Shared Video</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"🍿 <i>Enjoy your watch!</i>\n\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🍿 <i>Enjoy your watch!</i>\n"
                 )
             if custom_caption:
                 caption_text += f"📝 <i>{html.escape(custom_caption)}</i>\n"
@@ -1678,7 +1672,7 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
         buttons.append([InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn")])
 
-    vip_text = "⚡ Bypass Verification" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free)"
+    vip_text = "🔴 Get Red Token"
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
@@ -1746,23 +1740,26 @@ def video_nav_keyboard(
             InlineKeyboardButton("💔 Dislike", callback_data=dislike_cb)
         ])
 
-    # --- Navigation Row (Previous/Next) ---
+    # --- Navigation Row (Previous/Next/Download) ---
     if category == "default (all)":
         nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_default|{video_uuid}")]
         # Disable previous button if there is no history
         if user_id in user_session_history and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_default|{video_uuid}"))
+        nav_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
         buttons.append(nav_buttons)
     elif is_shared_link:
         buttons.append([
             InlineKeyboardButton("⏪ Prev Video", callback_data="shared_nav"),
-            InlineKeyboardButton("⏩ Next Video", callback_data="shared_nav")
+            InlineKeyboardButton("⏩ Next Video", callback_data="shared_nav"),
+            InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}")
         ])
     elif is_batch:
         nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}")]
         # Disable previous button if there is no history or at start
         if user_id in user_session_history and user_session_history[user_id].get('batch_id') == batch_id and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_batch|{batch_id}|{batch_index}"))
+        nav_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
         buttons.append(nav_buttons)
     else:
         cat_payload = str_to_b64(category)
@@ -1778,9 +1775,10 @@ def video_nav_keyboard(
         # Disable previous button if there is no history or at start
         if user_id in user_session_history and user_session_history[user_id].get('category') == category and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=prev_cb))
+        nav_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
         buttons.append(nav_buttons)
 
-    # --- Action Row (Bookmark/Share/Download) ---
+    # --- Action Row (Bookmark/Share) ---
     row_2_buttons = []
     if is_saved:
         # For saved videos, the "Bookmark" button is replaced by "Remove"
@@ -1789,7 +1787,6 @@ def video_nav_keyboard(
         row_2_buttons.append(InlineKeyboardButton("🔖 Save Video", callback_data=f"bookmark_{video_uuid}"))
 
     row_2_buttons.append(InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}"))
-    row_2_buttons.append(InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}"))
     buttons.append(row_2_buttons)
 
     # --- Third Row (Context-dependent) ---
@@ -1814,20 +1811,20 @@ def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
     return None
 
 def get_premium_only_text() -> str:
-    """Returns the text highlighting only premium user benefits."""
+    """Returns the text highlighting only Red Token benefits."""
     return (
-        "✨ <b>Premium User Benefits</b> ✨\n\n"
+        "✨ <b>Red Token User Benefits</b> ✨\n\n"
         "✅ <b>Unlimited Saved Videos</b> — keep as many bookmarks as you like.\n"
         "✅ <b>Direct Video Downloads</b> — instantly get the actual file with no restrictions.\n"
-        "✅ <b>No Ad Refresh Needed</b> — enjoy uninterrupted access for your entire premium period.\n"
+        "✅ <b>No Ad Refresh Needed</b> — enjoy uninterrupted access for your entire active period.\n"
         "✅ <b>Bookmarks Never Deleted</b> — your saved videos are safe.\n"
         "✅ <b>Priority Content Delivery</b> — faster, reliable downloads so you always get the video.\n\n"
-        f"💳 Upgrade for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all premium benefits instantly! 🚀"
+        f"💳 Get Red Token for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all benefits instantly! 🚀"
     )
 
 def buy_token_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for buying tokens."""
-    btn_text = "⚡ Bypass Verification" if SHORTENER_DISABLED else "💳 Buy VIP Premium Access"
+    btn_text = "🔴 Get Red Token"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(btn_text, url=config.BUY_BOT_URL)]
     ])
@@ -2186,7 +2183,9 @@ async def start_cmd(client: Client, message: Message):
                     'daily_uploads': {'count': 0, 'reset_at': datetime.now(timezone.utc) + timedelta(hours=24)}
                 }
             })
-            logger.info(f"New user registered: {user_id} and received {config.NEW_USER_SCROLLS} free scrolls.")
+            # Grant 2 days active normal token to new user
+            add_token(user_id, duration_seconds=172800, is_admin_granted=False, is_activated=True)
+            logger.info(f"New user registered: {user_id}, received 2-day active normal token and {config.NEW_USER_SCROLLS} free scrolls.")
 
             # Handle referral for the newly created user
             if deep_link_arg:
@@ -2305,8 +2304,7 @@ async def start_cmd(client: Client, message: Message):
                             save_history(user_id, video['uuid'], video['category'])
                             await client.send_message(
                                 message.chat.id,
-                                "🍿 <b>Enjoying the video?</b>\n\n"
-                                "✨ Tap <b>'👀 Watch More'</b> below or choose from the keyboard to browse unlimited spicy content instantly without waiting for links! 🚀",
+                                "🍿 <b>Enjoying the video?</b> Tap <b>'👀 Watch More'</b> below or use the keyboard to browse unlimited content instantly! 🚀",
                                 reply_markup=await get_main_keyboard(user_id)
                             )
 
@@ -2328,8 +2326,7 @@ async def start_cmd(client: Client, message: Message):
                                 user_session_history[user_id] = {'category': video['category'], 'videos': [video['uuid']], 'position': 0, 'is_get_video': False, 'batch_id': deep_link_data}
                                 await client.send_message(
                                     message.chat.id,
-                                    "🍿 <b>Enjoying the video?</b>\n\n"
-                                    "✨ Tap <b>'👀 Watch More'</b> below or choose from the keyboard to browse unlimited spicy content instantly without waiting for links! 🚀",
+                                    "🍿 <b>Enjoying the video?</b> Tap <b>'👀 Watch More'</b> below or use the keyboard to browse unlimited content instantly! 🚀",
                                     reply_markup=await get_main_keyboard(user_id)
                                 )
 
@@ -2352,8 +2349,7 @@ async def start_cmd(client: Client, message: Message):
                             save_history(user_id, video['uuid'], "default (all)")
                             await client.send_message(
                                 message.chat.id,
-                                "🍿 <b>Enjoying the video?</b>\n\n"
-                                "✨ Tap <b>'👀 Watch More'</b> below or choose from the keyboard to browse unlimited spicy content instantly without waiting for links! 🚀",
+                                "🍿 <b>Enjoying the video?</b> Tap <b>'👀 Watch More'</b> below or use the keyboard to browse unlimited content instantly! 🚀",
                                 reply_markup=await get_main_keyboard(user_id)
                             )
             finally:
@@ -2367,7 +2363,7 @@ async def start_cmd(client: Client, message: Message):
             ])
             await message.reply(
                 f"🎉 <b>Welcome {first_name_safe} to our Spicy Collection!</b> 🌶️\n\n"
-                f"You have unlocked exclusive access to our premium library. Enjoy unlimited content on demand! ✨\n\n"
+                f"You have unlocked exclusive access to our spicy library. Enjoy unlimited content on demand! ✨\n\n"
                 f"👉 <b>Tap '🎞️ Get Video' below</b> to instantly launch a random video or browse by categories! 🚀",
                 reply_markup=welcome_inline_keyboard
             )
@@ -2580,7 +2576,7 @@ async def help_cmd(client: Client, message: Message):
 
     await message.reply(
         f"👋 <b>Hey {user_mention_safe}! Here's how to use the bot:</b> 📚\n\n"
-        f"• <b>🎞️ Get Video</b>: Browse, watch, and discover premium spicy content on-demand.\n"
+        f"• <b>🎞️ Get Video</b>: Browse, watch, and discover spicy content on-demand.\n"
         f"• <b>👤 Profile</b>: Check your status, session tokens, scrolls remaining, and referrals.\n"
         f"• <b>🔖 Saved Videos</b>: View or manage your personalized bookmark collection.\n\n"
         f"💡 <i>Have any issues or questions? Click below to contact our support team. Enjoy! 🌶️</i>",
@@ -2688,7 +2684,7 @@ async def profile_cmd(client: Client, message: Message):
         total_scrolls = permanent_scrolls + valid_temp_scrolls_count
 
         is_premium = is_premium_user(user_id)
-        user_status = "💎 Premium User" if is_premium else "✨ Free User"
+        user_status = "🔴 Red Token User" if is_premium else "✨ Free User"
 
         if is_premium:
             save_limit_display = f"{len(bookmarked_videos)} / Unlimited"
@@ -2720,10 +2716,10 @@ async def profile_cmd(client: Client, message: Message):
             f"<code>{html.escape(ref_link)}</code>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"🎁 <i>Milestone Rewards:</i>\n"
-            f"• 5 Referrals: 1 Day Premium 💎\n"
-            f"• 10 Referrals: 3 Days Premium 💎\n"
-            f"• 20 Referrals: 7 Days Premium 💎\n"
-            f"• 50 Referrals: 30 Days Premium 💎\n\n"
+            f"• 5 Referrals: 1 Day Red Token 🔴\n"
+            f"• 10 Referrals: 3 Days Red Token 🔴\n"
+            f"• 20 Referrals: 7 Days Red Token 🔴\n"
+            f"• 50 Referrals: 30 Days Red Token 🔴\n\n"
             f"🎁 <i>Share your link with friends to earn additional tokens and scrolls automatically!</i>"
         )
 
@@ -2815,6 +2811,17 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     # Changed: Decode category name from callback data
     category_name = b64_to_str(callback_query.data[4:])
     logger.info(f"User {user_id} selected category: {category_name}.")
+
+    if category_name != "default (all)" and not is_premium_user(user_id):
+        await callback_query.answer("🔴 Red Token Required! 🔴", show_alert=True)
+        await client.send_message(
+            chat_id,
+            "⚠️ <b>Red Token Required</b> ⚠️\n\n"
+            "To watch videos in categories other than <b>default (all)</b>, you need a <b>Red Token</b>. 🔴\n\n"
+            "Get a Red Token now to instantly unlock unlimited category selection, direct downloads, and ad-free spicy content! 🚀",
+            reply_markup=buy_token_keyboard()
+        )
+        return
 
     if not await check_membership(client, user_id):
         await callback_query.answer("You must join our channel first!", show_alert=True)
@@ -4067,31 +4074,39 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
         share_payload = f"video_{video_uuid}_{user_id}"
         share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start={share_payload}"
 
-        await callback_query.answer()
+        await callback_query.answer("Share link generated below! 📤", show_alert=True)
         logger.info(f"User {user_id} requested share link for video {video_uuid}.")
 
-        # Build in-place edit with share details and back button
+        # Send improved share caption as a SEPARATE message so users can copy it
         share_caption = (
-            f"🔗 <b>Share this Video & Earn!</b> 🎁\n\n"
-            f"Send this link to your friends or post it in groups. When a new user joins through your link, you'll receive <b>{config.REFERRAL_BONUS} token</b> instantly! It's a win-win! 🎉\n\n"
-            f"<code>{html.escape(share_link)}</code>\n\n"
-            f"📢 <i>Note: You only earn tokens for introducing new users! Enjoy!</i>"
+            "✨ <b>Share & Earn Rewards!</b> 🎁\n\n"
+            "Send this unique link to your friends or post it in groups! "
+            f"When a new user joins, you instantly get <b>{config.REFERRAL_BONUS} Red Token</b>! 🚀\n\n"
+            f"🔗 <code>{html.escape(share_link)}</code>"
         )
 
-        back_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔙 Back to Video", callback_data=f"back_from_share|{video_uuid}")]
+        close_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗑️ Close", callback_data="close_share")]
         ])
 
-        await client.edit_message_caption(
+        await client.send_message(
             chat_id=callback_query.message.chat.id,
-            message_id=callback_query.message.id,
-            caption=share_caption,
-            reply_markup=back_keyboard
+            text=share_caption,
+            reply_markup=close_keyboard
         )
-        logger.info(f"User {user_id}: Menu edited with share link for video {video_uuid} in-place.")
+        logger.info(f"User {user_id}: Separate share link message sent.")
     except Exception as e:
-        logger.error(f"User {user_id} failed to edit menu with share link for video {video_uuid}: {e}", exc_info=True)
+        logger.error(f"User {user_id} failed to send separate share link message for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
+
+@bot.on_callback_query(filters.regex(r"^close_share$"))
+async def close_share_callback(client: Client, callback_query: CallbackQuery):
+    """Deletes the separate share link message."""
+    try:
+        await callback_query.message.delete()
+    except Exception as e:
+        logger.warning(f"Failed to delete share message: {e}")
+    await callback_query.answer()
 
 @bot.on_callback_query(filters.regex(r"^back_from_share\|(.+)$"))
 async def back_from_share_callback(client: Client, callback_query: CallbackQuery):
@@ -4119,7 +4134,7 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     user_doc = users_collection.find_one({'user_id': user_id})
     is_saved = any(b['uuid'] == video_uuid for b in user_doc.get('bookmarked_videos', [])) if user_doc else False
 
-    is_shared_link = not session.get('is_get_video', False) and not is_batch and not is_saved
+    is_shared_link = (not session) or (not session.get('is_get_video', False) and not session.get('category') and not is_batch and not is_saved)
 
     _, current_position, total_videos = get_video_and_position(
         video_uuid, category_name, is_saved, user_id
@@ -4140,24 +4155,18 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     else:
         if is_batch:
             new_caption = (
-                f"🎬 <b>Batch Video Playing</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🎬 <b>Batch Playlist</b>\n"
+                f"📦 <code>#{current_position}/{total_videos}</code>\n"
             )
         elif is_saved:
             new_caption = (
-                f"🔖 <b>Saved Videos: {html.escape(category_name)}</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📦 <b>Video:</b> <code>#{current_position} of {total_videos}</code>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🔖 <b>Saved Videos: {html.escape(category_name)} Collection</b>\n"
+                f"📦 <code>#{current_position}/{total_videos}</code>\n"
             )
         else:
             new_caption = (
                 f"🔗 <b>Shared Video</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"🍿 <i>Enjoy your watch!</i>\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"🍿 <i>Enjoy your watch!</i>\n"
             )
         if custom_caption:
             new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
@@ -4178,11 +4187,14 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     )
     await callback_query.answer()
 
-async def auto_delete_download(client: Client, chat_id: int, video_message: Message, info_message: Message):
-    """Automatically deletes the downloaded video and its info warning message after 10 minutes and notifies the user."""
+async def auto_delete_download(client: Client, chat_id: int, video_message: Message, info_message: Message = None):
+    """Automatically deletes the downloaded video after 10 minutes and notifies the user."""
     await asyncio.sleep(600)  # Wait 10 minutes
     try:
-        await client.delete_messages(chat_id, [video_message.id, info_message.id])
+        msg_ids = [video_message.id]
+        if info_message:
+            msg_ids.append(info_message.id)
+        await client.delete_messages(chat_id, msg_ids)
     except Exception as e:
         logger.warning(f"Failed to delete download messages in auto_delete_download: {e}")
     try:
@@ -4231,14 +4243,14 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             sent_video = await client.send_video(
                 chat_id,
                 video=video['file_id'],
-                caption="⚠️ This video is for temporary download only and will be deleted in 10 minutes! Please save or forward it if you want to keep it.",
+                caption=(
+                    "⏳ <b>Temporary Download Generated!</b>\n\n"
+                    "This video will be automatically deleted in <b>10 minutes</b> to protect privacy. "
+                    "Please save, download, or forward it now! 🚀"
+                ),
                 protect_content=False
             )
-            sent_info = await client.send_message(
-                chat_id,
-                "⏳ **Temporary Download Link Generated!**\n\nThis video and this message will be automatically deleted in **10 minutes** to protect privacy. Please download, save, or forward it now! 🚀"
-            )
-            create_tracked_task(auto_delete_download(client, chat_id, sent_video, sent_info))
+            create_tracked_task(auto_delete_download(client, chat_id, sent_video))
             await callback_query.answer("Download initiated! 🚀")
             logger.info(f"Premium user {user_id} successfully received download for video {video_uuid}.")
         except FileReferenceExpired:
@@ -4259,14 +4271,14 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                 sent_video = await client.send_video(
                     chat_id,
                     video=new_file_id,
-                    caption="⚠️ This video is for temporary download only and will be deleted in 10 minutes! Please save or forward it if you want to keep it.",
+                    caption=(
+                        "⏳ <b>Temporary Download Generated!</b>\n\n"
+                        "This video will be automatically deleted in <b>10 minutes</b> to protect privacy. "
+                        "Please save, download, or forward it now! 🚀"
+                    ),
                     protect_content=False
                 )
-                sent_info = await client.send_message(
-                    chat_id,
-                    "⏳ **Temporary Download Link Generated!**\n\nThis video and this message will be automatically deleted in **10 minutes** to protect privacy. Please download, save, or forward it now! 🚀"
-                )
-                create_tracked_task(auto_delete_download(client, chat_id, sent_video, sent_info))
+                create_tracked_task(auto_delete_download(client, chat_id, sent_video))
                 await callback_query.answer("Download initiated! 🚀")
                 logger.info(f"Premium user {user_id} successfully received download for video {video_uuid} after self-healing.")
             except Exception as heal_e:
@@ -4943,11 +4955,11 @@ async def addtoken_cmd(client: Client, message: Message):
             return
 
         expiry_date = add_token_info['expires_at']
-        logger.info(f"Admin {user_id} granted {num_days} days of premium to user {target_user_id}. Expires: {expiry_date}")
-        await message.reply(f"✅ Granted <b>{num_days}</b> days of unlimited Premium access to user <b>{target_user_id}</b>. New expiry: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}. 🎉")
+        logger.info(f"Admin {user_id} granted {num_days} days of Red Token access to user {target_user_id}. Expires: {expiry_date}")
+        await message.reply(f"✅ Granted <b>{num_days}</b> days of unlimited Red Token access to user <b>{target_user_id}</b>. New expiry: {expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}. 🎉")
 
         try:
-            await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{num_days}</b> days of unlimited Premium Access by an admin! Your access now expires on <b>{expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 💎")
+            await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{num_days}</b> days of unlimited Red Token Access by an admin! Your access now expires on <b>{expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 🔴")
             users_collection.update_one(
                 {'user_id': target_user_id},
                 {'$set': {'last_premium_check_status': True}}
