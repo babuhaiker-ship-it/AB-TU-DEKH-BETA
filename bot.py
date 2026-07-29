@@ -1743,24 +1743,21 @@ def video_nav_keyboard(
             InlineKeyboardButton("📥 Download", callback_data=f"download_{video_uuid}")
         ])
 
-    # --- Row 2: Navigation (Previous/Next) & Share Middle ---
+    # --- Row 2: Navigation (Previous/Next) ---
     if category == "default (all)":
-        nav_buttons = [InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}")]
+        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_default|{video_uuid}")]
         if user_id in user_session_history and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_default|{video_uuid}"))
-        nav_buttons.append(InlineKeyboardButton("⏩ Next Video", callback_data=f"next_default|{video_uuid}"))
         buttons.append(nav_buttons)
     elif is_shared_link:
         buttons.append([
             InlineKeyboardButton("⏪ Prev Video", callback_data="shared_nav"),
-            InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}"),
             InlineKeyboardButton("⏩ Next Video", callback_data="shared_nav")
         ])
     elif is_batch:
-        nav_buttons = [InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}")]
+        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}")]
         if user_id in user_session_history and user_session_history[user_id].get('batch_id') == batch_id and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_batch|{batch_id}|{batch_index}"))
-        nav_buttons.append(InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}"))
         buttons.append(nav_buttons)
     else:
         cat_payload = str_to_b64(category)
@@ -1771,26 +1768,25 @@ def video_nav_keyboard(
             prev_cb = f"prev|{video_uuid}|{int(is_saved)}"
             next_cb = f"next|{video_uuid}|{int(is_saved)}"
 
-        nav_buttons = [InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}")]
+        nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=next_cb)]
         if user_id in user_session_history and user_session_history[user_id].get('category') == category and user_session_history[user_id]['position'] > 0:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=prev_cb))
-        nav_buttons.append(InlineKeyboardButton("⏩ Next Video", callback_data=next_cb))
         buttons.append(nav_buttons)
 
-    # --- Row 3: Action (Bookmark/Unsave) & Context Row ---
+    # --- Row 3: Action (Bookmark/Unsave), Share & Context ---
     row_3_buttons = []
     if is_saved:
         row_3_buttons.append(InlineKeyboardButton("🗑️ Unsave", callback_data=f"remove_saved_{video_uuid}"))
     else:
         row_3_buttons.append(InlineKeyboardButton("🔖 Save Video", callback_data=f"bookmark_{video_uuid}"))
 
+    row_3_buttons.append(InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}"))
+
     if is_batch or is_shared_link:
         row_3_buttons.append(InlineKeyboardButton("👀 Discover More", callback_data="watch_more"))
     elif is_saved:
         row_3_buttons.append(InlineKeyboardButton("🔙 Go Back", callback_data="back_to_saved_cats"))
     else:
-        if category == "default (all)":
-            row_3_buttons.append(InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn"))
         row_3_buttons.append(InlineKeyboardButton("🗂️ Browse Categories", callback_data="change_cat"))
 
     buttons.append(row_3_buttons)
