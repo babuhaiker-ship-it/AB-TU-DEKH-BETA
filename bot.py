@@ -482,6 +482,31 @@ def get_user_adjusted_fake_ratio(user_id: int, video_uuid: str) -> int:
         return max(40, base_ratio - adjustment)
     return base_ratio
 
+def strip_hashtags(text: str) -> str:
+    """Removes hashtag symbols from text (e.g. #sfwtwt becomes sfwtwt)."""
+    if not text:
+        return ""
+    return text.replace('#', '')
+
+def get_forward_info_string(message: Message) -> str or None:
+    """Extracts forwarding details from a forwarded message."""
+    if not message:
+        return None
+    if message.forward_from_chat:
+        chat_name = message.forward_from_chat.title or message.forward_from_chat.username or str(message.forward_from_chat.id)
+        forward_info = f"Channel: {chat_name}"
+        if message.forward_from_message_id:
+            forward_info += f" (Msg: {message.forward_from_message_id})"
+        return forward_info
+    elif message.forward_from:
+        user_name = message.forward_from.first_name or "User"
+        if message.forward_from.username:
+            user_name += f" (@{message.forward_from.username})"
+        return f"User: {user_name}"
+    elif message.forward_sender_name:
+        return f"Sender: {message.forward_sender_name}"
+    return None
+
 def get_channel_msg_link(channel_id, message_id):
     """Generates a t.me link for a message in a channel, handling private channels."""
     if not channel_id or not message_id:
@@ -1274,6 +1299,16 @@ def clear_active_video_message(user_id: int):
         del active_video_message[user_id]
         logger.info(f"Active video message cleared for user {user_id}.")
 
+async def delete_current_active_menu(client: Client, user_id: int):
+    """Deletes any currently active video menu for the user to prevent duplicate menus."""
+    if user_id in active_video_message:
+        menu = active_video_message[user_id]
+        try:
+            await client.delete_messages(menu['chat_id'], menu['message_id'])
+        except Exception as e:
+            logger.warning(f"Failed to delete active menu for user {user_id}: {e}")
+        clear_active_video_message(user_id)
+
 # --- Real-time self-healing functions ---
 def rearrange_sequences_after_deletion(category: str, deleted_sequence_number: int):
     """
@@ -1448,6 +1483,8 @@ async def send_and_replace_message(
             )
 
         custom_caption = video_data.get('custom_caption')
+        if custom_caption:
+            custom_caption = strip_hashtags(custom_caption)
         category_name = video_data.get('category') or 'Default'
 
         if not is_batch and not is_saved_from_markup:
@@ -1478,6 +1515,9 @@ async def send_and_replace_message(
                 )
             if custom_caption:
                 caption_text += f"📝 <i>{html.escape(custom_caption)}</i>\n"
+
+        if video_data.get('forward_info'):
+            caption_text += f"\n📩 <b>Origin:</b> {html.escape(video_data['forward_info'])}\n"
 
     # --- Delete Old Message if Forced ---
     if force_new_message and message_id_to_edit_or_delete:
@@ -1712,12 +1752,22 @@ def video_nav_keyboard(
     is_batch: bool = False,
     batch_id: str = None,
     batch_index: int = -1,
-    is_shared_link: bool = False
+    is_shared_link: bool = False,
+    media_group_id: str = None
 ) -> InlineKeyboardMarkup:
     """
     Keyboard for navigating videos. Handles regular, saved, batch, and shared video menus.
     """
     buttons = []
+
+    if media_group_id is None:
+        video_doc = media_collection.find_one({'uuid': video_uuid}, {'media_group_id': 1})
+        if video_doc:
+            media_group_id = video_doc.get('media_group_id')
+
+    # Insert "View Full Album" at the very top of the keyboard if part of a media group
+    if media_group_id:
+        buttons.append([InlineKeyboardButton("🖼️ View Full Album", callback_data=f"valb_{video_uuid}")])
 
     # --- Row 1: Interaction (Like/Dislike) & Download ---
     if not is_saved and not is_batch and not is_shared_link:
@@ -2189,6 +2239,24 @@ async def start_cmd(client: Client, message: Message):
 
                     # Check and grant any unlocked milestone rewards
                     create_tracked_task(check_and_grant_referral_milestones(client, referrer_id))
+
+            user = users_collection.find_one({'user_id': user_id})
+
+        # --- Step 1.5: Age Verification check ---
+        if not user or not user.get('age_verified', False):
+            if deep_link_arg:
+                users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
+            await message.reply(
+                "🔞 <b>Age Verification Required</b> 🔞\n\n"
+                "Are you 18 years old or older? You must be an adult to use this bot.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Yes (I am 18+)", callback_data="age_yes"),
+                        InlineKeyboardButton("❌ No", callback_data="age_no")
+                    ]
+                ])
+            )
+            return
 
         # --- Step 2: Check channel membership for ALL users ---
         has_joined = await check_membership(client, user_id)
@@ -3039,7 +3107,9 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
             "sequence_number": next_seq,
             "message_id": sent_video.id,
             "banned": False,
-            "custom_caption": upload_data.get('caption')
+            "custom_caption": upload_data.get('caption'),
+            "media_group_id": upload_data.get('media_group_id'),
+            "forward_info": upload_data.get('forward_info')
         }
         media_collection.insert_one(media_doc)
 
@@ -4082,6 +4152,68 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"User {user_id} failed to send separate share link message for video {video_uuid}: {e}", exc_info=True)
         await callback_query.answer("❌ Something went wrong. Please try again. 🤷‍♀️", show_alert=True)
 
+@bot.on_callback_query(filters.regex(r"^valb_(.+)$"))
+async def view_album_callback(client: Client, callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    video_uuid = callback_query.data.split('_', 1)[1]
+
+    video = get_video_by_uuid(video_uuid)
+    if not video or not video.get('media_group_id'):
+        await callback_query.answer("Album not found. 😔", show_alert=True)
+        return
+
+    media_group_id = video['media_group_id']
+    album_videos = list(media_collection.find({'media_group_id': media_group_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+
+    if not album_videos:
+        await callback_query.answer("No videos found in this album. 😔", show_alert=True)
+        return
+
+    await callback_query.answer("Sending full album... 🍿", show_alert=False)
+
+    for v in album_videos:
+        try:
+            caption_to_use = strip_hashtags(v.get('custom_caption') or "")
+            if v.get('forward_info'):
+                caption_to_use += f"\n\n📩 <b>Origin:</b> {html.escape(v['forward_info'])}"
+            await client.copy_message(
+                chat_id=callback_query.message.chat.id,
+                from_chat_id=DATA_CHANNEL_ID,
+                message_id=v['message_id'],
+                caption=caption_to_use
+            )
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Failed to copy video {v['uuid']} from album: {e}")
+
+@bot.on_callback_query(filters.regex(r"^age_yes$"))
+async def age_yes_callback(client: Client, callback_query: CallbackQuery):
+    """User confirmed they are 18+."""
+    user_id = callback_query.from_user.id
+    users_collection.update_one({'user_id': user_id}, {'$set': {'age_verified': True}})
+    await callback_query.answer("Verification successful! ✅", show_alert=True)
+    try:
+        await callback_query.message.delete()
+    except Exception:
+        pass
+
+    user_doc = users_collection.find_one({'user_id': user_id})
+    pending_command = user_doc.get('pending_command') if user_doc else None
+
+    # Re-run start command
+    mock_msg = callback_query.message
+    mock_msg.text = f"/start {pending_command}" if pending_command else "/start"
+    mock_msg.from_user = callback_query.from_user
+    create_tracked_task(start_cmd(client, mock_msg))
+
+@bot.on_callback_query(filters.regex(r"^age_no$"))
+async def age_no_callback(client: Client, callback_query: CallbackQuery):
+    """User selected that they are under 18."""
+    await callback_query.message.edit_text(
+        "🚫 <b>Access Denied</b>\n\nThis bot is only for 18+ adults. Try again later."
+    )
+    await callback_query.answer("You must be 18+ to use this bot.", show_alert=True)
+
 @bot.on_callback_query(filters.regex(r"^back_from_share\|(.+)$"))
 async def back_from_share_callback(client: Client, callback_query: CallbackQuery):
     """Restores the video navigation menu and caption from share state."""
@@ -4117,6 +4249,8 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     # Build back caption
     fake_ratio = get_user_adjusted_fake_ratio(user_id, video_uuid)
     custom_caption = video_data.get('custom_caption')
+    if custom_caption:
+        custom_caption = strip_hashtags(custom_caption)
 
     # Rebuild caption text
     if not is_batch and not is_saved:
@@ -4144,6 +4278,9 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
             )
         if custom_caption:
             new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
+
+    if video_data.get('forward_info'):
+        new_caption += f"\n📩 <b>Origin:</b> {html.escape(video_data['forward_info'])}\n"
 
     # Restore original navigation keyboard
     back_keyboard = video_nav_keyboard(
@@ -4725,6 +4862,9 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
         await callback_query.answer("No videos available at the moment. Please try again later.", show_alert=True)
         return
 
+    # Delete any active menus elsewhere before delivering the new one from expired click
+    await delete_current_active_menu(client, user_id)
+
     sent_success, _ = await send_and_replace_message(
         client,
         chat_id,
@@ -5094,12 +5234,15 @@ async def process_batch_queue(user_id: int, client: Client):
 
             video_uuid = str(uuid.uuid4())
             next_sequence_number = state['next_sequence']
+            forward_info = get_forward_info_string(message)
             video_data = {
                 "uuid": video_uuid, "file_id": sent_video_message.video.file_id,
                 "file_unique_id": file_unique_id, "category": category,
                 "timestamp": get_current_time(),
                 "sequence_number": next_sequence_number, "message_id": sent_video_message.id,
-                "banned": False, "custom_caption": message.caption
+                "banned": False, "custom_caption": message.caption,
+                "media_group_id": message.media_group_id,
+                "forward_info": forward_info
             }
             media_collection.insert_one(video_data)
             state['next_sequence'] += 1
@@ -5422,6 +5565,7 @@ async def handle_user_upload(client: Client, message: Message):
     # 4. Store in pending_uploads
     upload_id = str(uuid.uuid4())
     category = user_upload_state[user_id].get('selected_category')
+    forward_info = get_forward_info_string(message)
     pending_data = {
         "upload_id": upload_id,
         "user_id": user_id,
@@ -5431,7 +5575,9 @@ async def handle_user_upload(client: Client, message: Message):
         "submitted_at": now,
         "caption": message.caption,
         "message_id_in_user_chat": message.id,
-        "category": category
+        "category": category,
+        "media_group_id": message.media_group_id,
+        "forward_info": forward_info
     }
     pending_uploads_collection.insert_one(pending_data)
 
