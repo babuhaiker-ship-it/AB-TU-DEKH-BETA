@@ -1079,17 +1079,19 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
 
 def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dict | None, int, int]:
     """
-    Retrieves a video and its position from a specific batch.
+    Retrieves a video and its position from a specific batch or media album collection.
     Returns (video_data, current_position, total_videos).
     """
     batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
-    if not batch_doc:
-        return None, 0, 0
+    if batch_doc:
+        video_uuids = batch_doc.get('video_uuids', [])
+    else:
+        # Fallback to look up dynamic album/media_group_id collection
+        album_videos = list(media_collection.find({'media_group_id': batch_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+        video_uuids = [v['uuid'] for v in album_videos]
 
-    video_uuids = batch_doc.get('video_uuids', [])
     total_videos = len(video_uuids)
-
-    if not (0 <= current_index < total_videos):
+    if not total_videos or not (0 <= current_index < total_videos):
         return None, 0, 0
 
     video_uuid = video_uuids[current_index]
@@ -1516,9 +1518,6 @@ async def send_and_replace_message(
             if custom_caption:
                 caption_text += f"📝 <i>{html.escape(custom_caption)}</i>\n"
 
-        if video_data.get('forward_info'):
-            caption_text += f"\n📩 <b>Origin:</b> {html.escape(video_data['forward_info'])}\n"
-
     # --- Delete Old Message if Forced ---
     if force_new_message and message_id_to_edit_or_delete:
         try:
@@ -1765,9 +1764,9 @@ def video_nav_keyboard(
         if video_doc:
             media_group_id = video_doc.get('media_group_id')
 
-    # Insert "View Full Album" at the very top of the keyboard if part of a media group
+    # Insert "See Full Collection" at the very top of the keyboard if part of a media group
     if media_group_id:
-        buttons.append([InlineKeyboardButton("🖼️ View Full Album", callback_data=f"valb_{video_uuid}")])
+        buttons.append([InlineKeyboardButton("🖼️ See Full Collection", callback_data=f"valb_{video_uuid}")])
 
     # --- Row 1: Interaction (Like/Dislike) & Download ---
     if not is_saved and not is_batch and not is_shared_link:
@@ -1833,7 +1832,14 @@ def video_nav_keyboard(
     row_3_buttons.append(InlineKeyboardButton("📤 Share", callback_data=f"share_{video_uuid}"))
 
     if is_batch or is_shared_link:
-        row_3_buttons.append(InlineKeyboardButton("👀 Discover More", callback_data="watch_more"))
+        original_video_uuid = None
+        if user_id in user_session_history:
+            original_video_uuid = user_session_history[user_id].get('original_video_uuid')
+
+        if is_batch and original_video_uuid:
+            row_3_buttons.append(InlineKeyboardButton("🔙 Back to Video", callback_data=f"back_from_share|{original_video_uuid}"))
+        else:
+            row_3_buttons.append(InlineKeyboardButton("👀 Discover More", callback_data="watch_more"))
     elif is_saved:
         row_3_buttons.append(InlineKeyboardButton("🔙 Go Back", callback_data="back_to_saved_cats"))
     else:
@@ -2248,7 +2254,8 @@ async def start_cmd(client: Client, message: Message):
                 users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
             await message.reply(
                 "🔞 <b>Age Verification Required</b> 🔞\n\n"
-                "Are you 18 years old or older? You must be an adult to use this bot.",
+                "Are you 18 years old or older? You must be an adult to use this bot.\n\n"
+                "📝 <i>By clicking Yes, you agree to our <a href='https://t.me/privacy_policy7/6'>Privacy Policy</a>.</i>",
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("✅ Yes (I am 18+)", callback_data="age_yes"),
@@ -3078,6 +3085,8 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
     try:
         # Copy to data channel officially with robust fallback to send_video
         caption_to_use = upload_data.get('caption') or f"Category: {category}"
+        if upload_data.get('forward_info'):
+            caption_to_use += f"\n\n📩 Forwarded From: {upload_data['forward_info']}"
         try:
             sent_video = await client.copy_message(
                 chat_id=DATA_CHANNEL_ID,
@@ -4159,32 +4168,44 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
 
     video = get_video_by_uuid(video_uuid)
     if not video or not video.get('media_group_id'):
-        await callback_query.answer("Album not found. 😔", show_alert=True)
+        await callback_query.answer("Collection not found. 😔", show_alert=True)
         return
 
     media_group_id = video['media_group_id']
     album_videos = list(media_collection.find({'media_group_id': media_group_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+    video_uuids = [v['uuid'] for v in album_videos]
 
-    if not album_videos:
-        await callback_query.answer("No videos found in this album. 😔", show_alert=True)
-        return
+    try:
+        start_index = video_uuids.index(video_uuid)
+    except ValueError:
+        start_index = 0
 
-    await callback_query.answer("Sending full album... 🍿", show_alert=False)
+    await callback_query.answer("Opening collection... 🍿", show_alert=False)
 
-    for v in album_videos:
-        try:
-            caption_to_use = strip_hashtags(v.get('custom_caption') or "")
-            if v.get('forward_info'):
-                caption_to_use += f"\n\n📩 <b>Origin:</b> {html.escape(v['forward_info'])}"
-            await client.copy_message(
-                chat_id=callback_query.message.chat.id,
-                from_chat_id=DATA_CHANNEL_ID,
-                message_id=v['message_id'],
-                caption=caption_to_use
-            )
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            logger.error(f"Failed to copy video {v['uuid']} from album: {e}")
+    # Initialize batch session in user_session_history
+    user_session_history[user_id] = {
+        'category': video['category'],
+        'videos': video_uuids,
+        'position': start_index,
+        'is_get_video': False,
+        'batch_id': media_group_id,
+        'original_video_uuid': video_uuid
+    }
+
+    target_video = album_videos[start_index]
+
+    await send_and_replace_message(
+        client,
+        callback_query.message.chat.id,
+        message_id_to_edit_or_delete=callback_query.message.id,
+        new_message_type="video",
+        video_data=target_video,
+        reply_markup=video_nav_keyboard(
+            target_video['uuid'], target_video['category'], user_id,
+            is_batch=True, batch_id=media_group_id, batch_index=start_index
+        ),
+        force_new_message=False
+    )
 
 @bot.on_callback_query(filters.regex(r"^age_yes$"))
 async def age_yes_callback(client: Client, callback_query: CallbackQuery):
@@ -4278,9 +4299,6 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
             )
         if custom_caption:
             new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
-
-    if video_data.get('forward_info'):
-        new_caption += f"\n📩 <b>Origin:</b> {html.escape(video_data['forward_info'])}\n"
 
     # Restore original navigation keyboard
     back_keyboard = video_nav_keyboard(
@@ -5224,7 +5242,11 @@ async def process_batch_queue(user_id: int, client: Client):
                 await message.reply_text(f"⚠️ This video has already been added. Skipping.{link_text}")
                 continue
 
+            forward_info = get_forward_info_string(message)
             caption_to_use = message.caption or f"Category: {category}"
+            if forward_info:
+                caption_to_use += f"\n\n📩 Forwarded From: {forward_info}"
+
             sent_video_message = await client.send_video(
                 chat_id=DATA_CHANNEL_ID, video=message.video.file_id,
                 caption=caption_to_use
@@ -5234,7 +5256,6 @@ async def process_batch_queue(user_id: int, client: Client):
 
             video_uuid = str(uuid.uuid4())
             next_sequence_number = state['next_sequence']
-            forward_info = get_forward_info_string(message)
             video_data = {
                 "uuid": video_uuid, "file_id": sent_video_message.video.file_id,
                 "file_unique_id": file_unique_id, "category": category,
