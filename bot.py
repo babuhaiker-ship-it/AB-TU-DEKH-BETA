@@ -3876,11 +3876,15 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
             return
 
         batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
-        if not batch_doc or not batch_doc.get('video_uuids'):
+        if batch_doc:
+            video_uuids = batch_doc.get('video_uuids', [])
+        else:
+            album_videos = list(media_collection.find({'media_group_id': batch_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+            video_uuids = [v['uuid'] for v in album_videos]
+
+        if not video_uuids:
             await callback_query.answer("This batch is no longer available.", show_alert=True)
             return
-
-        video_uuids = batch_doc['video_uuids']
         total_videos = len(video_uuids)
 
         # --- MODIFICATION: Check for last video ---
