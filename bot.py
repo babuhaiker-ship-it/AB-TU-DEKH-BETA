@@ -4253,6 +4253,13 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     # Load user session
     session = user_session_history.get(user_id) or {}
 
+    # If they are returning from an album collection batch view, reset batch keys and session history
+    if session and 'original_video_uuid' in session:
+        session.pop('batch_id', None)
+        session.pop('original_video_uuid', None)
+        session['videos'] = [video_uuid]
+        session['position'] = 0
+
     if session.get('is_get_video', False):
         category_name = "default (all)"
     else:
@@ -7328,14 +7335,14 @@ async def monitor_ssrb_verifications(client: Client):
 
                 # Grant token
                 duration = config.VERIFICATION_TOKEN_DURATION_HOURS * 3600
-                add_token(user_id, duration_seconds=duration, is_admin_granted=False)
+                add_token(user_id, duration_seconds=duration, is_admin_granted=False, is_activated=True)
 
                 # Notify user
                 try:
                     await client.send_message(
                         user_id,
                         f"✅ <b>Verification Successful!</b>\n\n"
-                        f"You have received your token! It has been added to your bank. Activate it whenever you need access! 🏦"
+                        f"You now have active access to the bot. Enjoy your watch! 🍿"
                     )
                 except Exception as e:
                     logger.warning(f"Failed to notify user {user_id} about ATDB token: {e}")
