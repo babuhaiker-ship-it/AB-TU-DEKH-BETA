@@ -91,7 +91,54 @@ BATCH_COOLDOWN_SECONDS = 60
 
 # --- MongoDB Setup ---
 client = MongoClient(config.MONGO_URI, tz_aware=True)
-db = client[config.MONGO_DB_NAME]
+
+def resolve_database_name(mongo_client, configured_db):
+    try:
+        existing_dbs = mongo_client.list_database_names()
+    except Exception as e:
+        logger.error(f"Failed to list database names from MongoDB: {e}")
+        existing_dbs = []
+
+    system_dbs = {'admin', 'local', 'config'}
+    user_dbs = [d for d in existing_dbs if d not in system_dbs]
+
+    if not configured_db:
+        if user_dbs:
+            logger.info(f"No database name configured. Found existing user databases: {user_dbs}. Using '{user_dbs[0]}'.")
+            return user_dbs[0]
+        else:
+            logger.warning("No database name configured and no existing databases found in cluster. Using default 'bot_db'.")
+            return "bot_db"
+
+    # Exact match check
+    for d in user_dbs:
+        if d == configured_db:
+            logger.info(f"Database resolution: Exact match found for '{configured_db}'. Using '{d}'.")
+            return d
+
+    # Case-insensitive match check
+    for d in user_dbs:
+        if d.lower() == configured_db.lower():
+            logger.info(f"Database resolution: Case-insensitive match found for '{configured_db}'. Using '{d}'.")
+            return d
+
+    # Partial/similar substring match check
+    for d in user_dbs:
+        if configured_db.lower() in d.lower() or d.lower() in configured_db.lower():
+            logger.info(f"Database resolution: Partial/similar match found for '{configured_db}'. Using '{d}'.")
+            return d
+
+    # If some other user database already exists, use it instead of creating a new one
+    if user_dbs:
+        logger.info(f"Database resolution: Configured database '{configured_db}' does not exist, but user database '{user_dbs[0]}' exists. Using existing database to prevent creating a new one.")
+        return user_dbs[0]
+
+    # No database exists in the cluster at all, use configured_db
+    logger.info(f"Database resolution: No existing databases in cluster. Using configured database name '{configured_db}'.")
+    return configured_db
+
+resolved_db_name = resolve_database_name(client, config.MONGO_DB_NAME)
+db = client[resolved_db_name]
 users_collection = db['users']
 tokens_collection = db['tokens']
 media_collection = db['media']
