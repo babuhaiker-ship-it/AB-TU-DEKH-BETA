@@ -287,6 +287,7 @@ BOT_ADMINS = {config.OWNER_ID} # Initialize with Owner ID from config
 DATA_CHANNEL_ID = None
 FORCE_SUB_CHANNELS = [] # List of {'channel_id': int, 'link': str, 'name': str}
 SHORTENER_DISABLED = False
+TOKEN_BUTTON_DISABLED = False
 
 async def load_admins_from_db():
     """Loads admin list from DB and ensures owner is always included."""
@@ -329,6 +330,13 @@ async def load_shortener_setting():
     settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
     SHORTENER_DISABLED = settings_doc.get('shortener_disabled', False) if settings_doc else False
     logger.info(f"Loaded shortener setting: {'Disabled' if SHORTENER_DISABLED else 'Enabled'}")
+
+async def load_token_button_setting():
+    """Loads the token button disabled setting from the database."""
+    global TOKEN_BUTTON_DISABLED
+    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    TOKEN_BUTTON_DISABLED = settings_doc.get('token_button_disabled', False) if settings_doc else False
+    logger.info(f"Loaded token button setting: {'Disabled' if TOKEN_BUTTON_DISABLED else 'Enabled'}")
 
 async def load_upload_config():
     """Loads upload configuration and review chat ID from database."""
@@ -1711,8 +1719,9 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
         buttons.append([InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn")])
 
-    vip_text = "🔴 Get Red Token"
-    buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
+    if not TOKEN_BUTTON_DISABLED:
+        vip_text = "🔴 Get Red Token"
+        buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
         if not remove_tutorial:
@@ -1866,8 +1875,10 @@ def get_premium_only_text() -> str:
         f"💳 Get Red Token for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all benefits instantly! 🚀"
     )
 
-def buy_token_keyboard() -> InlineKeyboardMarkup:
+def buy_token_keyboard() -> InlineKeyboardMarkup or None:
     """Keyboard for buying tokens."""
+    if TOKEN_BUTTON_DISABLED:
+        return None
     btn_text = "🔴 Get Red Token"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(btn_text, url=config.BUY_BOT_URL)]
@@ -2671,7 +2682,8 @@ async def help_admin_cmd(client: Client, message: Message):
         "- /setreviewchat: Set upload review group\n"
         "- /setshortener: Configure URL shortener\n"
         "- /bypass_limit <sec>: Shortener anti-cheat\n"
-        "- /turnoff_shortener / /turnon_shortener\n\n"
+        "- /turnoff_shortener / /turnon_shortener\n"
+        "- /configtokenbutton: Toggle 'Get Red Token' button visibility\n\n"
         "**Utility & Stats:**\n"
         "- /broadcast (reply): Global broadcast\n"
         "- /stats: General bot stats\n"
@@ -6738,6 +6750,139 @@ async def shortener_status_cmd(client: Client, message: Message):
     status = "Disabled 🚫" if SHORTENER_DISABLED else "Enabled 🔓"
     await message.reply(f"📊 <b>URL Shortener Status:</b> {status}")
 
+
+@bot.on_message(filters.command("configtokenbutton") & filters.private & admin_only)
+async def config_token_button_cmd(client: Client, message: Message):
+    """Admin command to configure the visibility of the 'Get Red Token' / purchase button."""
+    global TOKEN_BUTTON_DISABLED
+    args = message.text.split()
+    if len(args) > 1:
+        action = args[1].lower()
+        if action in ["on", "visible", "show", "true", "enable"]:
+            try:
+                settings_collection.update_one(
+                    {'_id': 'bot_settings'},
+                    {'$set': {'token_button_disabled': False}},
+                    upsert=True
+                )
+                TOKEN_BUTTON_DISABLED = False
+                await message.reply("✅ 'Get Red Token' button is now <b>VISIBLE</b> to all users. 👁️")
+                logger.info(f"Admin {message.from_user.id} made token button visible.")
+            except Exception as e:
+                logger.error(f"Error in config_token_button_cmd (enable): {e}", exc_info=True)
+                await message.reply("❌ Failed to update setting. Check logs.")
+        elif action in ["off", "invisible", "hide", "false", "disable"]:
+            try:
+                settings_collection.update_one(
+                    {'_id': 'bot_settings'},
+                    {'$set': {'token_button_disabled': True}},
+                    upsert=True
+                )
+                TOKEN_BUTTON_DISABLED = True
+                await message.reply("✅ 'Get Red Token' button is now <b>INVISIBLE</b> (hidden) for all users. 🕵️")
+                logger.info(f"Admin {message.from_user.id} made token button invisible.")
+            except Exception as e:
+                logger.error(f"Error in config_token_button_cmd (disable): {e}", exc_info=True)
+                await message.reply("❌ Failed to update setting. Check logs.")
+        else:
+            await message.reply("❌ Invalid argument. Use: `on` (visible) or `off` (invisible).")
+        return
+
+    # No arguments: show current status with inline buttons
+    status_text = "🕵️ Invisible (Hidden)" if TOKEN_BUTTON_DISABLED else "👁️ Visible (Shown)"
+    text = (
+        "📊 **Red Token Button Configuration** ⚙️\n\n"
+        f"The 'Get Red Token' button is currently: **{status_text}**\n\n"
+        "Click a button below to change its visibility, or use:\n"
+        "- `/configtokenbutton on` (make visible)\n"
+        "- `/configtokenbutton off` (make invisible)"
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👁️ Make Visible", callback_data="cfg_tkn_btn_on"),
+            InlineKeyboardButton("🕵️ Make Invisible", callback_data="cfg_tkn_btn_off")
+        ]
+    ])
+    await message.reply(text, reply_markup=reply_markup)
+
+
+@bot.on_callback_query(filters.regex(r"^cfg_tkn_btn_on$"))
+async def config_token_button_on_callback(client: Client, callback_query: CallbackQuery):
+    """Callback to make the 'Get Red Token' button visible."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
+        return
+
+    global TOKEN_BUTTON_DISABLED
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'token_button_disabled': False}},
+            upsert=True
+        )
+        TOKEN_BUTTON_DISABLED = False
+        await callback_query.answer("✅ 'Get Red Token' button is now visible!", show_alert=True)
+
+        status_text = "👁️ Visible (Shown)"
+        text = (
+            "📊 **Red Token Button Configuration** ⚙️\n\n"
+            f"The 'Get Red Token' button is currently: **{status_text}**\n\n"
+            "Click a button below to change its visibility, or use:\n"
+            "- `/configtokenbutton on` (make visible)\n"
+            "- `/configtokenbutton off` (make invisible)"
+        )
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👁️ Make Visible", callback_data="cfg_tkn_btn_on"),
+                InlineKeyboardButton("🕵️ Make Invisible", callback_data="cfg_tkn_btn_off")
+            ]
+        ])
+        await callback_query.message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Error in config_token_button_on_callback: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to update setting.", show_alert=True)
+
+
+@bot.on_callback_query(filters.regex(r"^cfg_tkn_btn_off$"))
+async def config_token_button_off_callback(client: Client, callback_query: CallbackQuery):
+    """Callback to make the 'Get Red Token' button invisible."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
+        return
+
+    global TOKEN_BUTTON_DISABLED
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'token_button_disabled': True}},
+            upsert=True
+        )
+        TOKEN_BUTTON_DISABLED = True
+        await callback_query.answer("✅ 'Get Red Token' button is now invisible!", show_alert=True)
+
+        status_text = "🕵️ Invisible (Hidden)"
+        text = (
+            "📊 **Red Token Button Configuration** ⚙️\n\n"
+            f"The 'Get Red Token' button is currently: **{status_text}**\n\n"
+            "Click a button below to change its visibility, or use:\n"
+            "- `/configtokenbutton on` (make visible)\n"
+            "- `/configtokenbutton off` (make invisible)"
+        )
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👁️ Make Visible", callback_data="cfg_tkn_btn_on"),
+                InlineKeyboardButton("🕵️ Make Invisible", callback_data="cfg_tkn_btn_off")
+            ]
+        ])
+        await callback_query.message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Error in config_token_button_off_callback: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to update setting.", show_alert=True)
+
+
 @bot.on_message(filters.text & filters.private & non_command)
 async def handle_text_input(client: Client, message: Message):
     """Handles text input for various multi-step commands for owner and admins."""
@@ -7412,6 +7557,7 @@ async def run_bot_background():
         await load_data_channel_id()
         await load_force_sub_channels()
         await load_shortener_setting()
+        await load_token_button_setting()
         await load_upload_config()
         await health_check()
         create_tracked_task(cleanup_expired_data())
