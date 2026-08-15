@@ -4220,6 +4220,10 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
 
     str_group_id = str(media_group_id)
 
+    prev_session = user_session_history.get(user_id, {})
+    prev_is_get_video = prev_session.get('is_get_video', True)
+    prev_category = prev_session.get('category', "default (all)")
+
     # Initialize batch session in user_session_history
     user_session_history[user_id] = {
         'category': video['category'],
@@ -4227,7 +4231,9 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
         'position': start_index,
         'is_get_video': False,
         'batch_id': str_group_id,
-        'original_video_uuid': video_uuid
+        'original_video_uuid': video_uuid,
+        'original_is_get_video': prev_is_get_video,
+        'original_category': prev_category
     }
 
     target_video = album_videos[start_index]
@@ -4289,10 +4295,14 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
 
     # If they are returning from an album collection batch view, reset batch keys and session history
     if session and 'original_video_uuid' in session:
+        orig_is_get_video = session.pop('original_is_get_video', True)
+        orig_category = session.pop('original_category', "default (all)")
         session.pop('batch_id', None)
         session.pop('original_video_uuid', None)
         session['videos'] = [video_uuid]
         session['position'] = 0
+        session['is_get_video'] = orig_is_get_video
+        session['category'] = orig_category
 
     if session.get('is_get_video', False):
         category_name = "default (all)"
