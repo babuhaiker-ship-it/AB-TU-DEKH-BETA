@@ -1085,6 +1085,21 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
             return video, current_video_index + 1, total_videos
         return None, 0, 0
 
+def get_album_videos_by_group_id(media_group_id) -> list[dict]:
+    """Retrieves all non-banned videos belonging to a media_group_id, matching both string and integer IDs."""
+    if not media_group_id:
+        return []
+    query_values = [media_group_id]
+    s_val = str(media_group_id)
+    if s_val not in query_values:
+        query_values.append(s_val)
+    if s_val.isdigit() or (s_val.startswith('-') and s_val[1:].isdigit()):
+        i_val = int(s_val)
+        if i_val not in query_values:
+            query_values.append(i_val)
+
+    return list(media_collection.find({'media_group_id': {'$in': query_values}, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+
 def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dict | None, int, int]:
     """
     Retrieves a video and its position from a specific batch or media album collection.
@@ -1095,7 +1110,7 @@ def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dic
         video_uuids = batch_doc.get('video_uuids', [])
     else:
         # Fallback to look up dynamic album/media_group_id collection
-        album_videos = list(media_collection.find({'media_group_id': batch_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+        album_videos = get_album_videos_by_group_id(batch_id)
         video_uuids = [v['uuid'] for v in album_videos]
 
     total_videos = len(video_uuids)
@@ -1814,7 +1829,12 @@ def video_nav_keyboard(
         ])
     elif is_batch:
         nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}")]
-        if user_id in user_session_history and user_session_history[user_id].get('batch_id') == batch_id and user_session_history[user_id]['position'] > 0:
+        has_prev = batch_index > 0 or (
+            user_id in user_session_history
+            and str(user_session_history[user_id].get('batch_id')) == str(batch_id)
+            and user_session_history[user_id].get('position', 0) > 0
+        )
+        if has_prev:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_batch|{batch_id}|{batch_index}"))
         buttons.append(nav_buttons)
     else:
@@ -3891,7 +3911,7 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
         if batch_doc:
             video_uuids = batch_doc.get('video_uuids', [])
         else:
-            album_videos = list(media_collection.find({'media_group_id': batch_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+            album_videos = get_album_videos_by_group_id(batch_id)
             video_uuids = [v['uuid'] for v in album_videos]
 
         if not video_uuids:
@@ -4188,7 +4208,7 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
         return
 
     media_group_id = video['media_group_id']
-    album_videos = list(media_collection.find({'media_group_id': media_group_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+    album_videos = get_album_videos_by_group_id(media_group_id)
     video_uuids = [v['uuid'] for v in album_videos]
 
     try:
@@ -4198,13 +4218,15 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
 
     await callback_query.answer("Opening collection... 🍿", show_alert=False)
 
+    str_group_id = str(media_group_id)
+
     # Initialize batch session in user_session_history
     user_session_history[user_id] = {
         'category': video['category'],
         'videos': video_uuids,
         'position': start_index,
         'is_get_video': False,
-        'batch_id': media_group_id,
+        'batch_id': str_group_id,
         'original_video_uuid': video_uuid
     }
 
@@ -4218,7 +4240,7 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
         video_data=target_video,
         reply_markup=video_nav_keyboard(
             target_video['uuid'], target_video['category'], user_id,
-            is_batch=True, batch_id=media_group_id, batch_index=start_index
+            is_batch=True, batch_id=str_group_id, batch_index=start_index
         ),
         force_new_message=False
     )
