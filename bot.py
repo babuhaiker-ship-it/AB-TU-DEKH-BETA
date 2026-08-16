@@ -258,7 +258,8 @@ admin_data_channel_state = defaultdict(dict)
 active_video_message = {}
 
 # --- User Upload State ---
-user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int}
+user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int, 'status_message_id': int}
+upload_inactivity_timers = {} # user_id -> asyncio.Task
 REVIEW_CHAT_ID = None
 UPLOAD_CONFIG = {
     'daily_max': config.UPLOAD_DAILY_MAX,
@@ -2102,8 +2103,7 @@ async def upload_cmd(client: Client, message: Message):
         "Share your videos to earn exclusive access tokens! 🎁\n\n"
         "<b>Steps:</b>\n"
         "1. Tap '📤 Send Video Now' below to pick a category.\n"
-        "2. Send your video(s) directly to this chat.\n"
-        "3. Type /done when finished.\n\n"
+        "2. Send your video(s) directly to this chat.\n\n"
         f"⚡ <b>Instant Reward:</b> You get <b>{UPLOAD_CONFIG['temp_scrolls_amount']} scrolls</b> immediately for each upload! ⏳"
     )
 
@@ -2128,8 +2128,7 @@ async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
         "Share your videos to earn exclusive access tokens! 🎁\n\n"
         "<b>Steps:</b>\n"
         "1. Tap '📤 Send Video Now' below to pick a category.\n"
-        "2. Send your video(s) directly to this chat.\n"
-        "3. Type /done when finished.\n\n"
+        "2. Send your video(s) directly to this chat.\n\n"
         f"⚡ <b>Instant Reward:</b> You get <b>{UPLOAD_CONFIG['temp_scrolls_amount']} scrolls</b> immediately for each upload! ⏳"
     )
 
@@ -2197,7 +2196,7 @@ async def upload_category_selection_callback(client: Client, callback_query: Cal
     await callback_query.message.edit_text(
         f"✅ **Category selected:** `{category}`\n\n"
         "📤 **Now, send your video(s) directly here!**\n"
-        "I will process them one by one. Type /done when finished. ✨"
+        "Send your videos and I will load them into your request list. ✨"
     )
     await callback_query.answer(f"Category set to {category}")
 
@@ -5597,6 +5596,23 @@ async def handle_incoming_videos(client: Client, message: Message):
         await handle_user_upload(client, message)
         return
 
+async def delayed_upload_done_notification(user_id: int, client: Client):
+    """Waits for 10 seconds of silence after a user sends upload videos, then sends completion message as the last message."""
+    try:
+        await asyncio.sleep(10)
+        state = user_upload_state.get(user_id)
+        if state and state.get('in_upload_mode'):
+            await client.send_message(
+                user_id,
+                "📋 **All videos have been loaded into your request list!**\n\nIf there's more, you can send them anytime. ✨"
+            )
+            # Reset status_message_id so future uploads start a fresh single status message
+            state['status_message_id'] = None
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"Error in delayed_upload_done_notification for user {user_id}: {e}", exc_info=True)
+
 async def handle_user_upload(client: Client, message: Message):
     """Processes a video uploaded by a user."""
     user_id = message.from_user.id
@@ -5688,9 +5704,16 @@ async def handle_user_upload(client: Client, message: Message):
         )
         reward_granted = True
 
-    # 7. Notify User
+    # 7. Cancel existing 10-second timer and set a new one
+    if user_id in upload_inactivity_timers:
+        upload_inactivity_timers[user_id].cancel()
+
+    upload_inactivity_timers[user_id] = create_tracked_task(delayed_upload_done_notification(user_id, client))
+
+    # 8. Notify User (Maintain ONE status message per upload session)
     if UPLOAD_CONFIG['auto_give_scrolls']:
-        reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting."
+        total_scrolls_granted = session_count * UPLOAD_CONFIG['temp_scrolls_amount']
+        reward_text = f" You received **+{total_scrolls_granted} temporary scrolls** while waiting."
     else:
         if threshold_met:
             reward_text = ""
@@ -5698,21 +5721,36 @@ async def handle_user_upload(client: Client, message: Message):
             more_needed = min_req - (session_count % min_req)
             reward_text = f"\n\n🚀 **Upload {more_needed} more video(s)** to receive your waiting reward!"
 
+    cat_display = html.escape(category) if category else "Default"
     confirmation = (
         "✅ **Video received! Thank you for contributing.**\n\n"
-        f"Videos uploaded this session: **{session_count}**\n"
-        f"Status: `Pending Approval` ⏳\n\n"
+        f"📦 Videos uploaded this session: **{session_count}**\n"
+        f"🗂️ Category: `{cat_display}`\n"
+        f"⏳ Status: `Pending Approval`\n\n"
         f"Your contribution is under review.{reward_text}"
     )
-    sent_confirmation = await message.reply_text(confirmation)
 
-    # Store confirmation message ID to edit later
+    status_msg_id = user_upload_state[user_id].get('status_message_id')
+    edited = False
+    if status_msg_id:
+        try:
+            await client.edit_message_text(message.chat.id, status_msg_id, confirmation)
+            edited = True
+        except Exception as e:
+            logger.warning(f"Could not edit status message {status_msg_id} for user {user_id}: {e}")
+
+    if not edited:
+        sent_confirmation = await message.reply_text(confirmation)
+        user_upload_state[user_id]['status_message_id'] = sent_confirmation.id
+        status_msg_id = sent_confirmation.id
+
+    # Store confirmation message ID in pending_data
     pending_uploads_collection.update_one(
         {"upload_id": upload_id},
-        {"$set": {"confirmation_message_id": sent_confirmation.id}}
+        {"$set": {"confirmation_message_id": status_msg_id}}
     )
 
-    # 8. Notify Admins
+    # 9. Notify Admins
     await notify_admins_of_upload(client, pending_data)
 
 async def notify_admins_of_upload(client: Client, upload_data: dict):
