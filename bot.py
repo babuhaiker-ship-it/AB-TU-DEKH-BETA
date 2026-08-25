@@ -745,8 +745,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     if valid_temp_scrolls:
         return True
 
-    if limit is None:
-        limit = config.DAILY_FREE_VIDEOS
+    effective_limit = config.DAILY_FREE_VIDEOS if (limit is None or limit < config.DAILY_FREE_VIDEOS) else limit
 
     usage = user.get('free_video_usage')
     now = datetime.now(timezone.utc)
@@ -761,7 +760,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
         )
         return True
 
-    return usage.get('count', 0) < limit
+    return usage.get('count', 0) < effective_limit
 
 def mark_free_video_used(user_id: int):
     """Consumes a scroll (permanent or temporary) or increments daily free usage."""
