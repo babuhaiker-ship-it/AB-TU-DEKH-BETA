@@ -62,7 +62,7 @@ class BotConfig:
     FREE_SCROLL_RESET_HOURS = int(os.environ.get('FREE_SCROLL_RESET_HOURS', 6))
     FREE_BATCH_LIMIT = int(os.environ.get('FREE_BATCH_LIMIT', 0))
     FREE_LIMIT_RESET_HOURS = int(os.environ.get('FREE_LIMIT_RESET_HOURS', 12))
-    DAILY_FREE_VIDEOS = int(os.environ.get('DAILY_FREE_VIDEOS', 1))
+    DAILY_FREE_VIDEOS = int(os.environ.get('DAILY_FREE_VIDEOS', 200))
     FREE_VIDEO_RESET_HOURS = int(os.environ.get('FREE_VIDEO_RESET_HOURS', 24))
     TOKEN_ACCESS_HOURS = float(os.environ.get('TOKEN_ACCESS_HOURS', 6.0))
     VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 6.0))
