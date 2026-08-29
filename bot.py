@@ -42,7 +42,7 @@ class BotConfig:
     API_HASH = os.environ.get('API_HASH')
     BOT_USERNAME = os.environ.get('BOT_USERNAME')
     MONGO_URI = os.environ.get('MONGO_URI')
-    MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME')
+    MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME', 'Clustor0')
 
     # Configuration Parameters (With Defaults)
     BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/nyraapaybot?start')
@@ -91,7 +91,21 @@ BATCH_COOLDOWN_SECONDS = 60
 
 # --- MongoDB Setup ---
 client = MongoClient(config.MONGO_URI, tz_aware=True)
-db = client[config.MONGO_DB_NAME]
+
+try:
+    existing_dbs = client.list_database_names()
+except Exception as e:
+    logger.warning(f"Could not retrieve database list: {e}")
+    existing_dbs = []
+
+if "Clustor0" in existing_dbs:
+    db_name = "Clustor0"
+    logger.info("Database 'Clustor0' already exists. Using 'Clustor0'.")
+else:
+    db_name = config.MONGO_DB_NAME or "Clustor0"
+    logger.info(f"Using database name: {db_name}")
+
+db = client[db_name]
 users_collection = db['users']
 tokens_collection = db['tokens']
 media_collection = db['media']
