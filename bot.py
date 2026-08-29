@@ -564,6 +564,33 @@ def user_has_token(user_id: int) -> bool:
         # Consider both is_activated field and legacy tokens (where field might be missing)
         if token.get('is_activated', True) and token.get('expires_at') and token['expires_at'] > now:
             return True
+
+    # No active token found! Check if they have any banked tokens to automatically activate
+    banked_tokens = [t for t in doc['tokens'] if not t.get('is_activated', False)]
+    if banked_tokens:
+        # Sort by creation date to activate the oldest one first
+        banked_tokens.sort(key=lambda x: x.get('created_at', datetime.min.replace(tzinfo=timezone.utc)))
+        target_token = banked_tokens[0]
+
+        duration = target_token.get('duration_seconds', config.TOKEN_EXPIRY)
+        expires_at = now + timedelta(seconds=duration)
+
+        try:
+            # Atomically update the specific token in the array
+            result = tokens_collection.update_one(
+                {'user_id': user_id, 'tokens.token_id': target_token['token_id']},
+                {'$set': {
+                    'tokens.$.is_activated': True,
+                    'tokens.$.expires_at': expires_at,
+                    'tokens.$.activated_at': now
+                }}
+            )
+            if result.modified_count > 0:
+                logger.info(f"Automatically activated banked token {target_token['token_id']} for user {user_id}.")
+                return True
+        except Exception as e:
+            logger.error(f"Error automatically activating banked token for user {user_id}: {e}", exc_info=True)
+
     return False
 
 def get_banked_tokens_count(user_id: int) -> int:
@@ -2407,7 +2434,8 @@ async def help_admin_cmd(client: Client, message: Message):
         "- /addpremium <id> <days>: Grant premium\n"
         "- /removepremium <id>: Revoke access\n"
         "- /deleteuser <id>: Wipe user data\n"
-        "- /viewtoken: Token leaderboard\n\n"
+        "- /viewtoken: Token leaderboard\n"
+        "- /showuserscrolls: Scrolls leaderboard\n\n"
         "**Content Management:**\n"
         "- /addcategory <name>: Create category\n"
         "- /deletecategory: Remove category\n"
@@ -2729,6 +2757,15 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         clear_active_video_message(user_id)
         await temp_msg.delete()
 
+# Rejection Reasons Mapping
+REJECTION_REASONS = {
+    "1": "Low Quality",
+    "2": "Duplicate",
+    "3": "Wrong Content",
+    "4": "Broken/Short",
+    "5": "Other"
+}
+
 @bot.on_callback_query(filters.regex(r"^adm_appr_(.+)$"))
 async def admin_approve_callback(client: Client, callback_query: CallbackQuery):
     """Handles the initial 'Approve' click by admin, prompting for category."""
@@ -2751,7 +2788,8 @@ async def admin_approve_callback(client: Client, callback_query: CallbackQuery):
     buttons = []
     row = []
     for i, cat in enumerate(categories):
-        row.append(InlineKeyboardButton(f"🗂️ {cat}", callback_data=f"apr_cat_{upload_id}_{str_to_b64(cat)}"))
+        # Prevent 64-byte limit by sending category index instead of raw base64 string
+        row.append(InlineKeyboardButton(f"🗂️ {cat}", callback_data=f"apr_cat_{upload_id}_{i}"))
         if (i + 1) % 2 == 0:
             buttons.append(row)
             row = []
@@ -2773,7 +2811,18 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
 
     match = re.match(r"^apr_cat_(.+?)_(.+)$", callback_query.data)
     upload_id = match.group(1)
-    category = b64_to_str(match.group(2))
+    category_repr = match.group(2)
+
+    categories = get_categories(for_admin_use=True)
+    if category_repr.isdigit():
+        idx = int(category_repr)
+        if idx < len(categories):
+            category = categories[idx]
+        else:
+            await callback_query.answer("❌ Invalid category selection.", show_alert=True)
+            return
+    else:
+        category = b64_to_str(category_repr)
 
     upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data or upload_data['status'] != "pending":
@@ -2786,13 +2835,21 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         return
 
     try:
-        # Copy to data channel officially
-        sent_video = await client.copy_message(
-            chat_id=DATA_CHANNEL_ID,
-            from_chat_id=upload_data['user_id'],
-            message_id=upload_data['message_id_in_user_chat'],
-            caption=f"Approved upload from user {upload_data['user_id']}"
-        )
+        # Copy to data channel officially with robust fallback to send_video
+        try:
+            sent_video = await client.copy_message(
+                chat_id=DATA_CHANNEL_ID,
+                from_chat_id=upload_data['user_id'],
+                message_id=upload_data['message_id_in_user_chat'],
+                caption=f"Approved upload from user {upload_data['user_id']}"
+            )
+        except Exception as copy_err:
+            logger.warning(f"copy_message failed for upload approval: {copy_err}. Retrying with direct send_video...")
+            sent_video = await client.send_video(
+                chat_id=DATA_CHANNEL_ID,
+                video=upload_data['file_id'],
+                caption=f"Approved upload from user {upload_data['user_id']}"
+            )
 
         # Get next sequence number
         last_video = media_collection.find_one({'category': category}, sort=[('sequence_number', DESCENDING)])
@@ -2888,18 +2945,29 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
                 "Thank you for contributing to the community! ❤️"
             )
 
-            await client.send_message(
-                upload_data['user_id'],
-                approval_message,
-                reply_to_message_id=upload_data.get('message_id_in_user_chat')
-            )
+            try:
+                await client.send_message(
+                    upload_data['user_id'],
+                    approval_message,
+                    reply_to_message_id=upload_data.get('message_id_in_user_chat')
+                )
+            except RPCError:
+                # Fallback to direct send if user deleted original message / reply_to fails
+                await client.send_message(
+                    upload_data['user_id'],
+                    approval_message
+                )
+
             # Update original confirmation message
             if upload_data.get('confirmation_message_id'):
-                await client.edit_message_text(
-                    chat_id=upload_data['user_id'],
-                    message_id=upload_data['confirmation_message_id'],
-                    text="✅ **Your contribution was approved!** Thank you! ❤️"
-                )
+                try:
+                    await client.edit_message_text(
+                        chat_id=upload_data['user_id'],
+                        message_id=upload_data['confirmation_message_id'],
+                        text="✅ **Your contribution was approved!** Thank you! ❤️"
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"Failed to notify user {upload_data['user_id']} of approval: {e}")
 
@@ -2924,12 +2992,10 @@ async def admin_reject_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("❌ Already processed or not found.", show_alert=True)
         return
 
-    reasons = [
-        "Low Quality", "Duplicate", "Wrong Content", "Broken/Short", "Other"
-    ]
     buttons = []
-    for reason in reasons:
-        buttons.append([InlineKeyboardButton(reason, callback_data=f"rej_res_{upload_id}_{str_to_b64(reason)}")])
+    # Avoid 64-byte limits by mapping reasons to small numeric keys
+    for k, reason_text in REJECTION_REASONS.items():
+        buttons.append([InlineKeyboardButton(reason_text, callback_data=f"rej_res_{upload_id}_{k}")])
 
     buttons.append([InlineKeyboardButton("❌ Cancel", callback_data=f"apr_cancel_{upload_id}")])
 
@@ -2946,7 +3012,8 @@ async def admin_final_reject_callback(client: Client, callback_query: CallbackQu
 
     match = re.match(r"^rej_res_(.+?)_(.+)$", callback_query.data)
     upload_id = match.group(1)
-    reason = b64_to_str(match.group(2))
+    reason_key = match.group(2)
+    reason = REJECTION_REASONS.get(reason_key, "Other")
 
     upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data or upload_data['status'] != "pending":
@@ -2970,19 +3037,33 @@ async def admin_final_reject_callback(client: Client, callback_query: CallbackQu
 
     # 3. Notify User
     try:
-        await client.send_message(
-            upload_data['user_id'],
+        rejection_message = (
             f"❌ **Your video contribution was not approved.**\n\n"
             f"Reason: `{reason}`\n"
-            "Feel free to contribute other high-quality videos! ✨",
-            reply_to_message_id=upload_data.get('message_id_in_user_chat')
+            "Feel free to contribute other high-quality videos! ✨"
         )
-        if upload_data.get('confirmation_message_id'):
-            await client.edit_message_text(
-                chat_id=upload_data['user_id'],
-                message_id=upload_data['confirmation_message_id'],
-                text=f"❌ **Your contribution was not approved.** (Reason: {reason})"
+        try:
+            await client.send_message(
+                upload_data['user_id'],
+                rejection_message,
+                reply_to_message_id=upload_data.get('message_id_in_user_chat')
             )
+        except RPCError:
+            # Fallback to direct send if user deleted original message / reply_to fails
+            await client.send_message(
+                upload_data['user_id'],
+                rejection_message
+            )
+
+        if upload_data.get('confirmation_message_id'):
+            try:
+                await client.edit_message_text(
+                    chat_id=upload_data['user_id'],
+                    message_id=upload_data['confirmation_message_id'],
+                    text=f"❌ **Your contribution was not approved.** (Reason: {reason})"
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Failed to notify user {upload_data['user_id']} of rejection: {e}")
 
@@ -4880,49 +4961,77 @@ async def handle_incoming_videos(client: Client, message: Message):
             except Exception as e:
                 logger.error(f"Admin {user_id} error deleting video: {e}", exc_info=True)
                 await message.reply("❌ An error occurred while deleting the video.\n\nSend /stop to stop the process.")
-        # Removed automatic deletion of state for continuous mode
-        return
-
-    if user_id in admin_batch_link_state:
-        logger.info(f"Admin {user_id} sent a video for batch link creation.")
-        file_unique_id = message.video.file_unique_id
-        video_doc = media_collection.find_one({"file_unique_id": file_unique_id}, {"uuid": 1})
-        if video_doc:
-            admin_batch_link_state[user_id].append(video_doc['uuid'])
-            await message.reply(f"✅ Video added to batch. Total: {len(admin_batch_link_state[user_id])}.")
-        else:
-            await message.reply("⚠️ This video is not in the database. Please add it first using /batchadd.")
-        return
-
-    if batch_add_state.get(user_id, {}).get('batch_mode'):
-        if not DATA_CHANNEL_ID:
-            await message.reply("❌ Video storage channel is not configured. Please set it using /setdata before adding videos.")
             return
 
-        logger.info(f"Admin {user_id} queued a video for batch adding.")
-        state = batch_add_state[user_id]
-        state['video_queue'].append(message)
+        if user_id in admin_batch_link_state:
+            logger.info(f"Admin {user_id} sent a video for batch link creation.")
+            file_unique_id = message.video.file_unique_id
+            video_doc = media_collection.find_one({"file_unique_id": file_unique_id}, {"uuid": 1})
+            if video_doc:
+                admin_batch_link_state[user_id].append(video_doc['uuid'])
+                await message.reply(f"✅ Video added to batch. Total: {len(admin_batch_link_state[user_id])}.")
+            else:
+                await message.reply("⚠️ This video is not in the database. Please add it first using /batchadd.")
+            return
 
-        queue_text = f"✅ Video queued for category <b>{html.escape(state['current_category'])}</b>. Position in queue: {len(state['video_queue'])}."
+        if batch_add_state.get(user_id, {}).get('batch_mode'):
+            if not DATA_CHANNEL_ID:
+                await message.reply("❌ Video storage channel is not configured. Please set it using /setdata before adding videos.")
+                return
 
-        if state.get('last_msg_id'):
-            try:
-                await client.edit_message_text(message.chat.id, state['last_msg_id'], queue_text)
-            except Exception:
+            logger.info(f"Admin {user_id} queued a video for batch adding.")
+            state = batch_add_state[user_id]
+            state['video_queue'].append(message)
+
+            queue_text = f"✅ Video queued for category <b>{html.escape(state['current_category'])}</b>. Position in queue: {len(state['video_queue'])}."
+
+            if state.get('last_msg_id'):
+                try:
+                    await client.edit_message_text(message.chat.id, state['last_msg_id'], queue_text)
+                except Exception:
+                    sent = await message.reply_text(queue_text)
+                    state['last_msg_id'] = sent.id
+            else:
                 sent = await message.reply_text(queue_text)
                 state['last_msg_id'] = sent.id
-        else:
-            sent = await message.reply_text(queue_text)
-            state['last_msg_id'] = sent.id
 
-        if not state.get('is_processing'):
-            if user_id in batch_processing_timers:
-                batch_processing_timers[user_id].cancel()
+            if not state.get('is_processing'):
+                if user_id in batch_processing_timers:
+                    batch_processing_timers[user_id].cancel()
 
-            logger.info(f"Setting/Resetting batch processing timer for admin {user_id}.")
-            batch_processing_timers[user_id] = create_tracked_task(delayed_start_processing(user_id, client))
-        else:
-            logger.info(f"Batch processing task for admin {user_id} is already running.")
+                logger.info(f"Setting/Resetting batch processing timer for admin {user_id}.")
+                batch_processing_timers[user_id] = create_tracked_task(delayed_start_processing(user_id, client))
+            else:
+                logger.info(f"Batch processing task for admin {user_id} is already running.")
+            return
+
+        if user_id in admin_rename_category_state and admin_rename_category_state[user_id].get('step') == 'chg_cat_await_video':
+            logger.info(f"Admin {user_id} sent video for re-categorization.")
+            file_unique_id = message.video.file_unique_id
+            video_doc = media_collection.find_one({"file_unique_id": file_unique_id})
+            if not video_doc:
+                await message.reply("❌ Video not found in database. Please send a valid UUID or send a video.")
+                return
+
+            video_uuid = video_doc['uuid']
+            categories = get_categories(for_admin_use=True)
+            if not categories:
+                await message.reply("⚠️ No categories available. Please create one using /addcategory first.")
+                del admin_rename_category_state[user_id]
+                return
+
+            buttons = []
+            for idx, cat in enumerate(categories):
+                buttons.append([InlineKeyboardButton(f"🗂️ {cat}", callback_data=f"chg_cat_{video_uuid}_{idx}")])
+
+            await message.reply(
+                f"Select the **new category** for this video (Current: <code>{video_doc.get('category')}</code>):",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+            del admin_rename_category_state[user_id]
+            return
+
+        logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
         return
 
     # --- User Upload Handling ---
@@ -4942,9 +5051,6 @@ async def handle_incoming_videos(client: Client, message: Message):
 
         await handle_user_upload(client, message)
         return
-
-    if is_admin(user_id):
-         logger.warning(f"Admin {user_id} sent video outside of any active admin mode, ignoring.")
 
 async def handle_user_upload(client: Client, message: Message):
     """Processes a video uploaded by a user."""
@@ -5076,17 +5182,30 @@ async def notify_admins_of_upload(client: Client, upload_data: dict):
     )
 
     # Buttons for notification
-    approve_cb = f"adm_appr_{upload_id}"
-    # If category is already selected by user, admin can approve directly
     if upload_data.get('category'):
-        approve_cb = f"apr_cat_{upload_id}_{str_to_b64(upload_data['category'])}"
+        categories = get_categories(for_admin_use=True)
+        if upload_data['category'] in categories:
+            cat_idx = categories.index(upload_data['category'])
+            approve_cb = f"apr_cat_{upload_id}_{cat_idx}"
+        else:
+            approve_cb = f"apr_cat_{upload_id}_{str_to_b64(upload_data['category'])}"
 
-    reply_markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=approve_cb),
-            InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
-        ]
-    ])
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=approve_cb),
+                InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
+            ],
+            [
+                InlineKeyboardButton("🗂️ Change Category", callback_data=f"adm_appr_{upload_id}")
+            ]
+        ])
+    else:
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"adm_appr_{upload_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"adm_rejc_{upload_id}")
+            ]
+        ])
 
     if REVIEW_CHAT_ID:
         try:
@@ -5286,6 +5405,101 @@ async def view_token_callback(client: Client, callback_query: CallbackQuery):
         logger.error(f"Error in viewtoken callback: {e}", exc_info=True)
         await callback_query.answer("An error occurred.", show_alert=True)
 
+@bot.on_message(filters.command("showuserscrolls") & filters.private & admin_only)
+async def show_user_scrolls_cmd(client: Client, message: Message):
+    """Admin command to show all users and their scrolls remaining with pagination."""
+    try:
+        await show_user_scrolls_page(client, message)
+    except Exception as e:
+        logger.error(f"Error in /showuserscrolls command: {e}", exc_info=True)
+        await message.reply("An error occurred while fetching user scrolls stats.")
+
+async def show_user_scrolls_page(client: Client, message_or_query, page: int = 0):
+    """Helper function to display a page of the users and their scrolls remaining."""
+    now = datetime.now(timezone.utc)
+    all_users = list(users_collection.find({}, {
+        "user_id": 1,
+        "username": 1,
+        "first_name": 1,
+        "permanent_scrolls": 1,
+        "temp_scrolls": 1
+    }))
+
+    calculated_users = []
+    for user in all_users:
+        user_id = user['user_id']
+        perm = user.get('permanent_scrolls', 0)
+        temp = user.get('temp_scrolls', [])
+        valid_temp_count = sum(
+            s.get('amount', 0) for s in temp
+            if s.get('amount', 0) > 0 and (s.get('expires_at') is None or s['expires_at'] > now)
+        )
+        total = perm + valid_temp_count
+
+        username = f"@{user['username']}" if user.get('username') else (user.get('first_name') or "User")
+        calculated_users.append({
+            'user_id': user_id,
+            'username': username,
+            'scrolls': total
+        })
+
+    # Sort users by scrolls count descending
+    calculated_users.sort(key=lambda x: x['scrolls'], reverse=True)
+
+    total_users = len(calculated_users)
+    if total_users == 0:
+        text = "No registered users found."
+        if isinstance(message_or_query, Message):
+            await message_or_query.reply(text)
+        else:
+            await message_or_query.answer(text, show_alert=True)
+        return
+
+    start_index = page * 10
+    end_index = start_index + 10
+    users_on_page = calculated_users[start_index:end_index]
+
+    text = "📜 **User Scrolls Leaderboard** 📜\n\n"
+
+    for i, user_data in enumerate(users_on_page):
+        rank = start_index + i + 1
+        username_display = html.escape(user_data['username'])
+        text += f"**{rank}.** `{user_data['user_id']}` ({username_display}) - **{user_data['scrolls']}** scrolls remaining\n"
+
+    total_pages = (total_users + 9) // 10
+    text += f"\nPage {page + 1} of {total_pages} (Total Users: {total_users})"
+
+    buttons = []
+    row = []
+    if page > 0:
+        row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"showscrolls_{page - 1}"))
+    if end_index < total_users:
+        row.append(InlineKeyboardButton("➡️ Next", callback_data=f"showscrolls_{page + 1}"))
+    if row:
+        buttons.append(row)
+
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if isinstance(message_or_query, Message):
+        await message_or_query.reply(text, reply_markup=reply_markup)
+    else: # CallbackQuery
+        await message_or_query.message.edit_text(text, reply_markup=reply_markup)
+        await message_or_query.answer()
+
+@bot.on_callback_query(filters.regex(r"^showscrolls_(\d+)$"))
+async def show_user_scrolls_callback(client: Client, callback_query: CallbackQuery):
+    """Callback query handler for showuserscrolls pagination."""
+    if not is_admin(callback_query.from_user.id):
+        await callback_query.answer("Not authorized.", show_alert=True)
+        return
+
+    page = int(callback_query.data.split("_")[1])
+    try:
+        await show_user_scrolls_page(client, callback_query, page)
+    except Exception as e:
+        logger.error(f"Error in showscrolls callback: {e}", exc_info=True)
+        await callback_query.answer("An error occurred.", show_alert=True)
+
 @bot.on_message(filters.command("stats") & filters.private & admin_only)
 async def stats_cmd(client: Client, message: Message):
     """Admin command to display bot statistics, including category video counts."""
@@ -5372,6 +5586,32 @@ async def bypass_limit_cmd(client: Client, message: Message):
 @bot.on_message(filters.command("addadmin") & filters.private & owner_only)
 async def add_admin_cmd(client: Client, message: Message):
     """Owner command to add a new admin."""
+    args = message.text.split()
+    if len(args) > 1:
+        try:
+            user_id_to_add = int(args[1])
+            if user_id_to_add in BOT_ADMINS:
+                await message.reply("This user is already an admin.")
+                return
+
+            BOT_ADMINS.add(user_id_to_add)
+            # Persist change to DB
+            settings_collection.update_one(
+                {'_id': 'bot_settings'},
+                {'$addToSet': {'admins': user_id_to_add}},
+                upsert=True
+            )
+            await message.reply(f"✅ User {user_id_to_add} has been promoted to admin.")
+            logger.info(f"Owner {message.from_user.id} added new admin: {user_id_to_add}")
+            return
+        except ValueError:
+            await message.reply("Invalid User ID format. Please send a valid integer ID.")
+            return
+        except Exception as e:
+            await message.reply(f"An error occurred: {e}")
+            logger.error(f"Error in /addadmin flow: {e}")
+            return
+
     owner_add_admin_state[message.from_user.id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to add as an admin. 📝")
 
@@ -5537,6 +5777,142 @@ async def create_batch_link_cmd(client: Client, message: Message):
         f"Share this link:\n`{share_link}`"
     )
     del admin_batch_link_state[user_id] # Clear state
+
+async def perform_video_category_change(video_uuid: str, new_category: str) -> tuple[bool, str]:
+    """Helper function to change a video's category in DB and cascade updates."""
+    try:
+        video_doc = media_collection.find_one({"uuid": video_uuid})
+        if not video_doc:
+            return False, "Video not found in database."
+
+        old_category = video_doc.get('category')
+        old_seq = video_doc.get('sequence_number')
+
+        if old_category == new_category:
+            return True, "Video is already in this category."
+
+        # 1. Rearrange sequence numbers in old category
+        if old_category and old_seq is not None:
+            rearrange_sequences_after_deletion(old_category, old_seq)
+
+        # 2. Get next sequence number in new category
+        last_video = media_collection.find_one({'category': new_category}, sort=[('sequence_number', DESCENDING)])
+        next_seq = (last_video['sequence_number'] + 1) if last_video and 'sequence_number' in last_video else 1
+
+        # 3. Update video document
+        media_collection.update_one(
+            {"uuid": video_uuid},
+            {"$set": {"category": new_category, "sequence_number": next_seq}}
+        )
+
+        # 4. Cascade updates to bookmarks
+        users_collection.update_many(
+            {'bookmarked_videos.uuid': video_uuid},
+            {'$set': {'bookmarked_videos.$[elem].category': new_category}},
+            array_filters=[{'elem.uuid': video_uuid}]
+        )
+
+        # 5. Cascade updates to history
+        history_collection.update_many(
+            {'history.video_uuid': video_uuid},
+            {'$set': {'history.$[elem].category': new_category}},
+            array_filters=[{'elem.video_uuid': video_uuid}]
+        )
+
+        return True, "Success"
+    except Exception as e:
+        logger.error(f"Error performing video category change for {video_uuid}: {e}", exc_info=True)
+        return False, str(e)
+
+@bot.on_message(filters.command(["changecategory", "change_category"]) & filters.private & admin_only)
+async def changecategory_cmd(client: Client, message: Message):
+    """Admin command to change a video's category."""
+    user_id = message.from_user.id
+    logger.info(f"Admin {user_id} initiated /changecategory command.")
+
+    args = message.text.split(maxsplit=2)
+    video_uuid = None
+    new_category_name = None
+    video_doc = None
+
+    # Try to extract from reply message
+    if message.reply_to_message and message.reply_to_message.video:
+        file_unique_id = message.reply_to_message.video.file_unique_id
+        video_doc = media_collection.find_one({"file_unique_id": file_unique_id})
+        if video_doc:
+            video_uuid = video_doc['uuid']
+        if len(args) > 1:
+            new_category_name = args[1].strip()
+
+    elif len(args) > 1:
+        # Check if first arg is a valid UUID
+        possible_uuid = args[1].strip()
+        video_doc = media_collection.find_one({"uuid": possible_uuid})
+        if video_doc:
+            video_uuid = video_doc['uuid']
+            if len(args) > 2:
+                new_category_name = args[2].strip()
+
+    # If we have video_uuid and new_category_name, perform direct change
+    if video_uuid and new_category_name:
+        if new_category_name not in get_categories(for_admin_use=True):
+            await message.reply(f"❌ Category '<b>{html.escape(new_category_name)}</b>' does not exist. Please create it first using /addcategory.")
+            return
+
+        success, err_or_msg = await perform_video_category_change(video_uuid, new_category_name)
+        if success:
+            await message.reply(f"✅ Video category changed successfully to '<b>{html.escape(new_category_name)}</b>'.")
+        else:
+            await message.reply(f"❌ Failed to change category: {err_or_msg}")
+        return
+
+    # Otherwise, enter interactive state or ask for input
+    if not video_uuid:
+        # Enter state to await video or UUID
+        admin_rename_category_state[user_id] = {'step': 'chg_cat_await_video'}
+        await message.reply("Please **reply to a video** with this command, or **send/forward a video**, or send the **video UUID** to change its category. 🎥")
+    else:
+        # We have the video, but need the category. Show category buttons!
+        categories = get_categories(for_admin_use=True)
+        if not categories:
+            await message.reply("⚠️ No categories available. Please create one using /addcategory first.")
+            return
+
+        buttons = []
+        for idx, cat in enumerate(categories):
+            buttons.append([InlineKeyboardButton(f"🗂️ {cat}", callback_data=f"chg_cat_{video_uuid}_{idx}")])
+
+        await message.reply(
+            f"Select the **new category** for the video (Current: <code>{video_doc.get('category')}</code>):",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+@bot.on_callback_query(filters.regex(r"^chg_cat_(.+?)_(\d+)$"))
+async def chg_cat_callback(client: Client, callback_query: CallbackQuery):
+    """Handles category selection in /changecategory interactive flow."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized.", show_alert=True)
+        return
+
+    match = re.match(r"^chg_cat_(.+?)_(\d+)$", callback_query.data)
+    video_uuid = match.group(1)
+    cat_idx = int(match.group(2))
+
+    categories = get_categories(for_admin_use=True)
+    if cat_idx >= len(categories):
+        await callback_query.answer("❌ Invalid category index.", show_alert=True)
+        return
+
+    new_category = categories[cat_idx]
+    success, err_or_msg = await perform_video_category_change(video_uuid, new_category)
+
+    if success:
+        await callback_query.message.edit_text(f"✅ Video category changed successfully to '<b>{html.escape(new_category)}</b>'.")
+        await callback_query.answer("Category updated successfully!")
+    else:
+        await callback_query.message.edit_text(f"❌ Failed to change category: {err_or_msg}")
+        await callback_query.answer("Error updating category.", show_alert=True)
 
 @bot.on_message(filters.command("categoryrename") & filters.private & admin_only)
 async def categoryrename_cmd(client: Client, message: Message):
@@ -5950,6 +6326,30 @@ async def handle_text_input(client: Client, message: Message):
 
         if user_id in admin_rename_category_state:
             current_step = admin_rename_category_state[user_id].get('step')
+
+            if current_step == 'chg_cat_await_video':
+                video_uuid = text_input
+                video_doc = media_collection.find_one({"uuid": video_uuid})
+                if not video_doc:
+                    await message.reply("❌ Video not found in database. Please send a valid UUID or send a video.")
+                    return
+
+                categories = get_categories(for_admin_use=True)
+                if not categories:
+                    await message.reply("⚠️ No categories available. Please create one using /addcategory first.")
+                    del admin_rename_category_state[user_id]
+                    return
+
+                buttons = []
+                for idx, cat in enumerate(categories):
+                    buttons.append([InlineKeyboardButton(f"🗂️ {cat}", callback_data=f"chg_cat_{video_uuid}_{idx}")])
+
+                await message.reply(
+                    f"Select the **new category** for this video (Current: <code>{video_doc.get('category')}</code>):",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+                del admin_rename_category_state[user_id]
+                return
 
             if current_step == 'await_old_name':
                 old_name = text_input
