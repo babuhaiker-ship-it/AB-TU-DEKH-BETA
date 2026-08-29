@@ -5,7 +5,7 @@ import base64
 import logging
 from datetime import datetime, timedelta, timezone
 
-from hydrogram import Client, filters
+from hydrogram import Client, filters, StopPropagation
 from hydrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as HyUser, Chat as HyChat
 )
@@ -271,7 +271,10 @@ UPLOAD_CONFIG = {
     'milestones': {
         "5": 2.0,
         "10": 4.0
-    }
+    },
+    'reward_tokens_hours': 2.0,
+    'session_limit_count': 10,
+    'session_limit_minutes': 10
 }
 
 # --- Navigation Spam Control ---
@@ -508,15 +511,22 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
 def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admin_granted: bool = False):
     """
     Adds a new token for a user with a specified duration.
-    If is_admin_granted is True, this token signifies premium access.
+    Admin-granted tokens (Premium) are activated immediately.
+    Others are banked until manually activated by the user.
     """
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=duration_seconds)
+    # Admin granted tokens activate immediately.
+    should_activate = is_admin_granted
+
+    expires_at = now + timedelta(seconds=duration_seconds) if should_activate else None
+
     token = {
         'token_id': str(uuid.uuid4()),
         'created_at': now,
         'expires_at': expires_at,
-        'is_admin_granted': is_admin_granted
+        'duration_seconds': duration_seconds,
+        'is_admin_granted': is_admin_granted,
+        'is_activated': should_activate
     }
     try:
         tokens_collection.update_one(
@@ -524,7 +534,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
             {'$push': {'tokens': token}},
             upsert=True
         )
-        logger.info(f"Token added for user {user_id}. Admin granted: {is_admin_granted}, expires at {expires_at}")
+        logger.info(f"Token added for user {user_id}. Admin granted: {is_admin_granted}, Activated: {should_activate}")
         return token
     except Exception as e:
         logger.error(f"Error adding token for user {user_id}: {e}", exc_info=True)
@@ -538,7 +548,8 @@ def is_premium_user(user_id: int) -> bool:
         return False
 
     for token in doc['tokens']:
-        if token.get('is_admin_granted', False) and token.get('expires_at') and token['expires_at'] > now:
+        # Consider both is_activated field and legacy tokens (where field might be missing)
+        if token.get('is_activated', True) and token.get('is_admin_granted', False) and token.get('expires_at') and token['expires_at'] > now:
             return True
     return False
 
@@ -550,9 +561,55 @@ def user_has_token(user_id: int) -> bool:
         return False
 
     for token in doc['tokens']:
-        if token.get('expires_at') and token['expires_at'] > now:
+        # Consider both is_activated field and legacy tokens (where field might be missing)
+        if token.get('is_activated', True) and token.get('expires_at') and token['expires_at'] > now:
             return True
     return False
+
+def get_banked_tokens_count(user_id: int) -> int:
+    """Returns the number of unactivated tokens a user has."""
+    doc = tokens_collection.find_one({'user_id': user_id})
+    if not doc or 'tokens' not in doc:
+        return 0
+    return sum(1 for t in doc['tokens'] if not t.get('is_activated', False))
+
+async def activate_bank_token(user_id: int) -> tuple[bool, str]:
+    """Activates one banked token for the user."""
+    doc = tokens_collection.find_one({'user_id': user_id})
+    if not doc or 'tokens' not in doc:
+        return False, "You don't have any tokens to activate."
+
+    banked_tokens = [t for t in doc['tokens'] if not t.get('is_activated', False)]
+    if not banked_tokens:
+        return False, "Your token bank is empty."
+
+    # Sort by creation date to activate the oldest one first
+    banked_tokens.sort(key=lambda x: x.get('created_at', datetime.min.replace(tzinfo=timezone.utc)))
+    target_token = banked_tokens[0]
+
+    now = datetime.now(timezone.utc)
+    duration = target_token.get('duration_seconds', config.TOKEN_EXPIRY)
+    expires_at = now + timedelta(seconds=duration)
+
+    try:
+        # Atomically update the specific token in the array
+        result = tokens_collection.update_one(
+            {'user_id': user_id, 'tokens.token_id': target_token['token_id']},
+            {'$set': {
+                'tokens.$.is_activated': True,
+                'tokens.$.expires_at': expires_at,
+                'tokens.$.activated_at': now
+            }}
+        )
+
+        if result.modified_count > 0:
+            hours = int(duration / 3600)
+            return True, f"✅ **Token Activated!**\n\nYou now have **{hours} hours** of full access. Enjoy! 🍿"
+        else:
+            return False, "Failed to activate token. Please try again."
+    except Exception as e:
+        logger.error(f"Error activating token for user {user_id}: {e}", exc_info=True)
+        return False, "An error occurred during activation."
 
 def user_can_access_video(user_id: int) -> bool:
     """Checks if a user can access video content (is premium or has a token)."""
@@ -655,7 +712,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         text = (
             "🛑 **Access Token Required** 🛑\n\n"
             "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            "Unlock 6 hours of uninterrupted access and keep the vibe going. ✨"
+            f"Unlock {int(config.TOKEN_ACCESS_HOURS)} hours of uninterrupted access and keep the vibe going. ✨"
         )
     reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
@@ -1454,19 +1511,25 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = []
 
+    if user_id:
+        banked_count = get_banked_tokens_count(user_id)
+        if banked_count > 0:
+            buttons.append([InlineKeyboardButton(f"🔋 Activate Token (Bank: {banked_count})", callback_data="activate_bank_token")])
+
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("🔓 Unlock 6-Hour Access (Watch Ad)", url=ad_url)])
+        buttons.append([InlineKeyboardButton(f"🔓 Unlock {int(config.TOKEN_ACCESS_HOURS)}-Hour Access (Watch Ad)", url=ad_url)])
 
     if user_id:
         ssrb_link = f"https://t.me/SaveRestrict_Robot?start=verify_for_atdb_{user_id}"
         v_btn_text = "✅ 𝐈'𝐦 𝐇𝐮𝐦𝐚𝐧" if SHORTENER_DISABLED else "🔐 human verification"
         buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
+        buttons.append([InlineKeyboardButton("💰 Upload and Earn", callback_data="upload_btn")])
 
     vip_text = "🧚𝑩𝒚𝒑𝒂𝒔𝒔 𝒗𝒆𝒓𝒊𝒇𝒊𝒄𝒂𝒕𝒊𝒐𝒏" if SHORTENER_DISABLED else "💎 Become a VIP (Ad-Free Access)"
     buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        buttons.append([InlineKeyboardButton("📚 6-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
+        buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
         buttons.append([InlineKeyboardButton("🤝 Refer & Earn Tokens", callback_data="refer_and_earn_inline")])
 
     if is_pending_content:
@@ -1582,6 +1645,8 @@ def video_nav_keyboard(
     elif is_saved:
         row_3_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_saved_cats"))
     else: # Regular navigation
+        if category == "default (all)":
+            row_3_buttons.append(InlineKeyboardButton("💰 Upload and Earn", callback_data="upload_btn"))
         row_3_buttons.append(InlineKeyboardButton("🗂️ Change Category", callback_data="change_cat"))
 
     if row_3_buttons:
@@ -1730,8 +1795,8 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         added_token = add_token(user_id, config.REFRESH_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
         if added_token:
             refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
-            logger.info(f"Token added for user {user_id} via refresh. Premium status unaffected. Ad code {ad_code} marked as used.")
-            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. Each token lasts {int(config.REFRESH_BONUS * config.TOKEN_EXPIRY / 3600)} hours. Enjoy! 🍿"
+            logger.info(f"Token added for user {user_id} via refresh. Token is banked.")
+            return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. It has been added to your bank. Activate it whenever you need access! 🏦"
         else:
             return False, "❌ <b>Something went wrong!</b>\nFailed to add token. Please try again later. 🛠️"
     except Exception as e:
@@ -1814,7 +1879,7 @@ async def upload_cmd(client: Client, message: Message):
         "2. Send one or multiple videos directly in this chat.\n"
         "3. Our admins will review your submission.\n"
         "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
-        "**Instant Reward:** You will receive **20 temporary scrolls** immediately after uploading to enjoy while you wait for approval! ⏳\n\n"
+        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately for each upload enjoy while you wait for approval! ⏳\n\n"
         "**Note:** Type /done when you are finished uploading."
     )
 
@@ -1823,6 +1888,57 @@ async def upload_cmd(client: Client, message: Message):
     ])
 
     await message.reply(instructions, reply_markup=reply_markup)
+
+@bot.on_callback_query(filters.regex(r"^upload_btn$"))
+async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the 'Upload and Earn' button from the video menu."""
+    user_id = callback_query.from_user.id
+
+    if not await check_membership(client, user_id):
+        await callback_query.answer("You must join our channels first!", show_alert=True)
+        await send_force_subscribe_message(client, user_id)
+        return
+
+    instructions = (
+        "📤 **Contribute to our Spicy Collection!** 🌶️\n\n"
+        "Thank you for deciding to share videos with us. It keeps the community vibe going! ✨\n\n"
+        "**How it works:**\n"
+        "1. Click the button below to select a category.\n"
+        "2. Send one or multiple videos directly in this chat.\n"
+        "3. Our admins will review your submission.\n"
+        "4. Once approved, you'll receive **exclusive access (tokens)** as a reward! 🎁\n\n"
+        f"**Instant Reward:** You will receive **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** immediately for each upload enjoy while you wait for approval! ⏳\n\n"
+        "**Note:** Type /done when you are finished uploading."
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Send Video Now", callback_data="upl_start_cat")]
+    ])
+
+    await callback_query.message.reply(instructions, reply_markup=reply_markup)
+    await callback_query.answer()
+
+@bot.on_callback_query(filters.regex(r"^activate_bank_token$"))
+async def activate_bank_token_callback(client: Client, callback_query: CallbackQuery):
+    """Handles the manual activation of a banked token."""
+    user_id = callback_query.from_user.id
+    success, message = await activate_bank_token(user_id)
+
+    if success:
+        await callback_query.answer(message, show_alert=True)
+        # Refresh the keyboard to reflect updated bank count or remove the button
+        ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
+        long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
+        ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
+
+        # Check if we should use the "pending content" version of the keyboard
+        is_pending = "Access Token Required" in callback_query.message.text or "Almost there" in callback_query.message.text
+
+        await callback_query.message.edit_reply_markup(
+            reply_markup=generate_token_earning_keyboard(ad_url, is_pending_content=is_pending, user_id=user_id)
+        )
+    else:
+        await callback_query.answer(message, show_alert=True)
 
 @bot.on_callback_query(filters.regex(r"^upl_start_cat$"))
 async def upload_start_category_callback(client: Client, callback_query: CallbackQuery):
@@ -2259,6 +2375,48 @@ async def help_cmd(client: Client, message: Message):
         reply_markup=reply_markup
     )
 
+@bot.on_message(filters.command("helpadmin") & filters.private & admin_only)
+async def help_admin_cmd(client: Client, message: Message):
+    """Admin command to list all admin-only commands."""
+    help_text = (
+        "🛠️ **Admin Help Menu** 🛠️\n\n"
+        "**User Management:**\n"
+        "- /addpremium <id> <days>: Grant premium\n"
+        "- /removepremium <id>: Revoke access\n"
+        "- /deleteuser <id>: Wipe user data\n"
+        "- /viewtoken: Token leaderboard\n\n"
+        "**Content Management:**\n"
+        "- /addcategory <name>: Create category\n"
+        "- /deletecategory: Remove category\n"
+        "- /categoryrename: Rename category\n"
+        "- /batchadd: Continuous video upload\n"
+        "- /deletevideo: Interactive deletion\n"
+        "- /batchvideoadd: Create shareable batch\n\n"
+        "**Bot Configuration:**\n"
+        "- /configupload: Manage rewards/limits\n"
+        "- /setdata: Set video storage channel\n"
+        "- /setfsub: Manage join-to-use channels\n"
+        "- /setreviewchat: Set upload review group\n"
+        "- /setshortener: Configure URL shortener\n"
+        "- /bypass_limit <sec>: Shortener anti-cheat\n"
+        "- /turnoff_shortener / /turnon_shortener\n\n"
+        "**Utility & Stats:**\n"
+        "- /broadcast (reply): Global broadcast\n"
+        "- /stats: General bot stats\n"
+        "- /token_stats: Shortener usage stats\n"
+        "- /toggle_auto_delete / /toggle_protect\n"
+        "- /stop / /done: End active admin modes\n"
+    )
+
+    if is_owner(message.from_user.id):
+        help_text += (
+            "\n**Owner Commands:**\n"
+            "- /addadmin <id>: Promote user\n"
+            "- /removeadmin: Demote user\n"
+        )
+
+    await message.reply(help_text)
+
 @bot.on_message(filters.command("profile") & filters.private)
 async def profile_cmd(client: Client, message: Message):
     """Handles the /profile command to show user statistics."""
@@ -2300,12 +2458,21 @@ async def profile_cmd(client: Client, message: Message):
         tokens_doc = tokens_collection.find_one({'user_id': user_id})
 
         tokens_count = 0
+        banked_tokens = 0
         if tokens_doc and 'tokens' in tokens_doc:
             now = datetime.now(timezone.utc)
-            tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('expires_at') and token['expires_at'] > now)
+            tokens_count = sum(1 for token in tokens_doc['tokens'] if token.get('is_activated', True) and token.get('expires_at') and token['expires_at'] > now)
+            banked_tokens = sum(1 for token in tokens_doc['tokens'] if not token.get('is_activated', False))
 
         referral_count = user.get('referral_count', 0)
         bookmarked_videos = user.get('bookmarked_videos', [])
+
+        # Calculate total scrolls
+        now = datetime.now(timezone.utc)
+        permanent_scrolls = user.get('permanent_scrolls', 0)
+        temp_scrolls = user.get('temp_scrolls', [])
+        valid_temp_scrolls_count = sum(s.get('amount', 0) for s in temp_scrolls if s.get('expires_at') and s['expires_at'] > now)
+        total_scrolls = permanent_scrolls + valid_temp_scrolls_count
 
         is_premium = is_premium_user(user_id)
         user_status = "💎 Premium User" if is_premium else "✨ Free User"
@@ -2321,6 +2488,8 @@ async def profile_cmd(client: Client, message: Message):
             f"👤 <b>Your Profile</b>\n\n"
             f"📌 Status: {user_status}\n"
             f"🪙 Active Tokens: {tokens_count}\n"
+            f"🏦 Banked Tokens: {banked_tokens}\n"
+            f"📜 Scrolls Remaining: {total_scrolls}\n"
             f"❤️ Saved Videos: {save_limit_display}\n"
             f"👥 Total Referrals: {referral_count}\n"
             f"───────────────────────\n"
@@ -2635,12 +2804,16 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         reward_duration_hours = 0
 
         if token_threshold_met:
+            # Check for milestone rewards first
             if UPLOAD_CONFIG.get('milestones_enabled'):
                 milestones = UPLOAD_CONFIG.get('milestones', {})
-                # milestones keys are strings in Mongo, convert count to string for lookup
                 count_str = str(approved_count)
                 if count_str in milestones:
                     reward_duration_hours = float(milestones[count_str])
+
+            # Fallback to base reward if no milestone hit
+            if reward_duration_hours == 0:
+                reward_duration_hours = UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)
 
             if reward_duration_hours > 0:
                 reward_duration_sec = int(reward_duration_hours * 3600)
@@ -2672,22 +2845,29 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         try:
             video_share_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=video_{video_uuid}_{upload_data['user_id']}"
             reward_text = ""
+            goal_reached_header = ""
             if token_threshold_met and reward_duration_hours > 0:
-                reward_text = f"Reward: **{reward_duration_hours} hours** of general access token granted! 🎁\n"
+                goal_reached_header = "🎯 **Goal Reached! Special Reward Unlocked!** 🎊\n\n"
+                reward_text = f"Reward: **{reward_duration_hours} hours** of general access token added to your bank! 🎁\n"
             elif not token_threshold_met:
                 more_needed = min_req - (approved_count % min_req)
                 reward_text = f"Progress: **{approved_count}** total approvals. Need **{more_needed} more** videos approved to get your next reward! 🚀\n"
             elif UPLOAD_CONFIG.get('milestones_enabled'):
                 reward_text = f"Progress: **{approved_count}** total approvals. Keep going to reach the next milestone! 🚀\n"
 
-            await client.send_message(
-                upload_data['user_id'],
+            approval_message = (
+                f"{goal_reached_header}"
                 f"🎉 **Good News! Your video has been approved!**\n\n"
                 f"Category: `{category}`\n"
                 f"{reward_text}\n"
                 f"🔗 **Your Video Link:**\n`{video_share_link}`\n\n"
                 f"💡 You can earn more by refferaling user with this link! 🤝\n\n"
-                "Thank you for contributing to the community! ❤️",
+                "Thank you for contributing to the community! ❤️"
+            )
+
+            await client.send_message(
+                upload_data['user_id'],
+                approval_message,
                 reply_to_message_id=upload_data.get('message_id_in_user_chat')
             )
             # Update original confirmation message
@@ -2943,6 +3123,9 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
         # Mock callback query for navigate_video
         callback_query.data = next_data
         await navigate_video(client, callback_query)
+        raise StopPropagation
+    except StopPropagation:
+        raise
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
@@ -3146,6 +3329,9 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
 
         callback_query.data = f"next_default|{video_uuid}"
         await navigate_default_category(client, callback_query)
+        raise StopPropagation
+    except StopPropagation:
+        raise
     except Exception as e:
         logger.error(f"User {user_id} failed in interaction_default_callback: {e}", exc_info=True)
         await callback_query.answer("❌ Failed to skip.", show_alert=True)
@@ -4697,12 +4883,15 @@ async def handle_incoming_videos(client: Client, message: Message):
     if user_upload_state.get(user_id, {}).get('in_upload_mode'):
         # --- Check Session Cooldown ---
         now = datetime.now(timezone.utc)
+        limit_mins = UPLOAD_CONFIG.get('session_limit_minutes', 10)
+        limit_count = UPLOAD_CONFIG.get('session_limit_count', 10)
+
         recent_uploads = list(pending_uploads_collection.find({
             "user_id": user_id,
-            "submitted_at": {"$gt": now - timedelta(minutes=10)}
+            "submitted_at": {"$gt": now - timedelta(minutes=limit_mins)}
         }))
-        if len(recent_uploads) >= 10:
-            await message.reply_text("⏳ **Slow down!** You can only upload 10 videos every 10 minutes. Please wait a bit. 🛑")
+        if len(recent_uploads) >= limit_count:
+            await message.reply_text(f"⏳ **Slow down!** You can only upload {limit_count} videos every {limit_mins} minutes. Please wait a bit. 🛑")
             return
 
         await handle_user_upload(client, message)
@@ -5156,11 +5345,55 @@ async def remove_admin_cmd(client: Client, message: Message):
 
     await message.reply("Select an admin to remove:", reply_markup=InlineKeyboardMarkup(buttons))
 
+async def perform_user_deletion(client: Client, admin_user_id: int, target_user_id: int) -> str:
+    """Helper function to delete a user's data from all collections."""
+    if is_owner(target_user_id):
+        return "❌ You cannot delete the bot owner."
+
+    if is_admin(target_user_id) and admin_user_id != config.OWNER_ID:
+        return "❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin."
+
+    try:
+        user_deleted = users_collection.delete_one({'user_id': target_user_id})
+        tokens_deleted = tokens_collection.delete_one({'user_id': target_user_id})
+        history_deleted = history_collection.delete_one({'user_id': target_user_id})
+        ssrb_deleted = ssrb_verifications_collection.delete_one({'user_id': target_user_id})
+        pending_uploads_deleted = pending_uploads_collection.delete_many({'user_id': target_user_id})
+        shortener_logs_deleted = shortener_logs_collection.delete_many({'user_id': target_user_id})
+
+        if user_deleted.deleted_count > 0:
+            logger.info(f"Admin {admin_user_id} successfully deleted user {target_user_id}.")
+            return (f"✅ Successfully deleted user {target_user_id} from the database.\n"
+                    f"- User record: {'Deleted' if user_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- Tokens record: {'Deleted' if tokens_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- History record: {'Deleted' if history_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- SSRB Record: {'Deleted' if ssrb_deleted.deleted_count > 0 else 'Not Found'}\n"
+                    f"- Pending Uploads: {pending_uploads_deleted.deleted_count} removed\n"
+                    f"- Shortener Logs: {shortener_logs_deleted.deleted_count} removed")
+        else:
+            logger.warning(f"Admin {admin_user_id} tried to delete non-existent user {target_user_id}.")
+            return f"🤷 User {target_user_id} not found in the database."
+    except Exception as e:
+        logger.error(f"Error in perform_user_deletion for {target_user_id}: {e}", exc_info=True)
+        return f"❌ An error occurred during deletion: {e}"
+
 @bot.on_message(filters.command("deleteuser") & filters.private & admin_only)
 async def deleteuser_cmd(client: Client, message: Message):
     """Admin command to delete a user from the database."""
     admin_user_id = message.from_user.id
     logger.info(f"Admin {admin_user_id} initiated /deleteuser command.")
+
+    args = message.text.split()
+    if len(args) > 1:
+        try:
+            target_user_id = int(args[1])
+            result_msg = await perform_user_deletion(client, admin_user_id, target_user_id)
+            await message.reply(result_msg)
+            return
+        except ValueError:
+            await message.reply("Invalid User ID format. Please provide a numeric ID.")
+            return
+
     admin_delete_user_state[admin_user_id] = {'step': 'await_user_id'}
     await message.reply("Please send the <b>User ID</b> of the user you want to permanently delete from the database. 📝\n\n⚠️ This action is irreversible and will delete all their data, including tokens and history.")
 
@@ -5371,7 +5604,9 @@ async def config_upload_cmd(client: Client, message: Message):
         f"📅 **Daily Max per User:** {UPLOAD_CONFIG['daily_max']} videos\n"
         f"📜 **Auto-give Scrolls:** {'Enabled ✅' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled ❌'}\n"
         f"➕ **Scrolls Amount:** {UPLOAD_CONFIG['temp_scrolls_amount']}\n"
-        f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n\n"
+        f"🕒 **Scrolls Expiry:** {UPLOAD_CONFIG['temp_scrolls_expiry_hours']} hours\n"
+        f"🎁 **Base Token Reward:** {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)} hours\n"
+        f"⏳ **Session Limit:** {UPLOAD_CONFIG.get('session_limit_count', 10)} vids / {UPLOAD_CONFIG.get('session_limit_minutes', 10)} mins\n\n"
         f"🏆 **Milestones:** {'Enabled ✅' if UPLOAD_CONFIG.get('milestones_enabled') else 'Disabled ❌'}\n"
         f"{milestones_str}\n\n"
         "Tap a button to change a setting:"
@@ -5381,7 +5616,9 @@ async def config_upload_cmd(client: Client, message: Message):
         [InlineKeyboardButton("🔢 Min Uploads", callback_data="cfg_upl_min_count"), InlineKeyboardButton("⏳ Max Pending", callback_data="cfg_upl_max_pending")],
         [InlineKeyboardButton("📅 Daily Max", callback_data="cfg_upl_daily"), InlineKeyboardButton("📜 Toggle Scrolls", callback_data="cfg_upl_toggle_scrolls")],
         [InlineKeyboardButton("➕ Scrolls Amt", callback_data="cfg_upl_scroll_amt"), InlineKeyboardButton("🕒 Scrolls Expiry", callback_data="cfg_upl_scroll_exp")],
-        [InlineKeyboardButton("🏆 Toggle Milestones", callback_data="cfg_upl_toggle_milestones"), InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
+        [InlineKeyboardButton("🎁 Token Reward", callback_data="cfg_upl_reward_tokens"), InlineKeyboardButton("🏆 Milestones", callback_data="cfg_upl_toggle_milestones")],
+        [InlineKeyboardButton("⏲️ Session Limit", callback_data="cfg_upl_sess_cnt"), InlineKeyboardButton("⏱️ Session Time", callback_data="cfg_upl_sess_min")],
+        [InlineKeyboardButton("📝 Edit Milestones", callback_data="cfg_upl_edit_milestones")]
     ])
 
     await message.reply(text, reply_markup=reply_markup)
@@ -5414,8 +5651,11 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
         "min_count": "Enter **minimum videos** user must upload to get a reward (e.g., 5):",
         "max_pending": "Enter **maximum pending uploads** allowed per user (e.g., 30):",
         "daily": "Enter new **daily maximum** videos per user (e.g., 100):",
-        "scroll_amt": "Enter new **temporary scrolls** amount per upload (e.g., 20):",
-        "scroll_exp": "Enter new **scrolls expiry** in hours (e.g., 48):",
+        "scroll_amt": f"Enter new **temporary scrolls** amount per upload (Current: {UPLOAD_CONFIG['temp_scrolls_amount']}):",
+        "scroll_exp": f"Enter new **scrolls expiry** in hours (Current: {UPLOAD_CONFIG['temp_scrolls_expiry_hours']}):",
+        "reward_tokens": f"Enter **token reward hours** for reaching min uploads (Current: {UPLOAD_CONFIG.get('reward_tokens_hours', 2.0)}):",
+        "sess_cnt": f"Enter **max videos** allowed per session (Current: {UPLOAD_CONFIG.get('session_limit_count', 10)}):",
+        "sess_min": f"Enter **session duration** in minutes (Current: {UPLOAD_CONFIG.get('session_limit_minutes', 10)}):",
         "edit_milestones": "Enter milestones in `count:hours` format, separated by commas (e.g., `5:2,10:4`):"
     }
 
@@ -5525,7 +5765,7 @@ async def turnoff_shortener_cmd(client: Client, message: Message):
             upsert=True
         )
         SHORTENER_DISABLED = True
-        await message.reply("✅ URL Shortener has been <b>turned OFF</b>. 'Unlock 6-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
+        await message.reply(f"✅ URL Shortener has been <b>turned OFF</b>. 'Unlock {int(config.TOKEN_ACCESS_HOURS)}-Hour Access' and Tutorial buttons are now hidden from users. 🚫")
         logger.info(f"Admin {message.from_user.id} turned off the shortener.")
     except Exception as e:
         logger.error(f"Error in /turnoff_shortener: {e}", exc_info=True)
@@ -5598,36 +5838,14 @@ async def handle_text_input(client: Client, message: Message):
     if is_admin(user_id):
         if user_id in admin_delete_user_state and admin_delete_user_state[user_id].get('step') == 'await_user_id':
             try:
-                user_id_to_delete = int(text_input)
-
-                if is_owner(user_id_to_delete):
-                    await message.reply("❌ You cannot delete the bot owner.")
-                    return
-
-                if is_admin(user_id_to_delete):
-                    await message.reply("❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin.")
-                    return
-
-                # Perform deletions
-                user_deleted = users_collection.delete_one({'user_id': user_id_to_delete})
-                tokens_deleted = tokens_collection.delete_one({'user_id': user_id_to_delete})
-                history_deleted = history_collection.delete_one({'user_id': user_id_to_delete})
-
-                if user_deleted.deleted_count > 0:
-                    await message.reply(f"✅ Successfully deleted user {user_id_to_delete} from the database.\n"
-                                      f"- User record deleted: {user_deleted.deleted_count > 0}\n"
-                                      f"- Tokens record deleted: {tokens_deleted.deleted_count > 0}\n"
-                                      f"- History record deleted: {history_deleted.deleted_count > 0}")
-                    logger.info(f"Admin {user_id} successfully deleted user {user_id_to_delete}.")
-                else:
-                    await message.reply(f"🤷 User {user_id_to_delete} not found in the database.")
-                    logger.warning(f"Admin {user_id} tried to delete non-existent user {user_id_to_delete}.")
-
+                target_user_id = int(text_input)
+                result_msg = await perform_user_deletion(client, user_id, target_user_id)
+                await message.reply(result_msg)
             except ValueError:
                 await message.reply("Invalid User ID. Please send a valid integer ID.")
             except Exception as e:
                 await message.reply(f"An error occurred: {e}")
-                logger.error(f"Error in /deleteuser flow: {e}")
+                logger.error(f"Error in /deleteuser interactive flow: {e}")
             finally:
                 del admin_delete_user_state[user_id]
             return
@@ -5828,6 +6046,12 @@ async def handle_text_input(client: Client, message: Message):
                     UPLOAD_CONFIG['temp_scrolls_amount'] = int(text_input)
                 elif setting == "scroll_exp":
                     UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = int(text_input)
+                elif setting == "reward_tokens":
+                    UPLOAD_CONFIG['reward_tokens_hours'] = float(text_input)
+                elif setting == "sess_cnt":
+                    UPLOAD_CONFIG['session_limit_count'] = int(text_input)
+                elif setting == "sess_min":
+                    UPLOAD_CONFIG['session_limit_minutes'] = int(text_input)
                 elif setting == "edit_milestones":
                     new_milestones = {}
                     parts = text_input.replace(" ", "").split(",")
@@ -6156,7 +6380,7 @@ async def monitor_ssrb_verifications(client: Client):
                     await client.send_message(
                         user_id,
                         f"✅ <b>Verification Successful!</b>\n\n"
-                        f"You have received your token from Save Restrict Bot verification! Enjoy! 🍿"
+                        f"You have received your token! It has been added to your bank. Activate it whenever you need access! 🏦"
                     )
                 except Exception as e:
                     logger.warning(f"Failed to notify user {user_id} about ATDB token: {e}")
