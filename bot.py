@@ -62,7 +62,7 @@ class BotConfig:
     FREE_SCROLL_RESET_HOURS = int(os.environ.get('FREE_SCROLL_RESET_HOURS', 6))
     FREE_BATCH_LIMIT = int(os.environ.get('FREE_BATCH_LIMIT', 0))
     FREE_LIMIT_RESET_HOURS = int(os.environ.get('FREE_LIMIT_RESET_HOURS', 12))
-    DAILY_FREE_VIDEOS = int(os.environ.get('DAILY_FREE_VIDEOS', 1))
+    DAILY_FREE_VIDEOS = int(os.environ.get('DAILY_FREE_VIDEOS', 200))
     FREE_VIDEO_RESET_HOURS = int(os.environ.get('FREE_VIDEO_RESET_HOURS', 24))
     TOKEN_ACCESS_HOURS = float(os.environ.get('TOKEN_ACCESS_HOURS', 6.0))
     VERIFICATION_TOKEN_DURATION_HOURS = float(os.environ.get('VERIFICATION_TOKEN_DURATION_HOURS', 6.0))
@@ -258,7 +258,8 @@ admin_data_channel_state = defaultdict(dict)
 active_video_message = {}
 
 # --- User Upload State ---
-user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int}
+user_upload_state = defaultdict(dict) # user_id -> {'in_upload_mode': bool, 'session_uploads': int, 'status_message_id': int}
+upload_inactivity_timers = {} # user_id -> asyncio.Task
 REVIEW_CHAT_ID = None
 UPLOAD_CONFIG = {
     'daily_max': config.UPLOAD_DAILY_MAX,
@@ -287,6 +288,7 @@ BOT_ADMINS = {config.OWNER_ID} # Initialize with Owner ID from config
 DATA_CHANNEL_ID = None
 FORCE_SUB_CHANNELS = [] # List of {'channel_id': int, 'link': str, 'name': str}
 SHORTENER_DISABLED = False
+TOKEN_BUTTON_DISABLED = False
 
 async def load_admins_from_db():
     """Loads admin list from DB and ensures owner is always included."""
@@ -329,6 +331,13 @@ async def load_shortener_setting():
     settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
     SHORTENER_DISABLED = settings_doc.get('shortener_disabled', False) if settings_doc else False
     logger.info(f"Loaded shortener setting: {'Disabled' if SHORTENER_DISABLED else 'Enabled'}")
+
+async def load_token_button_setting():
+    """Loads the token button disabled setting from the database."""
+    global TOKEN_BUTTON_DISABLED
+    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    TOKEN_BUTTON_DISABLED = settings_doc.get('token_button_disabled', False) if settings_doc else False
+    logger.info(f"Loaded token button setting: {'Disabled' if TOKEN_BUTTON_DISABLED else 'Enabled'}")
 
 async def load_upload_config():
     """Loads upload configuration and review chat ID from database."""
@@ -736,8 +745,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     if valid_temp_scrolls:
         return True
 
-    if limit is None:
-        limit = config.DAILY_FREE_VIDEOS
+    effective_limit = config.DAILY_FREE_VIDEOS if (limit is None or limit < config.DAILY_FREE_VIDEOS) else limit
 
     usage = user.get('free_video_usage')
     now = datetime.now(timezone.utc)
@@ -752,7 +760,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
         )
         return True
 
-    return usage.get('count', 0) < limit
+    return usage.get('count', 0) < effective_limit
 
 def mark_free_video_used(user_id: int):
     """Consumes a scroll (permanent or temporary) or increments daily free usage."""
@@ -1077,6 +1085,21 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
             return video, current_video_index + 1, total_videos
         return None, 0, 0
 
+def get_album_videos_by_group_id(media_group_id) -> list[dict]:
+    """Retrieves all non-banned videos belonging to a media_group_id, matching both string and integer IDs."""
+    if not media_group_id:
+        return []
+    query_values = [media_group_id]
+    s_val = str(media_group_id)
+    if s_val not in query_values:
+        query_values.append(s_val)
+    if s_val.isdigit() or (s_val.startswith('-') and s_val[1:].isdigit()):
+        i_val = int(s_val)
+        if i_val not in query_values:
+            query_values.append(i_val)
+
+    return list(media_collection.find({'media_group_id': {'$in': query_values}, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+
 def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dict | None, int, int]:
     """
     Retrieves a video and its position from a specific batch or media album collection.
@@ -1087,7 +1110,7 @@ def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dic
         video_uuids = batch_doc.get('video_uuids', [])
     else:
         # Fallback to look up dynamic album/media_group_id collection
-        album_videos = list(media_collection.find({'media_group_id': batch_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+        album_videos = get_album_videos_by_group_id(batch_id)
         video_uuids = [v['uuid'] for v in album_videos]
 
     total_videos = len(video_uuids)
@@ -1711,8 +1734,9 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         buttons.append([InlineKeyboardButton(v_btn_text, url=ssrb_link)])
         buttons.append([InlineKeyboardButton("📤 Upload & Earn", callback_data="upload_btn")])
 
-    vip_text = "🔴 Get Red Token"
-    buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
+    if not TOKEN_BUTTON_DISABLED:
+        vip_text = "🔴 Get Red Token"
+        buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
         if not remove_tutorial:
@@ -1805,7 +1829,12 @@ def video_nav_keyboard(
         ])
     elif is_batch:
         nav_buttons = [InlineKeyboardButton("⏩ Next Video", callback_data=f"next_batch|{batch_id}|{batch_index}")]
-        if user_id in user_session_history and user_session_history[user_id].get('batch_id') == batch_id and user_session_history[user_id]['position'] > 0:
+        has_prev = batch_index > 0 or (
+            user_id in user_session_history
+            and str(user_session_history[user_id].get('batch_id')) == str(batch_id)
+            and user_session_history[user_id].get('position', 0) > 0
+        )
+        if has_prev:
             nav_buttons.insert(0, InlineKeyboardButton("⏪ Prev Video", callback_data=f"prev_batch|{batch_id}|{batch_index}"))
         buttons.append(nav_buttons)
     else:
@@ -1866,8 +1895,10 @@ def get_premium_only_text() -> str:
         f"💳 Get Red Token for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all benefits instantly! 🚀"
     )
 
-def buy_token_keyboard() -> InlineKeyboardMarkup:
+def buy_token_keyboard() -> InlineKeyboardMarkup or None:
     """Keyboard for buying tokens."""
+    if TOKEN_BUTTON_DISABLED:
+        return None
     btn_text = "🔴 Get Red Token"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(btn_text, url=config.BUY_BOT_URL)]
@@ -2071,8 +2102,7 @@ async def upload_cmd(client: Client, message: Message):
         "Share your videos to earn exclusive access tokens! 🎁\n\n"
         "<b>Steps:</b>\n"
         "1. Tap '📤 Send Video Now' below to pick a category.\n"
-        "2. Send your video(s) directly to this chat.\n"
-        "3. Type /done when finished.\n\n"
+        "2. Send your video(s) directly to this chat.\n\n"
         f"⚡ <b>Instant Reward:</b> You get <b>{UPLOAD_CONFIG['temp_scrolls_amount']} scrolls</b> immediately for each upload! ⏳"
     )
 
@@ -2097,8 +2127,7 @@ async def upload_btn_callback(client: Client, callback_query: CallbackQuery):
         "Share your videos to earn exclusive access tokens! 🎁\n\n"
         "<b>Steps:</b>\n"
         "1. Tap '📤 Send Video Now' below to pick a category.\n"
-        "2. Send your video(s) directly to this chat.\n"
-        "3. Type /done when finished.\n\n"
+        "2. Send your video(s) directly to this chat.\n\n"
         f"⚡ <b>Instant Reward:</b> You get <b>{UPLOAD_CONFIG['temp_scrolls_amount']} scrolls</b> immediately for each upload! ⏳"
     )
 
@@ -2166,7 +2195,7 @@ async def upload_category_selection_callback(client: Client, callback_query: Cal
     await callback_query.message.edit_text(
         f"✅ **Category selected:** `{category}`\n\n"
         "📤 **Now, send your video(s) directly here!**\n"
-        "I will process them one by one. Type /done when finished. ✨"
+        "Send your videos and I will load them into your request list. ✨"
     )
     await callback_query.answer(f"Category set to {category}")
 
@@ -2671,7 +2700,8 @@ async def help_admin_cmd(client: Client, message: Message):
         "- /setreviewchat: Set upload review group\n"
         "- /setshortener: Configure URL shortener\n"
         "- /bypass_limit <sec>: Shortener anti-cheat\n"
-        "- /turnoff_shortener / /turnon_shortener\n\n"
+        "- /turnoff_shortener / /turnon_shortener\n"
+        "- /configtokenbutton: Toggle 'Get Red Token' button visibility\n\n"
         "**Utility & Stats:**\n"
         "- /broadcast (reply): Global broadcast\n"
         "- /stats: General bot stats\n"
@@ -3879,7 +3909,7 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
         if batch_doc:
             video_uuids = batch_doc.get('video_uuids', [])
         else:
-            album_videos = list(media_collection.find({'media_group_id': batch_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+            album_videos = get_album_videos_by_group_id(batch_id)
             video_uuids = [v['uuid'] for v in album_videos]
 
         if not video_uuids:
@@ -4176,7 +4206,7 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
         return
 
     media_group_id = video['media_group_id']
-    album_videos = list(media_collection.find({'media_group_id': media_group_id, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+    album_videos = get_album_videos_by_group_id(media_group_id)
     video_uuids = [v['uuid'] for v in album_videos]
 
     try:
@@ -4186,14 +4216,22 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
 
     await callback_query.answer("Opening collection... 🍿", show_alert=False)
 
+    str_group_id = str(media_group_id)
+
+    prev_session = user_session_history.get(user_id, {})
+    prev_is_get_video = prev_session.get('is_get_video', True)
+    prev_category = prev_session.get('category', "default (all)")
+
     # Initialize batch session in user_session_history
     user_session_history[user_id] = {
         'category': video['category'],
         'videos': video_uuids,
         'position': start_index,
         'is_get_video': False,
-        'batch_id': media_group_id,
-        'original_video_uuid': video_uuid
+        'batch_id': str_group_id,
+        'original_video_uuid': video_uuid,
+        'original_is_get_video': prev_is_get_video,
+        'original_category': prev_category
     }
 
     target_video = album_videos[start_index]
@@ -4206,7 +4244,7 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
         video_data=target_video,
         reply_markup=video_nav_keyboard(
             target_video['uuid'], target_video['category'], user_id,
-            is_batch=True, batch_id=media_group_id, batch_index=start_index
+            is_batch=True, batch_id=str_group_id, batch_index=start_index
         ),
         force_new_message=False
     )
@@ -4255,10 +4293,14 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
 
     # If they are returning from an album collection batch view, reset batch keys and session history
     if session and 'original_video_uuid' in session:
+        orig_is_get_video = session.pop('original_is_get_video', True)
+        orig_category = session.pop('original_category', "default (all)")
         session.pop('batch_id', None)
         session.pop('original_video_uuid', None)
         session['videos'] = [video_uuid]
         session['position'] = 0
+        session['is_get_video'] = orig_is_get_video
+        session['category'] = orig_category
 
     if session.get('is_get_video', False):
         category_name = "default (all)"
@@ -5553,6 +5595,23 @@ async def handle_incoming_videos(client: Client, message: Message):
         await handle_user_upload(client, message)
         return
 
+async def delayed_upload_done_notification(user_id: int, client: Client):
+    """Waits for 10 seconds of silence after a user sends upload videos, then sends completion message as the last message."""
+    try:
+        await asyncio.sleep(10)
+        state = user_upload_state.get(user_id)
+        if state and state.get('in_upload_mode'):
+            await client.send_message(
+                user_id,
+                "📋 **All videos have been loaded into your request list!**\n\nIf there's more, you can send them anytime. ✨"
+            )
+            # Reset status_message_id so future uploads start a fresh single status message
+            state['status_message_id'] = None
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"Error in delayed_upload_done_notification for user {user_id}: {e}", exc_info=True)
+
 async def handle_user_upload(client: Client, message: Message):
     """Processes a video uploaded by a user."""
     user_id = message.from_user.id
@@ -5644,9 +5703,16 @@ async def handle_user_upload(client: Client, message: Message):
         )
         reward_granted = True
 
-    # 7. Notify User
+    # 7. Cancel existing 10-second timer and set a new one
+    if user_id in upload_inactivity_timers:
+        upload_inactivity_timers[user_id].cancel()
+
+    upload_inactivity_timers[user_id] = create_tracked_task(delayed_upload_done_notification(user_id, client))
+
+    # 8. Notify User (Maintain ONE status message per upload session)
     if UPLOAD_CONFIG['auto_give_scrolls']:
-        reward_text = f" You received **{UPLOAD_CONFIG['temp_scrolls_amount']} temporary scrolls** while waiting."
+        total_scrolls_granted = session_count * UPLOAD_CONFIG['temp_scrolls_amount']
+        reward_text = f" You received **+{total_scrolls_granted} temporary scrolls** while waiting."
     else:
         if threshold_met:
             reward_text = ""
@@ -5654,21 +5720,36 @@ async def handle_user_upload(client: Client, message: Message):
             more_needed = min_req - (session_count % min_req)
             reward_text = f"\n\n🚀 **Upload {more_needed} more video(s)** to receive your waiting reward!"
 
+    cat_display = html.escape(category) if category else "Default"
     confirmation = (
         "✅ **Video received! Thank you for contributing.**\n\n"
-        f"Videos uploaded this session: **{session_count}**\n"
-        f"Status: `Pending Approval` ⏳\n\n"
+        f"📦 Videos uploaded this session: **{session_count}**\n"
+        f"🗂️ Category: `{cat_display}`\n"
+        f"⏳ Status: `Pending Approval`\n\n"
         f"Your contribution is under review.{reward_text}"
     )
-    sent_confirmation = await message.reply_text(confirmation)
 
-    # Store confirmation message ID to edit later
+    status_msg_id = user_upload_state[user_id].get('status_message_id')
+    edited = False
+    if status_msg_id:
+        try:
+            await client.edit_message_text(message.chat.id, status_msg_id, confirmation)
+            edited = True
+        except Exception as e:
+            logger.warning(f"Could not edit status message {status_msg_id} for user {user_id}: {e}")
+
+    if not edited:
+        sent_confirmation = await message.reply_text(confirmation)
+        user_upload_state[user_id]['status_message_id'] = sent_confirmation.id
+        status_msg_id = sent_confirmation.id
+
+    # Store confirmation message ID in pending_data
     pending_uploads_collection.update_one(
         {"upload_id": upload_id},
-        {"$set": {"confirmation_message_id": sent_confirmation.id}}
+        {"$set": {"confirmation_message_id": status_msg_id}}
     )
 
-    # 8. Notify Admins
+    # 9. Notify Admins
     await notify_admins_of_upload(client, pending_data)
 
 async def notify_admins_of_upload(client: Client, upload_data: dict):
@@ -6738,6 +6819,139 @@ async def shortener_status_cmd(client: Client, message: Message):
     status = "Disabled 🚫" if SHORTENER_DISABLED else "Enabled 🔓"
     await message.reply(f"📊 <b>URL Shortener Status:</b> {status}")
 
+
+@bot.on_message(filters.command("configtokenbutton") & filters.private & admin_only)
+async def config_token_button_cmd(client: Client, message: Message):
+    """Admin command to configure the visibility of the 'Get Red Token' / purchase button."""
+    global TOKEN_BUTTON_DISABLED
+    args = message.text.split()
+    if len(args) > 1:
+        action = args[1].lower()
+        if action in ["on", "visible", "show", "true", "enable"]:
+            try:
+                settings_collection.update_one(
+                    {'_id': 'bot_settings'},
+                    {'$set': {'token_button_disabled': False}},
+                    upsert=True
+                )
+                TOKEN_BUTTON_DISABLED = False
+                await message.reply("✅ 'Get Red Token' button is now <b>VISIBLE</b> to all users. 👁️")
+                logger.info(f"Admin {message.from_user.id} made token button visible.")
+            except Exception as e:
+                logger.error(f"Error in config_token_button_cmd (enable): {e}", exc_info=True)
+                await message.reply("❌ Failed to update setting. Check logs.")
+        elif action in ["off", "invisible", "hide", "false", "disable"]:
+            try:
+                settings_collection.update_one(
+                    {'_id': 'bot_settings'},
+                    {'$set': {'token_button_disabled': True}},
+                    upsert=True
+                )
+                TOKEN_BUTTON_DISABLED = True
+                await message.reply("✅ 'Get Red Token' button is now <b>INVISIBLE</b> (hidden) for all users. 🕵️")
+                logger.info(f"Admin {message.from_user.id} made token button invisible.")
+            except Exception as e:
+                logger.error(f"Error in config_token_button_cmd (disable): {e}", exc_info=True)
+                await message.reply("❌ Failed to update setting. Check logs.")
+        else:
+            await message.reply("❌ Invalid argument. Use: `on` (visible) or `off` (invisible).")
+        return
+
+    # No arguments: show current status with inline buttons
+    status_text = "🕵️ Invisible (Hidden)" if TOKEN_BUTTON_DISABLED else "👁️ Visible (Shown)"
+    text = (
+        "📊 **Red Token Button Configuration** ⚙️\n\n"
+        f"The 'Get Red Token' button is currently: **{status_text}**\n\n"
+        "Click a button below to change its visibility, or use:\n"
+        "- `/configtokenbutton on` (make visible)\n"
+        "- `/configtokenbutton off` (make invisible)"
+    )
+
+    reply_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("👁️ Make Visible", callback_data="cfg_tkn_btn_on"),
+            InlineKeyboardButton("🕵️ Make Invisible", callback_data="cfg_tkn_btn_off")
+        ]
+    ])
+    await message.reply(text, reply_markup=reply_markup)
+
+
+@bot.on_callback_query(filters.regex(r"^cfg_tkn_btn_on$"))
+async def config_token_button_on_callback(client: Client, callback_query: CallbackQuery):
+    """Callback to make the 'Get Red Token' button visible."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
+        return
+
+    global TOKEN_BUTTON_DISABLED
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'token_button_disabled': False}},
+            upsert=True
+        )
+        TOKEN_BUTTON_DISABLED = False
+        await callback_query.answer("✅ 'Get Red Token' button is now visible!", show_alert=True)
+
+        status_text = "👁️ Visible (Shown)"
+        text = (
+            "📊 **Red Token Button Configuration** ⚙️\n\n"
+            f"The 'Get Red Token' button is currently: **{status_text}**\n\n"
+            "Click a button below to change its visibility, or use:\n"
+            "- `/configtokenbutton on` (make visible)\n"
+            "- `/configtokenbutton off` (make invisible)"
+        )
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👁️ Make Visible", callback_data="cfg_tkn_btn_on"),
+                InlineKeyboardButton("🕵️ Make Invisible", callback_data="cfg_tkn_btn_off")
+            ]
+        ])
+        await callback_query.message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Error in config_token_button_on_callback: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to update setting.", show_alert=True)
+
+
+@bot.on_callback_query(filters.regex(r"^cfg_tkn_btn_off$"))
+async def config_token_button_off_callback(client: Client, callback_query: CallbackQuery):
+    """Callback to make the 'Get Red Token' button invisible."""
+    user_id = callback_query.from_user.id
+    if not is_admin(user_id):
+        await callback_query.answer("❌ Not authorized. 🚫", show_alert=True)
+        return
+
+    global TOKEN_BUTTON_DISABLED
+    try:
+        settings_collection.update_one(
+            {'_id': 'bot_settings'},
+            {'$set': {'token_button_disabled': True}},
+            upsert=True
+        )
+        TOKEN_BUTTON_DISABLED = True
+        await callback_query.answer("✅ 'Get Red Token' button is now invisible!", show_alert=True)
+
+        status_text = "🕵️ Invisible (Hidden)"
+        text = (
+            "📊 **Red Token Button Configuration** ⚙️\n\n"
+            f"The 'Get Red Token' button is currently: **{status_text}**\n\n"
+            "Click a button below to change its visibility, or use:\n"
+            "- `/configtokenbutton on` (make visible)\n"
+            "- `/configtokenbutton off` (make invisible)"
+        )
+        reply_markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("👁️ Make Visible", callback_data="cfg_tkn_btn_on"),
+                InlineKeyboardButton("🕵️ Make Invisible", callback_data="cfg_tkn_btn_off")
+            ]
+        ])
+        await callback_query.message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"Error in config_token_button_off_callback: {e}", exc_info=True)
+        await callback_query.answer("❌ Failed to update setting.", show_alert=True)
+
+
 @bot.on_message(filters.text & filters.private & non_command)
 async def handle_text_input(client: Client, message: Message):
     """Handles text input for various multi-step commands for owner and admins."""
@@ -7412,6 +7626,7 @@ async def run_bot_background():
         await load_data_channel_id()
         await load_force_sub_channels()
         await load_shortener_setting()
+        await load_token_button_setting()
         await load_upload_config()
         await health_check()
         create_tracked_task(cleanup_expired_data())
