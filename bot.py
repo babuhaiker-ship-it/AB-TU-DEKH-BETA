@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 import uuid
 import base64
 import logging
@@ -130,6 +131,14 @@ pending_uploads_collection.create_index([("status", ASCENDING)])
 force_sub_channels_collection.create_index([("channel_id", ASCENDING)], unique=True)
 # FIX: Removed unique=True for _id index as it's redundant and causes an error
 data_channel_collection.create_index([("_id", ASCENDING)])
+
+# Optimization: Indexes for query performance and bottleneck elimination
+media_collection.create_index([("media_group_id", ASCENDING)])
+media_collection.create_index([("sequence_number", ASCENDING)])
+ssrb_verifications_collection.create_index([("is_consumed_by_atdb", ASCENDING)])
+shortener_logs_collection.create_index([("ad_code", ASCENDING)])
+shortener_logs_collection.create_index([("user_id", ASCENDING)])
+tokens_collection.create_index([("expires_at", ASCENDING)])
 
 
 # --- Session Management with MongoDB ---
@@ -817,12 +826,17 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         )
     else:
         text = (
-            "🛑 <b>Access Token Required</b> 🛑\n\n"
-            "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            f"Unlock <b>{int(config.TOKEN_ACCESS_HOURS)} hours</b> of uninterrupted, premium access and keep the vibe going! ✨"
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
         )
-    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
-    await client.send_message(chat_id, text, reply_markup=reply_markup)
+    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id, remove_tutorial=True)
+    await client.send_message(chat_id, text, reply_markup=reply_markup, disable_web_page_preview=True)
 
 # --- Premium Status Check and Notification ---
 async def check_premium_status_and_notify(client: Client, user_id: int):
@@ -961,13 +975,27 @@ def validate_category_name(name: str) -> tuple[bool, str]:
         return False, "Category name cannot be longer than 64 characters."
     return True, ""
 
+# --- Category Cache ---
+_categories_cache = None
+_categories_cache_time = 0
+
+def invalidate_categories_cache():
+    global _categories_cache
+    _categories_cache = None
+
 def get_categories(for_admin_use: bool = False) -> list[str]:
     """
-    Gets all category names.
+    Gets all category names with in-memory caching.
     Prepends 'default (all)' for user-facing lists.
     """
-    categories = [c['name'] for c in categories_collection.find({})]
-    sorted_categories = sorted(list(set(categories)))
+    global _categories_cache, _categories_cache_time
+    now = time.time()
+    if _categories_cache is None or (now - _categories_cache_time) > 30:
+        categories = [c['name'] for c in categories_collection.find({}, {'name': 1})]
+        _categories_cache = sorted(list(set(categories)))
+        _categories_cache_time = now
+
+    sorted_categories = _categories_cache
     if not for_admin_use:
         return ["default (all)"] + sorted_categories
     return sorted_categories
@@ -986,6 +1014,7 @@ def add_category(name: str) -> tuple[bool, str]:
             'name': name,
             'created_at': datetime.now(timezone.utc)
         })
+        invalidate_categories_cache()
         logger.info(f"Category '{name}' added")
         return True, f"Category '{html.escape(name)}' added successfully."
     except Exception as e:
@@ -1004,6 +1033,7 @@ def delete_category(name: str) -> tuple[bool, str, int]:
         deleted_count = result.deleted_count
 
         categories_collection.delete_one({'name': name})
+        invalidate_categories_cache()
         logger.info(f"Category '{name}' and {deleted_count} videos deleted")
         return True, f"Category '{html.escape(name)}' and {deleted_count} videos deleted.", deleted_count
     except Exception as e:
@@ -1017,10 +1047,11 @@ def get_first_video_by_sequence_number(category: str) -> dict | None:
     Retrieves the first video in the specified category based on its sequence_number.
     Filters for valid, non-banned videos with a sequence number.
     """
-    video = media_collection.find_one(
-        {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
-        sort=[('sequence_number', ASCENDING)]
-    )
+    if category == "default (all)":
+        query = {'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}
+    else:
+        query = {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}
+    video = media_collection.find_one(query, sort=[('sequence_number', ASCENDING)])
     return video
 
 def get_video_by_uuid(uuid_: str) -> dict | None:
@@ -1031,11 +1062,12 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
     """
     Retrieves a video and its position (index + total) within its category,
     considering if it's a regular or saved video.
+    Optimized with indexed count queries to prevent loading full collections into memory.
     Returns (video_data, current_position, total_videos).
     """
     if is_saved and user_id is not None:
         user_doc = users_collection.find_one({'user_id': user_id})
-        bookmarked_videos = user_doc.get('bookmarked_videos', [])
+        bookmarked_videos = user_doc.get('bookmarked_videos', []) if user_doc else []
 
         # Filter for the specific category and validity, then sort by bookmarked_at
         filtered_saved_videos = []
@@ -1062,28 +1094,28 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
         return None, 0, 0
 
     else: # Regular category navigation, use sequence_number for ordering
-        all_videos_in_category = list(media_collection.find(
-            {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
-            sort=[('sequence_number', ASCENDING)]
-        ))
+        if category == "default (all)":
+            base_query = {'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}
+        else:
+            base_query = {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}
 
-        total_videos = len(all_videos_in_category)
+        video = media_collection.find_one({'uuid': video_uuid})
+        if not video:
+            return None, 0, 0
+
+        total_videos = media_collection.count_documents(base_query)
         if not total_videos:
             return None, 0, 0
 
-        current_video_index = -1
-        for i, video_doc in enumerate(all_videos_in_category):
-            if video_doc['uuid'] == video_uuid:
-                current_video_index = i
-                break
+        curr_seq = video.get('sequence_number')
+        if curr_seq is None:
+            current_position = 1
+        else:
+            pos_query = base_query.copy()
+            pos_query['sequence_number'] = {'$lte': curr_seq}
+            current_position = media_collection.count_documents(pos_query)
 
-        if current_video_index != -1:
-            video = all_videos_in_category[current_video_index]
-            # Added log for missing sequence_number during navigation
-            if 'sequence_number' not in video:
-                logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number' but is being retrieved for navigation. This indicates a potential data inconsistency or failed migration.")
-            return video, current_video_index + 1, total_videos
-        return None, 0, 0
+        return video, current_position, total_videos
 
 def get_album_videos_by_group_id(media_group_id) -> list[dict]:
     """Retrieves all non-banned videos belonging to a media_group_id, matching both string and integer IDs."""
@@ -1739,8 +1771,8 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        if not remove_tutorial:
-            buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
+        buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
+    elif user_id:
         buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
 
     # Always append the Refresh button when we display the token required/earning screen
@@ -2032,43 +2064,27 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
 # --- Rate Limiting ---
 RATE_LIMIT_WINDOW = 120
 RATE_LIMIT_MAX = 60
+_user_rate_limits = defaultdict(list)
 
 async def is_rate_limited(user_id: int) -> bool:
     """
-    Checks if a user is rate-limited based on their recent requests.
-    Stores request timestamps in MongoDB for persistence.
+    Checks if a user is rate-limited based on their recent requests using in-memory sliding window.
+    Eliminates redundant database round-trips for maximum efficiency.
     """
     if is_admin(user_id):
         return False
 
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
+    now = time.time()
+    cutoff = now - RATE_LIMIT_WINDOW
 
-    try:
-        # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
-        tokens_collection.update_one(
-            {'user_id': user_id},
-            {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
-            upsert=True
-        )
+    timestamps = [t for t in _user_rate_limits[user_id] if t > cutoff]
+    timestamps.append(now)
+    _user_rate_limits[user_id] = timestamps
 
-        # Step 2: Atomically add the new timestamp.
-        tokens_collection.update_one(
-            {'user_id': user_id},
-            {'$push': {'rate_limits': {'timestamp': now}}}
-        )
-
-        # Step 3: Retrieve the document to check the current count.
-        result = tokens_collection.find_one({'user_id': user_id})
-        current_requests = len(result.get('rate_limits', [])) if result else 0
-
-        if current_requests > RATE_LIMIT_MAX:
-            logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"Error in is_rate_limited for user {user_id}: {e}", exc_info=True)
-        return False
+    if len(timestamps) > RATE_LIMIT_MAX:
+        logger.warning(f"User {user_id} is rate limited. Current requests: {len(timestamps)}, Max: {RATE_LIMIT_MAX}")
+        return True
+    return False
 
 # --- Error Handling ---
 async def handle_error(client: Client, message: Message, error: Exception):
@@ -4125,11 +4141,17 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
                 "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         else:
             text = (
-                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
-                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
+                "💡 Information \n\n"
+                " Here's how to get your token! 🚀 \n\n"
+                " Hey 💕 unlimited money hack, \n\n"
+                " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+                " Token Timeout: 24 hours ⏰ \n\n"
+                " What is a token? \n\n"
+                " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+                " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
