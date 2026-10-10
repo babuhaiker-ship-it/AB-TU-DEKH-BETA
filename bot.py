@@ -23,9 +23,9 @@ import urllib.parse
 from shortzy import Shortzy
 
 # --- Mini App / Web Server Imports ---
+from contextlib import asynccontextmanager
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException, Depends, Response
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi import FastAPI, Request, HTTPException, Response
 
 
 # --- Logging Setup ---
@@ -201,7 +201,6 @@ class BotProxy:
 bot = BotProxy()
 
 # --- FastAPI App Initialization with Lifespan ---
-from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1910,11 +1909,6 @@ def video_nav_keyboard(
 
     return InlineKeyboardMarkup(buttons)
 
-def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
-    """Keyboard for displaying a referral link."""
-    # MODIFIED: Removed the copy button as requested
-    return None
-
 def get_premium_only_text() -> str:
     """Returns the text highlighting only Red Token benefits."""
     return (
@@ -2179,7 +2173,6 @@ async def activate_bank_token_callback(client: Client, callback_query: CallbackQ
 @bot.on_callback_query(filters.regex(r"^upl_start_cat$"))
 async def upload_start_category_callback(client: Client, callback_query: CallbackQuery):
     """Prompt user to select a category before uploading."""
-    user_id = callback_query.from_user.id
     categories = get_categories(for_admin_use=True)
     if not categories:
         await callback_query.answer("😔 No categories available for upload at the moment.", show_alert=True)
@@ -5723,8 +5716,6 @@ async def handle_user_upload(client: Client, message: Message):
             {'user_id': user_id},
             {'$push': {'temp_scrolls': temp_scroll_entry}}
         )
-        reward_granted = True
-
     # 7. Cancel existing 10-second timer and set a new one
     if user_id in upload_inactivity_timers:
         upload_inactivity_timers[user_id].cancel()
@@ -6178,7 +6169,7 @@ async def bypass_limit_cmd(client: Client, message: Message):
         )
 
         if seconds == 0:
-            await message.reply(f"✅ Bypass detection has been disabled.")
+            await message.reply("✅ Bypass detection has been disabled.")
             logger.info(f"Admin {user_id} disabled bypass detection.")
         else:
             await message.reply(f"✅ Bypass limit has been updated to {seconds} seconds.")
@@ -7578,7 +7569,7 @@ async def monitor_ssrb_verifications(client: Client):
                     await client.send_message(
                         user_id,
                         f"✅ <b>Verification Successful!</b>\n\n"
-                        f"You now have active access to the bot. Enjoy your watch! 🍿"
+                        "You now have active access to the bot. Enjoy your watch! 🍿"
                     )
                 except Exception as e:
                     logger.warning(f"Failed to notify user {user_id} about ATDB token: {e}")
