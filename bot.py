@@ -133,14 +133,14 @@ data_channel_collection.create_index([("_id", ASCENDING)])
 
 
 # --- Session Management with MongoDB ---
-def get_session_string():
+async def get_session_string():
     """Retrieves the session string from the database."""
-    session_doc = settings_collection.find_one({'_id': 'hydrogram_session'})
+    session_doc = await settings_collection.find_one({'_id': 'hydrogram_session'})
     return session_doc.get('session_string') if session_doc else None
 
-def set_session_string(session_string):
+async def set_session_string(session_string):
     """Saves the session string to the database."""
-    settings_collection.update_one(
+    await settings_collection.update_one(
         {'_id': 'hydrogram_session'},
         {'$set': {'session_string': session_string}},
         upsert=True
@@ -204,7 +204,7 @@ async def lifespan(app: FastAPI):
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         bot_token=config.BOT_TOKEN,
-        session_string=get_session_string(),
+        session_string=await get_session_string(),
         in_memory=True
     )
     bot.initialize(real_bot)
@@ -293,7 +293,7 @@ TOKEN_BUTTON_DISABLED = False
 async def load_admins_from_db():
     """Loads admin list from DB and ensures owner is always included."""
     global BOT_ADMINS
-    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    settings_doc = await settings_collection.find_one({'_id': 'bot_settings'})
     db_admins = settings_doc.get('admins', []) if settings_doc else []
 
     # Cast all loaded admin IDs to int to guarantee type safety for comparison
@@ -311,7 +311,7 @@ async def load_admins_from_db():
 async def load_data_channel_id():
     """Loads the data channel ID from the database."""
     global DATA_CHANNEL_ID
-    data_doc = data_channel_collection.find_one({'_id': 'data_channel'})
+    data_doc = await data_channel_collection.find_one({'_id': 'data_channel'})
     if data_doc:
         DATA_CHANNEL_ID = data_doc.get('channel_id')
         logger.info(f"Loaded data channel ID: {DATA_CHANNEL_ID}")
@@ -322,27 +322,27 @@ async def load_data_channel_id():
 async def load_force_sub_channels():
     """Loads force subscribe channels from the database."""
     global FORCE_SUB_CHANNELS
-    FORCE_SUB_CHANNELS = list(force_sub_channels_collection.find({}))
+    FORCE_SUB_CHANNELS = await force_sub_channels_collection.find({}).to_list(length=None)
     logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} force subscribe channels.")
 
 async def load_shortener_setting():
     """Loads the shortener disabled setting from the database."""
     global SHORTENER_DISABLED
-    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    settings_doc = await settings_collection.find_one({'_id': 'bot_settings'})
     SHORTENER_DISABLED = settings_doc.get('shortener_disabled', False) if settings_doc else False
     logger.info(f"Loaded shortener setting: {'Disabled' if SHORTENER_DISABLED else 'Enabled'}")
 
 async def load_token_button_setting():
     """Loads the token button disabled setting from the database."""
     global TOKEN_BUTTON_DISABLED
-    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    settings_doc = await settings_collection.find_one({'_id': 'bot_settings'})
     TOKEN_BUTTON_DISABLED = settings_doc.get('token_button_disabled', False) if settings_doc else False
     logger.info(f"Loaded token button setting: {'Disabled' if TOKEN_BUTTON_DISABLED else 'Enabled'}")
 
 async def load_upload_config():
     """Loads upload configuration and review chat ID from database."""
     global REVIEW_CHAT_ID, UPLOAD_CONFIG
-    config_doc = settings_collection.find_one({'_id': 'upload_config'})
+    config_doc = await settings_collection.find_one({'_id': 'upload_config'})
     if config_doc:
         UPLOAD_CONFIG.update(config_doc.get('settings', {}))
         REVIEW_CHAT_ID = config_doc.get('review_chat_id')
@@ -471,12 +471,12 @@ def get_fake_like_ratio(video_uuid: str) -> int:
     random.setstate(state)
     return ratio
 
-def get_user_adjusted_fake_ratio(user_id: int, video_uuid: str) -> int:
+async def get_user_adjusted_fake_ratio(user_id: int, video_uuid: str) -> int:
     """Calculates the fake ratio adjusted dynamically by +1-2% or -1-2% if the user has liked/disliked."""
     import random
     base_ratio = get_fake_like_ratio(video_uuid)
 
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     user_ratings = user_doc.get('ratings', {}) if user_doc else {}
     user_rating = user_ratings.get(video_uuid)
 
@@ -535,7 +535,7 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
     Fetches configuration from the database. If no config or API error, returns original URL.
     """
     logger.info(f"Attempting to shorten URL: {long_url}")
-    shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
+    shortener_config = await settings_collection.find_one({'_id': 'shortener_config'})
     logger.info(f"Retrieved shortener_config from DB: {shortener_config}")
 
     if not shortener_config:
@@ -586,7 +586,7 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
         return long_url
 
 # --- Token and Premium Management ---
-def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admin_granted: bool = False, is_activated: bool = False):
+async def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admin_granted: bool = False, is_activated: bool = False):
     """
     Adds a new token for a user with a specified duration.
     Admin-granted tokens (Premium) are activated immediately.
@@ -607,7 +607,7 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
         'is_activated': should_activate
     }
     try:
-        tokens_collection.update_one(
+        await tokens_collection.update_one(
             {'user_id': user_id},
             {'$push': {'tokens': token}},
             upsert=True
@@ -618,10 +618,10 @@ def add_token(user_id: int, duration_seconds: int = config.TOKEN_EXPIRY, is_admi
         logger.error(f"Error adding token for user {user_id}: {e}", exc_info=True)
         return None
 
-def is_premium_user(user_id: int) -> bool:
+async def is_premium_user(user_id: int) -> bool:
     """Checks if a user is a premium user (has an active admin-granted token)."""
     now = datetime.now(timezone.utc)
-    doc = tokens_collection.find_one({'user_id': user_id})
+    doc = await tokens_collection.find_one({'user_id': user_id}, projection={'tokens': 1})
     if not doc or 'tokens' not in doc:
         return False
 
@@ -631,10 +631,10 @@ def is_premium_user(user_id: int) -> bool:
             return True
     return False
 
-def user_has_token(user_id: int) -> bool:
+async def user_has_token(user_id: int) -> bool:
     """Checks if a user has any valid tokens (admin-granted or not) for general access."""
     now = datetime.now(timezone.utc)
-    doc = tokens_collection.find_one({'user_id': user_id})
+    doc = await tokens_collection.find_one({'user_id': user_id}, projection={'tokens': 1})
     if not doc or 'tokens' not in doc:
         return False
 
@@ -655,7 +655,7 @@ def user_has_token(user_id: int) -> bool:
 
         try:
             # Atomically update the specific token in the array
-            result = tokens_collection.update_one(
+            result = await tokens_collection.update_one(
                 {'user_id': user_id, 'tokens.token_id': target_token['token_id']},
                 {'$set': {
                     'tokens.$.is_activated': True,
@@ -671,16 +671,16 @@ def user_has_token(user_id: int) -> bool:
 
     return False
 
-def get_banked_tokens_count(user_id: int) -> int:
+async def get_banked_tokens_count(user_id: int) -> int:
     """Returns the number of unactivated tokens a user has."""
-    doc = tokens_collection.find_one({'user_id': user_id})
+    doc = await tokens_collection.find_one({'user_id': user_id}, projection={'tokens': 1})
     if not doc or 'tokens' not in doc:
         return 0
     return sum(1 for t in doc['tokens'] if not t.get('is_activated', False))
 
 async def activate_bank_token(user_id: int) -> tuple[bool, str]:
     """Activates one banked token for the user."""
-    doc = tokens_collection.find_one({'user_id': user_id})
+    doc = await tokens_collection.find_one({'user_id': user_id}, projection={'tokens': 1})
     if not doc or 'tokens' not in doc:
         return False, "You don't have any tokens to activate."
 
@@ -698,7 +698,7 @@ async def activate_bank_token(user_id: int) -> tuple[bool, str]:
 
     try:
         # Atomically update the specific token in the array
-        result = tokens_collection.update_one(
+        result = await tokens_collection.update_one(
             {'user_id': user_id, 'tokens.token_id': target_token['token_id']},
             {'$set': {
                 'tokens.$.is_activated': True,
@@ -716,13 +716,13 @@ async def activate_bank_token(user_id: int) -> tuple[bool, str]:
         logger.error(f"Error activating token for user {user_id}: {e}", exc_info=True)
         return False, "An error occurred during activation."
 
-def user_can_access_video(user_id: int) -> bool:
+async def user_can_access_video(user_id: int) -> bool:
     """Checks if a user can access video content (is premium or has a token)."""
-    return is_premium_user(user_id) or user_has_token(user_id)
+    return await is_premium_user(user_id) or await user_has_token(user_id)
 
-def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: str = None) -> bool:
+async def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: str = None) -> bool:
     """Checks if a user has daily free video access remaining, including temporary and permanent scrolls."""
-    if is_premium_user(user_id) or user_has_token(user_id):
+    if await is_premium_user(user_id) or await user_has_token(user_id):
         return True
 
     # Allow interacting with the current video even if limit reached (Liking/Sharing the last allowed preview)
@@ -730,7 +730,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     if current_video_uuid and active_menu and active_menu.get('video_uuid') == current_video_uuid:
         return True
 
-    user = users_collection.find_one({'user_id': user_id})
+    user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
     if not user:
         return False
 
@@ -751,7 +751,7 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     now = datetime.now(timezone.utc)
     if not usage or now > usage.get('reset_at', datetime.min.replace(tzinfo=timezone.utc)):
         # Reset usage
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$set': {
                 'free_video_usage.count': 0,
@@ -762,18 +762,18 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
 
     return usage.get('count', 0) < effective_limit
 
-def mark_free_video_used(user_id: int):
+async def mark_free_video_used(user_id: int):
     """Consumes a scroll (permanent or temporary) or increments daily free usage."""
-    if is_premium_user(user_id) or user_has_token(user_id):
+    if await is_premium_user(user_id) or await user_has_token(user_id):
         return
 
-    user = users_collection.find_one({'user_id': user_id})
+    user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
     if not user:
         return
 
     # 1. Try consuming Permanent Scroll
     if user.get('permanent_scrolls', 0) > 0:
-        users_collection.update_one({'user_id': user_id}, {'$inc': {'permanent_scrolls': -1}})
+        await users_collection.update_one({'user_id': user_id}, {'$inc': {'permanent_scrolls': -1}})
         logger.info(f"Consumed 1 permanent scroll for user {user_id}.")
         return
 
@@ -788,7 +788,7 @@ def mark_free_video_used(user_id: int):
         target_idx = valid_indices[0]
 
         # Decrement amount
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$inc': {f'temp_scrolls.{target_idx}.amount': -1}}
         )
@@ -796,7 +796,7 @@ def mark_free_video_used(user_id: int):
         return
 
     # 3. Fallback to daily free usage
-    users_collection.update_one(
+    await users_collection.update_one(
         {'user_id': user_id},
         {'$inc': {'free_video_usage.count': 1}}
     )
@@ -806,7 +806,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
     """Sends a message informing the user they need a token to access content."""
     user_id = chat_id
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+    await shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -821,7 +821,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
             "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
             f"Unlock <b>{int(config.TOKEN_ACCESS_HOURS)} hours</b> of uninterrupted, premium access and keep the vibe going! ✨"
         )
-    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
+    reply_markup = await generate_token_earning_keyboard(ad_url, user_id=user_id)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 # --- Premium Status Check and Notification ---
@@ -830,11 +830,11 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
     Checks user's premium status and sends a notification if they just lost premium.
     Updates the user's last_premium_check_status in DB.
     """
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     if not user_doc:
         return
 
-    current_premium_status = is_premium_user(user_id)
+    current_premium_status = await is_premium_user(user_id)
     last_known_premium_status = user_doc.get('last_premium_check_status', False)
 
     if last_known_premium_status and not current_premium_status:
@@ -847,14 +847,14 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
             logger.error(f"Failed to send premium expiry notification to user {user_id}: {e}")
 
     if current_premium_status != last_known_premium_status:
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$set': {'last_premium_check_status': current_premium_status}}
         )
         logger.info(f"Updated last_premium_check_status for user {user_id} to {current_premium_status}.")
 
 # --- Referral System ---
-def handle_referral(new_user_id: int, ref_code: str) -> int | None:
+async def handle_referral(new_user_id: int, ref_code: str) -> int | None:
     """Handles a new user joining via a referral link, rewarding the referrer."""
     if ref_code.startswith('ref_'):
         try:
@@ -864,11 +864,11 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
             return None
 
         if referrer_id != new_user_id:
-            ref_user = users_collection.find_one({'user_id': referrer_id})
+            ref_user = await users_collection.find_one({'user_id': referrer_id})
             if ref_user:
-                add_token(referrer_id, config.REFERRAL_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
-                users_collection.update_one({'user_id': referrer_id}, {'$inc': {'referral_count': 1}}, upsert=True)
-                users_collection.update_one({'user_id': new_user_id}, {'$set': {'referred_by': referrer_id}}, upsert=True)
+                await add_token(referrer_id, config.REFERRAL_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
+                await users_collection.update_one({'user_id': referrer_id}, {'$inc': {'referral_count': 1}}, upsert=True)
+                await users_collection.update_one({'user_id': new_user_id}, {'$set': {'referred_by': referrer_id}}, upsert=True)
                 logger.info(f"User {new_user_id} successfully referred by {referrer_id}.")
                 return referrer_id
     elif ref_code.startswith('video_'):
@@ -883,11 +883,11 @@ def handle_referral(new_user_id: int, ref_code: str) -> int | None:
                     return None
 
                 if referrer_id != new_user_id:
-                    ref_user = users_collection.find_one({'user_id': referrer_id})
+                    ref_user = await users_collection.find_one({'user_id': referrer_id})
                     if ref_user:
-                        add_token(referrer_id, config.REFERRAL_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
-                        users_collection.update_one({'user_id': referrer_id}, {'$inc': {'referral_count': 1}}, upsert=True)
-                        users_collection.update_one({'user_id': new_user_id}, {'$set': {'referred_by': referrer_id}}, upsert=True)
+                        await add_token(referrer_id, config.REFERRAL_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
+                        await users_collection.update_one({'user_id': referrer_id}, {'$inc': {'referral_count': 1}}, upsert=True)
+                        await users_collection.update_one({'user_id': new_user_id}, {'$set': {'referred_by': referrer_id}}, upsert=True)
                         logger.info(f"User {new_user_id} successfully referred by {referrer_id} via video share.")
                         return referrer_id
         except ValueError:
@@ -907,7 +907,7 @@ async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
     - 50 referrals -> 30 Days Premium (+2592000 seconds, is_admin_granted=True)
     """
     try:
-        user_doc = users_collection.find_one({'user_id': referrer_id})
+        user_doc = await users_collection.find_one({'user_id': referrer_id})
         if not user_doc:
             return
 
@@ -924,10 +924,10 @@ async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
         for req_count, days_reward, duration_seconds, tier_name in milestones:
             if referral_count >= req_count and req_count not in claimed_milestones:
                 # Grant the token
-                add_token_info = add_token(referrer_id, duration_seconds=duration_seconds, is_admin_granted=True)
+                add_token_info = await add_token(referrer_id, duration_seconds=duration_seconds, is_admin_granted=True)
                 if add_token_info:
                     # Update claimed list
-                    users_collection.update_one(
+                    await users_collection.update_one(
                         {'user_id': referrer_id},
                         {
                             '$addToSet': {'claimed_referral_milestones': req_count},
@@ -961,28 +961,28 @@ def validate_category_name(name: str) -> tuple[bool, str]:
         return False, "Category name cannot be longer than 64 characters."
     return True, ""
 
-def get_categories(for_admin_use: bool = False) -> list[str]:
+async def get_categories(for_admin_use: bool = False) -> list[str]:
     """
     Gets all category names.
     Prepends 'default (all)' for user-facing lists.
     """
-    categories = [c['name'] for c in categories_collection.find({})]
+    categories = [c['name'] async for c in categories_collection.find({})]
     sorted_categories = sorted(list(set(categories)))
     if not for_admin_use:
         return ["default (all)"] + sorted_categories
     return sorted_categories
 
-def add_category(name: str) -> tuple[bool, str]:
+async def add_category(name: str) -> tuple[bool, str]:
     """Adds a new category. Returns (success, message)"""
     try:
         valid, error = validate_category_name(name)
         if not valid:
             return False, error
 
-        if categories_collection.find_one({'name': name}):
+        if await categories_collection.find_one({'name': name}):
             return False, f"Category '{html.escape(name)}' already exists."
 
-        categories_collection.insert_one({
+        await categories_collection.insert_one({
             'name': name,
             'created_at': datetime.now(timezone.utc)
         })
@@ -992,18 +992,18 @@ def add_category(name: str) -> tuple[bool, str]:
         logger.error(f"Error adding category '{name}': {e}")
         return False, "Failed to add category. Please try again."
 
-def delete_category(name: str) -> tuple[bool, str, int]:
+async def delete_category(name: str) -> tuple[bool, str, int]:
     """Deletes a category and its associated videos. Returns (success, message, deleted_count)"""
     if name == "default (all)":
         return False, "The 'default (all)' category cannot be deleted.", 0
     try:
-        if not categories_collection.find_one({'name': name}):
+        if not await categories_collection.find_one({'name': name}):
             return False, f"Category '{html.escape(name)}' does not exist."
 
-        result = media_collection.delete_many({'category': name})
+        result = await media_collection.delete_many({'category': name})
         deleted_count = result.deleted_count
 
-        categories_collection.delete_one({'name': name})
+        await categories_collection.delete_one({'name': name})
         logger.info(f"Category '{name}' and {deleted_count} videos deleted")
         return True, f"Category '{html.escape(name)}' and {deleted_count} videos deleted.", deleted_count
     except Exception as e:
@@ -1012,38 +1012,44 @@ def delete_category(name: str) -> tuple[bool, str, int]:
 
 # --- Video Navigation ---
 
-def get_first_video_by_sequence_number(category: str) -> dict | None:
+async def get_first_video_by_sequence_number(category: str) -> dict | None:
     """
     Retrieves the first video in the specified category based on its sequence_number.
     Filters for valid, non-banned videos with a sequence number.
     """
-    video = media_collection.find_one(
+    video = await media_collection.find_one(
         {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
         sort=[('sequence_number', ASCENDING)]
     )
     return video
 
-def get_video_by_uuid(uuid_: str) -> dict | None:
+async def get_video_by_uuid(uuid_: str) -> dict | None:
     """Retrieves a video by its UUID."""
-    return media_collection.find_one({'uuid': uuid_})
+    return await media_collection.find_one({'uuid': uuid_})
 
-def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_id: int = None) -> tuple[dict | None, int, int]:
+async def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_id: int = None) -> tuple[dict | None, int, int]:
     """
     Retrieves a video and its position (index + total) within its category,
     considering if it's a regular or saved video.
     Returns (video_data, current_position, total_videos).
     """
     if is_saved and user_id is not None:
-        user_doc = users_collection.find_one({'user_id': user_id})
+        user_doc = await users_collection.find_one({'user_id': user_id}, projection={'bookmarked_videos': 1})
+        if not user_doc:
+            return None, 0, 0
         bookmarked_videos = user_doc.get('bookmarked_videos', [])
+        bm_uuids = [bm['uuid'] for bm in bookmarked_videos if isinstance(bm, dict) and 'uuid' in bm]
+        if not bm_uuids:
+            return None, 0, 0
 
-        # Filter for the specific category and validity, then sort by bookmarked_at
-        filtered_saved_videos = []
-        for bookmark in bookmarked_videos:
-            video_data = get_video_by_uuid(bookmark['uuid'])
-            if video_data and video_data.get('category') == category:
-                filtered_saved_videos.append(bookmark)
+        # Fetch valid saved video UUIDs in single batch query instead of N queries
+        valid_videos = await media_collection.find(
+            {'uuid': {'$in': bm_uuids}, 'category': category, 'banned': {'$ne': True}},
+            projection={'uuid': 1}
+        ).to_list(length=len(bm_uuids))
+        valid_uuid_set = {v['uuid'] for v in valid_videos}
 
+        filtered_saved_videos = [bm for bm in bookmarked_videos if isinstance(bm, dict) and bm.get('uuid') in valid_uuid_set]
         filtered_saved_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)))
 
         total_videos = len(filtered_saved_videos)
@@ -1052,40 +1058,44 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
 
         current_video_index = -1
         for i, entry in enumerate(filtered_saved_videos):
-            if entry['uuid'] == video_uuid:
+            if entry.get('uuid') == video_uuid:
                 current_video_index = i
                 break
 
         if current_video_index != -1:
-            video = get_video_by_uuid(video_uuid)
+            video = await get_video_by_uuid(video_uuid)
             return video, current_video_index + 1, total_videos
         return None, 0, 0
 
     else: # Regular category navigation, use sequence_number for ordering
-        all_videos_in_category = list(media_collection.find(
-            {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
-            sort=[('sequence_number', ASCENDING)]
-        ))
+        video = await media_collection.find_one({'uuid': video_uuid, 'category': category, 'banned': {'$ne': True}})
+        if not video:
+            video = await get_video_by_uuid(video_uuid)
+            if not video or video.get('banned'):
+                return None, 0, 0
 
-        total_videos = len(all_videos_in_category)
-        if not total_videos:
-            return None, 0, 0
+        current_seq = video.get('sequence_number')
+        if current_seq is None:
+            total_videos = await media_collection.count_documents({
+                'category': category,
+                'sequence_number': {'$exists': True, '$ne': None},
+                'banned': {'$ne': True}
+            })
+            return video, 1, max(1, total_videos)
 
-        current_video_index = -1
-        for i, video_doc in enumerate(all_videos_in_category):
-            if video_doc['uuid'] == video_uuid:
-                current_video_index = i
-                break
+        prev_count = await media_collection.count_documents({
+            'category': category,
+            'sequence_number': {'$lt': current_seq},
+            'banned': {'$ne': True}
+        })
+        total_videos = await media_collection.count_documents({
+            'category': category,
+            'sequence_number': {'$exists': True, '$ne': None},
+            'banned': {'$ne': True}
+        })
+        return video, prev_count + 1, total_videos
 
-        if current_video_index != -1:
-            video = all_videos_in_category[current_video_index]
-            # Added log for missing sequence_number during navigation
-            if 'sequence_number' not in video:
-                logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number' but is being retrieved for navigation. This indicates a potential data inconsistency or failed migration.")
-            return video, current_video_index + 1, total_videos
-        return None, 0, 0
-
-def get_album_videos_by_group_id(media_group_id) -> list[dict]:
+async def get_album_videos_by_group_id(media_group_id) -> list[dict]:
     """Retrieves all non-banned videos belonging to a media_group_id, matching both string and integer IDs."""
     if not media_group_id:
         return []
@@ -1098,19 +1108,19 @@ def get_album_videos_by_group_id(media_group_id) -> list[dict]:
         if i_val not in query_values:
             query_values.append(i_val)
 
-    return list(media_collection.find({'media_group_id': {'$in': query_values}, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING))
+    return await media_collection.find({'media_group_id': {'$in': query_values}, 'banned': {'$ne': True}}).sort('sequence_number', ASCENDING).to_list(length=None)
 
-def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dict | None, int, int]:
+async def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dict | None, int, int]:
     """
     Retrieves a video and its position from a specific batch or media album collection.
     Returns (video_data, current_position, total_videos).
     """
-    batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
+    batch_doc = await video_batches_collection.find_one({'batch_id': batch_id})
     if batch_doc:
         video_uuids = batch_doc.get('video_uuids', [])
     else:
         # Fallback to look up dynamic album/media_group_id collection
-        album_videos = get_album_videos_by_group_id(batch_id)
+        album_videos = await get_album_videos_by_group_id(batch_id)
         video_uuids = [v['uuid'] for v in album_videos]
 
     total_videos = len(video_uuids)
@@ -1118,24 +1128,24 @@ def get_video_and_position_batch(batch_id: str, current_index: int) -> tuple[dic
         return None, 0, 0
 
     video_uuid = video_uuids[current_index]
-    video = get_video_by_uuid(video_uuid)
+    video = await get_video_by_uuid(video_uuid)
 
     return video, current_index + 1, total_videos
 
-def get_next_video_chronological(current_uuid: str, category: str) -> dict | None:
+async def get_next_video_chronological(current_uuid: str, category: str) -> dict | None:
     """
     Retrieves the video immediately after the current video in the same category,
     based on sequence_number. Loops to the first video if at the end.
     """
-    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
+    current_video = await media_collection.find_one({'uuid': current_uuid, 'category': category})
     if not current_video or 'sequence_number' not in current_video:
         logger.warning(f"Current video {current_uuid} not found or missing sequence_number for next chronological lookup. Attempting to get first video.")
-        return get_first_video_by_sequence_number(category)
+        return await get_first_video_by_sequence_number(category)
 
     current_sequence = current_video['sequence_number']
 
     # Find the next video with a sequence number strictly greater than the current one
-    next_video = media_collection.find_one(
+    next_video = await media_collection.find_one(
         {'category': category, 'sequence_number': {'$gt': current_sequence}, 'banned': {'$ne': True}},
         sort=[('sequence_number', ASCENDING)]
     )
@@ -1145,17 +1155,17 @@ def get_next_video_chronological(current_uuid: str, category: str) -> dict | Non
         return next_video
     else:
         logger.info(f"End of videos reached for category '{category}'. Looping to first video.")
-        return get_first_video_by_sequence_number(category)
+        return await get_first_video_by_sequence_number(category)
 
-def get_previous_video_chronological(current_uuid: str, category: str) -> dict | None:
+async def get_previous_video_chronological(current_uuid: str, category: str) -> dict | None:
     """
     Retrieves the video immediately before the current video in the same category,
     based on sequence_number. Loops to the last video if at the beginning.
     """
-    current_video = media_collection.find_one({'uuid': current_uuid, 'category': category})
+    current_video = await media_collection.find_one({'uuid': current_uuid, 'category': category})
     if not current_video or 'sequence_number' not in current_video:
         logger.warning(f"Current video {current_uuid} not found or missing sequence_number for previous chronological lookup. Attempting to get last video.")
-        return media_collection.find_one(
+        return await media_collection.find_one(
             {'category': category},
             sort=[('sequence_number', DESCENDING)]
         )
@@ -1163,7 +1173,7 @@ def get_previous_video_chronological(current_uuid: str, category: str) -> dict |
     current_sequence = current_video['sequence_number']
 
     # Find the previous video with a sequence number strictly less than the current one
-    prev_video = media_collection.find_one(
+    prev_video = await media_collection.find_one(
         {'category': category, 'sequence_number': {'$lt': current_sequence}, 'banned': {'$ne': True}},
         sort=[('sequence_number', DESCENDING)] # Sort descending to get the largest sequence_number less than current
     )
@@ -1173,17 +1183,17 @@ def get_previous_video_chronological(current_uuid: str, category: str) -> dict |
         return prev_video
     else:
         logger.info(f"Beginning of videos reached for category '{category}'. Looping to last video.")
-        return media_collection.find_one(
+        return await media_collection.find_one(
             {'category': category},
             sort=[('sequence_number', DESCENDING)]
         )
 
-def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+async def get_next_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
     """
     Retrieves the next saved video for a user in a specific category,
     based on their bookmarking order. Loops to the first if at the end.
     """
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     if not user_doc or not user_doc.get('bookmarked_videos'):
         return None
 
@@ -1192,7 +1202,7 @@ def get_next_saved_video_chronological(user_id: int, current_uuid: str, category
     # Filter for the specific category and validity, then sort by bookmarked_at
     filtered_saved_videos = []
     for bookmark in bookmarked_videos:
-        video_data = get_video_by_uuid(bookmark['uuid'])
+        video_data = await get_video_by_uuid(bookmark['uuid'])
         if video_data and video_data.get('category') == category:
             filtered_saved_videos.append(bookmark)
 
@@ -1209,19 +1219,19 @@ def get_next_saved_video_chronological(user_id: int, current_uuid: str, category
 
     if current_video_index == -1: # Current video not found in the filtered list, return first
         logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning first saved video in category {category}.")
-        return get_video_by_uuid(filtered_saved_videos[0]['uuid'])
+        return await get_video_by_uuid(filtered_saved_videos[0]['uuid'])
 
     next_index = (current_video_index + 1) % len(filtered_saved_videos)
     next_video_uuid = filtered_saved_videos[next_index]['uuid']
 
-    return get_video_by_uuid(next_video_uuid)
+    return await get_video_by_uuid(next_video_uuid)
 
-def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
+async def get_previous_saved_video_chronological(user_id: int, current_uuid: str, category: str) -> dict | None:
     """
     Retrieves the previous saved video for a user in a specific category,
     based on their bookmarking order. Loops to the last if at the beginning.
     """
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     if not user_doc or not user_doc.get('bookmarked_videos'):
         return None
 
@@ -1230,7 +1240,7 @@ def get_previous_saved_video_chronological(user_id: int, current_uuid: str, cate
     # Filter for the specific category and validity, then sort by bookmarked_at
     filtered_saved_videos = []
     for bookmark in bookmarked_videos:
-        video_data = get_video_by_uuid(bookmark['uuid'])
+        video_data = await get_video_by_uuid(bookmark['uuid'])
         if video_data and video_data.get('category') == category:
             filtered_saved_videos.append(bookmark)
 
@@ -1247,39 +1257,39 @@ def get_previous_saved_video_chronological(user_id: int, current_uuid: str, cate
 
     if current_video_index == -1: # Current video not found in the filtered list, return last
         logger.warning(f"Current saved video {current_uuid} not found in filtered list for user {user_id}. Returning last saved video in category {category}.")
-        return get_video_by_uuid(filtered_saved_videos[-1]['uuid'])
+        return await get_video_by_uuid(filtered_saved_videos[-1]['uuid'])
 
     prev_index = (current_video_index - 1 + len(filtered_saved_videos)) % len(filtered_saved_videos)
     prev_video_uuid = filtered_saved_videos[prev_index]['uuid']
 
-    return get_video_by_uuid(prev_video_uuid)
+    return await get_video_by_uuid(prev_video_uuid)
 
 
-def get_random_video() -> dict | None:
+async def get_random_video() -> dict | None:
     """Retrieves one random video from the entire collection (valid and non-banned only)."""
     pipeline = [
         {'$match': {'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}},
         {'$sample': {'size': 1}}
     ]
-    random_videos = list(media_collection.aggregate(pipeline))
+    random_videos = await media_collection.aggregate(pipeline).to_list(length=None)
     if random_videos:
         return random_videos[0]
     return None
 
-def get_random_video_from_different_category(exclude_category: str) -> dict | None:
+async def get_random_video_from_different_category(exclude_category: str) -> dict | None:
     """Retrieves one random video from any category except the excluded one (valid and non-banned only)."""
     pipeline = [
         {'$match': {'category': {'$ne': exclude_category}, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}},
         {'$sample': {'size': 1}}
     ]
-    random_videos = list(media_collection.aggregate(pipeline))
+    random_videos = await media_collection.aggregate(pipeline).to_list(length=None)
     if random_videos:
         return random_videos[0]
     # Fallback in case the only videos available are from the excluded category
-    return get_random_video()
+    return await get_random_video()
 
 
-def save_history(user_id: int, video_uuid: str, category: str):
+async def save_history(user_id: int, video_uuid: str, category: str):
     """
     Saves a video viewing entry to a user's general history (limited to 100 entries)
     AND updates the last viewed video for the specific category.
@@ -1287,7 +1297,7 @@ def save_history(user_id: int, video_uuid: str, category: str):
     now = datetime.now(timezone.utc)
     entry = {'video_uuid': video_uuid, 'category': category, 'viewed_at': now}
     try:
-        history_collection.update_one(
+        await history_collection.update_one(
             {'user_id': user_id},
             {'$push': {'history': {'$each': [entry], '$slice': -100}}},
             upsert=True
@@ -1295,7 +1305,7 @@ def save_history(user_id: int, video_uuid: str, category: str):
         logger.info(f"General history saved for user {user_id}, video {video_uuid}. History size limited to 100.")
 
         if category != "default (all)":
-            users_collection.update_one(
+            await users_collection.update_one(
                 {'user_id': user_id},
                 {'$set': {f'last_viewed_per_category.{category}': video_uuid}},
                 upsert=True
@@ -1335,7 +1345,7 @@ async def delete_current_active_menu(client: Client, user_id: int):
         clear_active_video_message(user_id)
 
 # --- Real-time self-healing functions ---
-def rearrange_sequences_after_deletion(category: str, deleted_sequence_number: int):
+async def rearrange_sequences_after_deletion(category: str, deleted_sequence_number: int):
     """
     Decrements sequence numbers for all videos in a category that come after a deleted video.
     This is a synchronous function for use within async contexts.
@@ -1385,32 +1395,32 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
 
     try:
         # 1. Delete from media collection
-        result = media_collection.delete_one({'uuid': video_uuid})
+        result = await media_collection.delete_one({'uuid': video_uuid})
         if result.deleted_count > 0:
             logger.info(f"Successfully deleted video {video_uuid} from media_collection.")
 
             # 2. Rearrange sequences
             if category and sequence_number is not None:
-                rearrange_sequences_after_deletion(category, sequence_number)
+                await rearrange_sequences_after_deletion(category, sequence_number)
             else:
                 logger.warning(f"Skipping sequence rearrangement for {video_uuid}: category or sequence_number missing.")
 
             # 3. Clean up user bookmarks
-            users_collection.update_many(
+            await users_collection.update_many(
                 {},
                 {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
             )
             logger.info(f"Removed video {video_uuid} from all users' bookmarked_videos.")
 
             # 4. Clean up user history
-            history_collection.update_many(
+            await history_collection.update_many(
                 {},
                 {'$pull': {'history': {'video_uuid': video_uuid}}}
             )
             logger.info(f"Removed video {video_uuid} from all users' history.")
 
             # 5. Clean up last_viewed_per_category
-            all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
+            all_users_with_last_viewed = await users_collection.find({'last_viewed_per_category': {'$exists': True}}).to_list(length=None)
             for user_doc in all_users_with_last_viewed:
                 user_id_to_update = user_doc['user_id']
                 updated_last_viewed = {}
@@ -1421,7 +1431,7 @@ async def delete_broken_video_from_db_and_channel(client: Client, video_uuid: st
                     else:
                         updated_last_viewed[cat] = vid_uuid_in_map
                 if changed:
-                    users_collection.update_one(
+                    await users_collection.update_one(
                         {'user_id': user_id_to_update},
                         {'$set': {'last_viewed_per_category': updated_last_viewed}}
                     )
@@ -1478,7 +1488,7 @@ async def send_and_replace_message(
     Returns (success: bool, sent_message: Message | error_message: str)
     """
     sent_message = None
-    settings = settings_collection.find_one({'_id': 'settings'}) or {}
+    settings = await settings_collection.find_one({'_id': 'settings'}) or {}
     protect_content_for_user = settings.get('protect_content', True)
 
     if new_message_type == "video" and not DATA_CHANNEL_ID:
@@ -1490,7 +1500,7 @@ async def send_and_replace_message(
     if new_message_type == "video" and video_data:
         current_position, total_videos = 0, 0
         if is_batch:
-            _, current_position, total_videos = get_video_and_position_batch(batch_id, batch_index)
+            _, current_position, total_videos = await get_video_and_position_batch(batch_id, batch_index)
         else:
             is_saved_from_markup = False
             if reply_markup:
@@ -1503,7 +1513,7 @@ async def send_and_replace_message(
                                 break
                     if is_saved_from_markup:
                         break
-            _, current_position, total_videos = get_video_and_position(
+            _, current_position, total_videos = await get_video_and_position(
                 video_data['uuid'], video_data.get('category'), is_saved_from_markup, chat_id
             )
 
@@ -1514,7 +1524,7 @@ async def send_and_replace_message(
 
         if not is_batch and not is_saved_from_markup:
             # It's the Get Video menu! Use our premium layout with fake like ratio
-            fake_ratio = get_user_adjusted_fake_ratio(chat_id, video_data['uuid'])
+            fake_ratio = await get_user_adjusted_fake_ratio(chat_id, video_data['uuid'])
             caption_text = (
                 f"🎬 <b>Now Playing: {html.escape(category_name)} Collection</b>\n"
                 f"📦 <code>#{current_position}/{total_videos}</code> • ❤️ <code>{fake_ratio}% liked</code>\n"
@@ -1571,7 +1581,7 @@ async def send_and_replace_message(
                     healed_message = await client.get_messages(DATA_CHANNEL_ID, message_id_in_channel)
                     if not healed_message or not healed_message.video: raise ValueError("Failed to fetch healed message.")
                     new_file_id = healed_message.video.file_id
-                    media_collection.update_one({'uuid': video_data['uuid']}, {'$set': {'file_id': new_file_id}})
+                    await media_collection.update_one({'uuid': video_data['uuid']}, {'$set': {'file_id': new_file_id}})
                     video_data['file_id'] = new_file_id
                     logger.info(f"DB updated with new file_id for {video_data['uuid']}. Retrying edit.")
 
@@ -1643,7 +1653,7 @@ async def send_and_replace_message(
                         new_file_id = healed_message.video.file_id
                         logger.info(f"Successfully obtained new file_id for video {video_data['uuid']}: {new_file_id}")
 
-                        media_collection.update_one(
+                        await media_collection.update_one(
                             {'uuid': video_data['uuid']},
                             {'$set': {'file_id': new_file_id}}
                         )
@@ -1716,12 +1726,12 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
-def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None, remove_tutorial: bool = False) -> InlineKeyboardMarkup:
+async def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None, remove_tutorial: bool = False) -> InlineKeyboardMarkup:
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = []
 
     if user_id:
-        banked_count = get_banked_tokens_count(user_id)
+        banked_count = await get_banked_tokens_count(user_id)
         if banked_count > 0:
             buttons.append([InlineKeyboardButton(f"🔋 Activate Token (Bank: {banked_count})", callback_data="activate_bank_token")])
 
@@ -1747,9 +1757,9 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
     buttons.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
 
-def category_keyboard() -> InlineKeyboardMarkup:
+async def category_keyboard() -> InlineKeyboardMarkup:
     """Keyboard for selecting video categories, with 3 buttons per row."""
-    cats = get_categories()
+    cats = await get_categories()
     if not cats:
         return InlineKeyboardMarkup([[InlineKeyboardButton("😔 No Categories Available", callback_data="no_cat")]])
 
@@ -1767,7 +1777,7 @@ def category_keyboard() -> InlineKeyboardMarkup:
     # Removed "🔖 Saved Videos" from this keyboard as it's now a main menu button
     return InlineKeyboardMarkup(buttons)
 
-def video_nav_keyboard(
+async def video_nav_keyboard(
     video_uuid: str,
     category: str,
     user_id: int,
@@ -1784,7 +1794,7 @@ def video_nav_keyboard(
     buttons = []
 
     if media_group_id is None:
-        video_doc = media_collection.find_one({'uuid': video_uuid}, {'media_group_id': 1})
+        video_doc = await media_collection.find_one({'uuid': video_uuid}, {'media_group_id': 1})
         if video_doc:
             media_group_id = video_doc.get('media_group_id')
 
@@ -1904,11 +1914,11 @@ def buy_token_keyboard() -> InlineKeyboardMarkup or None:
         [InlineKeyboardButton(btn_text, url=config.BUY_BOT_URL)]
     ])
 
-def saved_category_keyboard(user_id: int) -> InlineKeyboardMarkup:
+async def saved_category_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """
     Generates an inline keyboard with categories from which the user has saved videos.
     """
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     if not user_doc or not user_doc.get('bookmarked_videos'):
         return InlineKeyboardMarkup([[InlineKeyboardButton("😔 No Saved Videos Yet", callback_data="no_saved_videos")]])
 
@@ -1917,7 +1927,7 @@ def saved_category_keyboard(user_id: int) -> InlineKeyboardMarkup:
     # Get unique categories from bookmarked videos
     saved_categories = set()
     for bookmark in bookmarked_videos:
-        video_data = get_video_by_uuid(bookmark['uuid'])
+        video_data = await get_video_by_uuid(bookmark['uuid'])
         if video_data and video_data.get('category'):
             saved_categories.add(video_data['category'])
 
@@ -1945,7 +1955,7 @@ async def handle_shared_video(client: Client, user_id: int, video_uuid: str) -> 
     Returns (success: bool, result: dict | str), where result is video data on success, or an error message on failure.
     """
     logger.info(f"Handling shared video request: user_id={user_id}, video_uuid={video_uuid}")
-    video = get_video_by_uuid(video_uuid)
+    video = await get_video_by_uuid(video_uuid)
     if not video:
         logger.warning(f"User {user_id} attempted to view non-existent shared video. UUID requested: '{video_uuid}'")
         return False, "Oops, invalid link. Try again! 😔"
@@ -1965,27 +1975,27 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
         if await is_rate_limited(user_id):
             return False, "⚠️ You're refreshing too quickly. Please wait a minute and try again. ⏳"
 
-        if is_premium_user(user_id):
+        if await is_premium_user(user_id):
             logger.info(f"User {user_id} attempted token refresh but already has valid premium access.")
             return False, "💡 You already have active premium access. No need to refresh yet! Enjoy the videos! 🥳"
 
         # Bypass detection logic
-        settings = settings_collection.find_one({'_id': 'bot_settings'})
+        settings = await settings_collection.find_one({'_id': 'bot_settings'})
         bypass_limit_seconds = settings.get('bypass_limit_seconds', 0) if settings else 0
 
         if bypass_limit_seconds > 0:
-            log_entry = shortener_logs_collection.find_one({'ad_code': ad_code, 'user_id': user_id})
+            log_entry = await shortener_logs_collection.find_one({'ad_code': ad_code, 'user_id': user_id})
             if log_entry:
                 time_elapsed = (datetime.now(timezone.utc) - log_entry['created_at']).total_seconds()
                 if time_elapsed < bypass_limit_seconds:
                     logger.warning(f"Bypass detected for user {user_id}. Time elapsed: {time_elapsed}s, Limit: {bypass_limit_seconds}s")
 
                     # Invalidate the current token log
-                    shortener_logs_collection.delete_one({'ad_code': ad_code})
+                    await shortener_logs_collection.delete_one({'ad_code': ad_code})
 
                     # Generate a new token and link
                     new_ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-                    shortener_logs_collection.insert_one({'ad_code': new_ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+                    await shortener_logs_collection.insert_one({'ad_code': new_ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
                     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{new_ad_code}"
                     new_ad_url = await get_shortener_config_and_shorten_url(long_url)
 
@@ -2014,13 +2024,13 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             logger.warning(f"User {user_id} attempted to use another user's token refresh link ({code_user_id}).")
             return False, "This Token Is Not For You 😠\n\nor maybe you are using 2 telegram apps, if yes then please uninstall this one and try again."
 
-        if refresh_tokens_used_collection.find_one({'ad_code': ad_code}):
+        if await refresh_tokens_used_collection.find_one({'ad_code': ad_code}):
             logger.warning(f"User {user_id} attempted to reuse token refresh link: {ad_code}")
             return False, "This token refresh link has already been used. Please generate a new one. 🔄"
 
-        added_token = add_token(user_id, config.REFRESH_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
+        added_token = await add_token(user_id, config.REFRESH_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
         if added_token:
-            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
+            await refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
             logger.info(f"Token added for user {user_id} via refresh. Token is banked.")
             return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. It has been added to your bank. Activate it whenever you need access! 🏦"
         else:
@@ -2046,20 +2056,20 @@ async def is_rate_limited(user_id: int) -> bool:
 
     try:
         # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
-        tokens_collection.update_one(
+        await tokens_collection.update_one(
             {'user_id': user_id},
             {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
             upsert=True
         )
 
         # Step 2: Atomically add the new timestamp.
-        tokens_collection.update_one(
+        await tokens_collection.update_one(
             {'user_id': user_id},
             {'$push': {'rate_limits': {'timestamp': now}}}
         )
 
         # Step 3: Retrieve the document to check the current count.
-        result = tokens_collection.find_one({'user_id': user_id})
+        result = await tokens_collection.find_one({'user_id': user_id})
         current_requests = len(result.get('rate_limits', [])) if result else 0
 
         if current_requests > RATE_LIMIT_MAX:
@@ -2155,7 +2165,7 @@ async def activate_bank_token_callback(client: Client, callback_query: CallbackQ
         is_pending = "Access Token Required" in callback_query.message.text or "Almost there" in callback_query.message.text
 
         await callback_query.message.edit_reply_markup(
-            reply_markup=generate_token_earning_keyboard(ad_url, is_pending_content=is_pending, user_id=user_id)
+            reply_markup=await generate_token_earning_keyboard(ad_url, is_pending_content=is_pending, user_id=user_id)
         )
     else:
         await callback_query.answer(message, show_alert=True)
@@ -2164,7 +2174,7 @@ async def activate_bank_token_callback(client: Client, callback_query: CallbackQ
 async def upload_start_category_callback(client: Client, callback_query: CallbackQuery):
     """Prompt user to select a category before uploading."""
     user_id = callback_query.from_user.id
-    categories = get_categories(for_admin_use=True)
+    categories = await get_categories(for_admin_use=True)
     if not categories:
         await callback_query.answer("😔 No categories available for upload at the moment.", show_alert=True)
         return
@@ -2203,7 +2213,7 @@ async def upload_category_selection_callback(client: Client, callback_query: Cal
 async def my_uploads_cmd(client: Client, message: Message):
     """Shows the user their pending uploads."""
     user_id = message.from_user.id
-    pending = list(pending_uploads_collection.find({"user_id": user_id, "status": "pending"}).sort("submitted_at", DESCENDING))
+    pending = await pending_uploads_collection.find({"user_id": user_id, "status": "pending"}).sort("submitted_at", DESCENDING).to_list(length=None)
 
     if not pending:
         await message.reply("You have no pending uploads at the moment. ❤️")
@@ -2233,11 +2243,11 @@ async def start_cmd(client: Client, message: Message):
         deep_link_arg = args[1] if len(args) > 1 else None
 
         # --- Step 1: Handle new user registration and token grant immediately ---
-        user = users_collection.find_one({'user_id': user_id})
+        user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
         is_new_user = not user
         if is_new_user:
             username_safe = html.escape(message.from_user.username) if message.from_user.username else ""
-            users_collection.insert_one({
+            await users_collection.insert_one({
                 'user_id': user_id, 'username': username_safe, 'first_name': first_name_safe,
                 'last_name': html.escape(message.from_user.last_name) if message.from_user.last_name else None,
                 'joined_date': datetime.now(timezone.utc), 'referral_count': 0, 'bookmarked_videos': [],
@@ -2257,12 +2267,12 @@ async def start_cmd(client: Client, message: Message):
                 }
             })
             # Grant 2 days active normal token to new user
-            add_token(user_id, duration_seconds=172800, is_admin_granted=False, is_activated=True)
+            await add_token(user_id, duration_seconds=172800, is_admin_granted=False, is_activated=True)
             logger.info(f"New user registered: {user_id}, received 2-day active normal token and {config.NEW_USER_SCROLLS} free scrolls.")
 
             # Handle referral for the newly created user
             if deep_link_arg:
-                referrer_id = handle_referral(user_id, deep_link_arg)
+                referrer_id = await handle_referral(user_id, deep_link_arg)
                 if referrer_id:
                     try:
                         await client.send_message(
@@ -2275,12 +2285,12 @@ async def start_cmd(client: Client, message: Message):
                     # Check and grant any unlocked milestone rewards
                     create_tracked_task(check_and_grant_referral_milestones(client, referrer_id))
 
-            user = users_collection.find_one({'user_id': user_id})
+            user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
 
         # --- Step 1.5: Age Verification check ---
         if not user or not user.get('age_verified', False):
             if deep_link_arg:
-                users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
+                await users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
             await message.reply(
                 "🔞 <b>Age Verification Required</b> 🔞\n\n"
                 "Are you 18 years old or older? You must be an adult to use this bot.\n\n"
@@ -2299,7 +2309,7 @@ async def start_cmd(client: Client, message: Message):
         if not has_joined:
             if deep_link_arg:
                 # User doc now exists for new users, so this is just an update
-                users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
+                await users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
 
             # Prepare custom force-sub message based on user state
             custom_text = None
@@ -2376,8 +2386,8 @@ async def start_cmd(client: Client, message: Message):
                         create_tracked_task(start_cmd(client, mock_message))
 
                 elif deep_link_type == 'video_share':
-                    if not has_free_video_access(user_id):
-                        users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
+                    if not await has_free_video_access(user_id):
+                        await users_collection.update_one({'user_id': user_id}, {'$set': {'pending_command': deep_link_arg}})
                         await send_token_earning_options(client, message, is_pending_content=True)
                         return
                     success, result = await handle_shared_video(client, user_id, deep_link_data)
@@ -2387,13 +2397,13 @@ async def start_cmd(client: Client, message: Message):
                         video = result
                         sent_success, _ = await send_and_replace_message(
                             client, message.chat.id, message.id, "video", video_data=video,
-                            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
+                            reply_markup=await video_nav_keyboard(video['uuid'], video['category'], user_id, is_shared_link=True),
                             force_new_message=True
                         )
                         if sent_success:
-                            if not user_can_access_video(user_id):
-                                mark_free_video_used(user_id)
-                            save_history(user_id, video['uuid'], video['category'])
+                            if not await user_can_access_video(user_id):
+                                await mark_free_video_used(user_id)
+                            await save_history(user_id, video['uuid'], video['category'])
                             await client.send_message(
                                 message.chat.id,
                                 "🍿 <b>Enjoying the video?</b> Tap <b>'👀 Watch More'</b> below or use the keyboard to browse unlimited content instantly! 🚀",
@@ -2401,17 +2411,17 @@ async def start_cmd(client: Client, message: Message):
                             )
 
                 elif deep_link_type == 'batch':
-                    batch_doc = video_batches_collection.find_one({'batch_id': deep_link_data})
+                    batch_doc = await video_batches_collection.find_one({'batch_id': deep_link_data})
                     if not batch_doc or not batch_doc.get('video_uuids'):
                         await message.reply("This batch link is invalid or has expired.😔")
                     else:
-                        video = get_video_by_uuid(batch_doc['video_uuids'][0])
+                        video = await get_video_by_uuid(batch_doc['video_uuids'][0])
                         if not video:
                             await message.reply("The first video in this batch is unavailable.😔")
                         else:
                             sent_success, _ = await send_and_replace_message(
                                 client, message.chat.id, message.id, "video", video_data=video,
-                                reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
+                                reply_markup=await video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=deep_link_data, batch_index=0),
                                 force_new_message=True, is_batch=True, batch_id=deep_link_data, batch_index=0
                             )
                             if sent_success:
@@ -2423,22 +2433,22 @@ async def start_cmd(client: Client, message: Message):
                                 )
 
                 elif deep_link_type == 'getvideo':
-                    if not has_free_video_access(user_id, limit=2):
+                    if not await has_free_video_access(user_id, limit=2):
                         await send_access_limit_reached_message(client, user_id)
                         return
-                    video = get_random_video()
+                    video = await get_random_video()
                     if not video:
                         await message.reply("😔 No videos available at the moment. Please ask an admin to add some! 🛠️")
                     else:
                         sent_success, _ = await send_and_replace_message(
                             client, message.chat.id, message.id, "video", video_data=video,
-                            reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+                            reply_markup=await video_nav_keyboard(video['uuid'], "default (all)", user_id),
                             force_new_message=True
                         )
                         if sent_success:
-                            mark_free_video_used(user_id)
+                            await mark_free_video_used(user_id)
                             user_session_history[user_id] = {'videos': [video['uuid']], 'position': 0, 'is_get_video': True}
-                            save_history(user_id, video['uuid'], "default (all)")
+                            await save_history(user_id, video['uuid'], "default (all)")
                             await client.send_message(
                                 message.chat.id,
                                 "🍿 <b>Enjoying the video?</b> Tap <b>'👀 Watch More'</b> below or use the keyboard to browse unlimited content instantly! 🚀",
@@ -2528,9 +2538,9 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
         await send_force_subscribe_message(client, user_id)
         return
 
-    if not user_can_access_video(user_id):
+    if not await user_can_access_video(user_id):
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -2544,7 +2554,7 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
             " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
             " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
         )
-        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content=True, user_id=user_id, remove_tutorial=True)
+        reply_markup = await generate_token_earning_keyboard(ad_url, is_pending_content=True, user_id=user_id, remove_tutorial=True)
 
         await callback_query.message.reply(
             info_text,
@@ -2608,16 +2618,16 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
             logger.warning(f"User {user_id} hit rate limit in watch_more_callback.")
             return
 
-        users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
+        await users_collection.update_one({'user_id': user_id}, {'$set': {'has_seen_free_scroll_popup': False}})
 
-        if not has_free_video_access(user_id, limit=2):
+        if not await has_free_video_access(user_id, limit=2):
             await callback_query.answer("Human verification required! 🔐", show_alert=True)
             await send_token_earning_options(client, callback_query.message)
             return
 
         wait_msg = await client.send_message(chat_id, "Just a moment...")
 
-        video = get_random_video()
+        video = await get_random_video()
 
         await wait_msg.delete()
 
@@ -2632,14 +2642,14 @@ async def watch_more_callback(client: Client, callback_query: CallbackQuery):
             message_id_to_edit_or_delete=None,
             new_message_type="video",
             video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+            reply_markup=await video_nav_keyboard(video['uuid'], "default (all)", user_id),
             force_new_message=True
         )
 
         if sent_success:
-            mark_free_video_used(user_id)
+            await mark_free_video_used(user_id)
             user_session_history[user_id] = {'videos': [video['uuid']], 'position': 0, 'is_get_video': True}
-            save_history(user_id, video['uuid'], "default (all)")
+            await save_history(user_id, video['uuid'], "default (all)")
         else:
             await client.send_message(chat_id, sent_message_or_error)
             logger.error(f"User {user_id} failed to send default video from Watch More: {sent_message_or_error}")
@@ -2737,10 +2747,10 @@ async def profile_cmd(client: Client, message: Message):
         return
 
     try:
-        user = users_collection.find_one({'user_id': user_id})
+        user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
         if not user:
             logger.warning(f"Profile requested for non-existent user {user_id}. Attempting to re-initialize.")
-            users_collection.insert_one({
+            await users_collection.insert_one({
                 'user_id': user_id,
                 'username': html.escape(message.from_user.username) if message.from_user.username else "",
                 'first_name': html.escape(message.from_user.first_name) if message.from_user.first_name else "User",
@@ -2752,12 +2762,12 @@ async def profile_cmd(client: Client, message: Message):
                 'last_viewed_per_category': {},
                 'pending_command': None
             })
-            user = users_collection.find_one({'user_id': user_id})
+            user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
             if not user:
                 raise Exception("Failed to create or retrieve user document for profile.")
 
 
-        tokens_doc = tokens_collection.find_one({'user_id': user_id})
+        tokens_doc = await tokens_collection.find_one({'user_id': user_id}, projection={'tokens': 1})
 
         tokens_count = 0
         banked_tokens = 0
@@ -2776,7 +2786,7 @@ async def profile_cmd(client: Client, message: Message):
         valid_temp_scrolls_count = sum(s.get('amount', 0) for s in temp_scrolls if s.get('amount', 0) > 0 and (s.get('expires_at') is None or s['expires_at'] > now))
         total_scrolls = permanent_scrolls + valid_temp_scrolls_count
 
-        is_premium = is_premium_user(user_id)
+        is_premium = await is_premium_user(user_id)
         user_status = "🔴 Red Token User" if is_premium else "✨ Free User"
 
         if is_premium:
@@ -2857,12 +2867,12 @@ async def get_video(client: Client, message: Message):
     wait_msg = await message.reply("Just a moment...")
 
     # Fetch a random video
-    if not has_free_video_access(user_id, limit=2):
+    if not await has_free_video_access(user_id, limit=2):
         await wait_msg.delete()
         await send_access_limit_reached_message(client, user_id)
         return
 
-    video = get_random_video()
+    video = await get_random_video()
 
     await wait_msg.delete()
 
@@ -2878,15 +2888,15 @@ async def get_video(client: Client, message: Message):
         message_id_to_edit_or_delete=message.id,
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+        reply_markup=await video_nav_keyboard(video['uuid'], "default (all)", user_id),
         force_new_message=True
     )
 
     if sent_success:
-        mark_free_video_used(user_id)
+        await mark_free_video_used(user_id)
         # Initialize history for "default (all)" category navigation
         user_session_history[user_id] = {'videos': [video['uuid']], 'position': 0, 'is_get_video': True}
-        save_history(user_id, video['uuid'], "default (all)")
+        await save_history(user_id, video['uuid'], "default (all)")
     else:
         # Attempt to notify user of the failure
         try:
@@ -2905,7 +2915,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     category_name = b64_to_str(callback_query.data[4:])
     logger.info(f"User {user_id} selected category: {category_name}.")
 
-    if category_name != "default (all)" and not is_premium_user(user_id):
+    if category_name != "default (all)" and not await is_premium_user(user_id):
         await callback_query.answer("🔴 Red Token Required! 🔴", show_alert=True)
         await client.send_message(
             chat_id,
@@ -2923,7 +2933,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    if not has_free_video_access(user_id, limit=1):
+    if not await has_free_video_access(user_id, limit=1):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -2959,36 +2969,36 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     # Send "Please wait" message before fetching video/menu
     temp_msg = await client.send_message(chat_id, "⏳ Please wait, almost done... ✨")
 
-    if category_name not in get_categories():
+    if category_name not in await get_categories():
         logger.warning(f"User {user_id} selected invalid category '{category_name}'.")
         await callback_query.answer("Category not found. Try again! 🧐", show_alert=True)
         await temp_msg.delete()
         await callback_query.message.edit_text(
             "Category not found. Try another! 🧐",
-            reply_markup=category_keyboard()
+            reply_markup=await category_keyboard()
         )
         return
 
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     last_viewed_uuid = user_doc.get('last_viewed_per_category', {}).get(category_name)
 
     video = None
     if category_name == "default (all)":
-        video = get_random_video()
+        video = await get_random_video()
     else:
         if last_viewed_uuid:
-            video = get_video_by_uuid(last_viewed_uuid)
+            video = await get_video_by_uuid(last_viewed_uuid)
             # Ensure the last viewed video still matches the category and is valid
             if not video or video.get('category') != category_name or video.get('banned') or not video.get('sequence_number'):
                 logger.warning(f"Last viewed video {last_viewed_uuid} for user {user_id} in category {category_name} is no longer valid. Falling back.")
                 video = None
-                users_collection.update_one(
+                await users_collection.update_one(
                     {'user_id': user_id},
                     {'$unset': {f'last_viewed_per_category.{category_name}': ""}}
                 )
 
         if not video:
-            video = get_first_video_by_sequence_number(category_name)
+            video = await get_first_video_by_sequence_number(category_name)
 
     if not video:
         logger.warning(f"No videos found in category '{category_name}' for user {user_id}.")
@@ -2999,7 +3009,7 @@ async def select_category(client: Client, callback_query: CallbackQuery):
             pass
         await callback_query.message.edit_text(
             "No videos in this category. Try another! 😔",
-            reply_markup=category_keyboard()
+            reply_markup=await category_keyboard()
         )
         return
 
@@ -3009,17 +3019,17 @@ async def select_category(client: Client, callback_query: CallbackQuery):
         message_id_to_edit_or_delete=temp_msg.id,
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], category_name, user_id, is_saved=False), # Not from saved_videos path
+        reply_markup=await video_nav_keyboard(video['uuid'], category_name, user_id, is_saved=False), # Not from saved_videos path
         force_new_message=True # Force a new message for a clean transition from category menu
     )
 
     if sent_success:
-        mark_free_video_used(user_id)
+        await mark_free_video_used(user_id)
         if category_name == "default (all)":
             user_session_history[user_id] = {'videos': [video['uuid']], 'position': 0, 'is_get_video': True}
         else:
             user_session_history[user_id] = {'category': category_name, 'videos': [video['uuid']], 'position': 0, 'is_get_video': False}
-        save_history(user_id, video['uuid'], category_name)
+        await save_history(user_id, video['uuid'], category_name)
         await callback_query.answer()
         # If the original message was the category selection, delete it
         if callback_query.message.id != temp_msg.id:
@@ -3053,7 +3063,7 @@ async def admin_approve_callback(client: Client, callback_query: CallbackQuery):
         return
 
     upload_id = callback_query.data[9:]
-    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    upload_data = await pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data:
         await callback_query.answer("❌ Upload data not found.", show_alert=True)
         return
@@ -3062,7 +3072,7 @@ async def admin_approve_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer(f"❌ This upload has already been {upload_data['status']}.", show_alert=True)
         return
 
-    categories = get_categories(for_admin_use=True)
+    categories = await get_categories(for_admin_use=True)
     buttons = []
     row = []
     for i, cat in enumerate(categories):
@@ -3091,7 +3101,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
     upload_id = match.group(1)
     category_repr = match.group(2)
 
-    categories = get_categories(for_admin_use=True)
+    categories = await get_categories(for_admin_use=True)
     if category_repr.isdigit():
         idx = int(category_repr)
         if idx < len(categories):
@@ -3102,7 +3112,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
     else:
         category = b64_to_str(category_repr)
 
-    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    upload_data = await pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data or upload_data['status'] != "pending":
         await callback_query.answer("❌ Error: Already processed or not found.", show_alert=True)
         return
@@ -3133,7 +3143,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
             )
 
         # Get next sequence number
-        last_video = media_collection.find_one({'category': category}, sort=[('sequence_number', DESCENDING)])
+        last_video = await media_collection.find_one({'category': category}, sort=[('sequence_number', DESCENDING)])
         next_seq = (last_video['sequence_number'] + 1) if last_video and 'sequence_number' in last_video else 1
 
         video_uuid = str(uuid.uuid4())
@@ -3150,7 +3160,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
             "media_group_id": upload_data.get('media_group_id'),
             "forward_info": upload_data.get('forward_info')
         }
-        media_collection.insert_one(media_doc)
+        await media_collection.insert_one(media_doc)
 
         # 2. Grant Reward (Token)
         # Fetch updated user stats first
@@ -3180,7 +3190,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
 
             if reward_duration_hours > 0:
                 reward_duration_sec = int(reward_duration_hours * 3600)
-                add_token(upload_data['user_id'], duration_seconds=reward_duration_sec, is_admin_granted=False)
+                await add_token(upload_data['user_id'], duration_seconds=reward_duration_sec, is_admin_granted=False)
 
         # 3. Handle Temp Scrolls (Convert to Permanent)
         scroll_reward = 0
@@ -3190,7 +3200,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
                     scroll_reward = s.get('amount', 0)
                     break
 
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': upload_data['user_id']},
             {
                 '$pull': {'temp_scrolls': {'upload_id': upload_id}},
@@ -3199,7 +3209,7 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
         )
 
         # 4. Update Pending Record
-        pending_uploads_collection.update_one(
+        await pending_uploads_collection.update_one(
             {"upload_id": upload_id},
             {"$set": {"status": "approved", "reviewed_by": user_id, "reviewed_at": datetime.now(timezone.utc), "category": category}}
         )
@@ -3270,7 +3280,7 @@ async def admin_reject_callback(client: Client, callback_query: CallbackQuery):
         return
 
     upload_id = callback_query.data[9:]
-    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    upload_data = await pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data or upload_data['status'] != "pending":
         await callback_query.answer("❌ Already processed or not found.", show_alert=True)
         return
@@ -3298,19 +3308,19 @@ async def admin_final_reject_callback(client: Client, callback_query: CallbackQu
     reason_key = match.group(2)
     reason = REJECTION_REASONS.get(reason_key, "Other")
 
-    upload_data = pending_uploads_collection.find_one({"upload_id": upload_id})
+    upload_data = await pending_uploads_collection.find_one({"upload_id": upload_id})
     if not upload_data or upload_data['status'] != "pending":
         await callback_query.answer("❌ Already processed or not found.", show_alert=True)
         return
 
     # 1. Update Pending Record
-    pending_uploads_collection.update_one(
+    await pending_uploads_collection.update_one(
         {"upload_id": upload_id},
         {"$set": {"status": "rejected", "reviewed_by": user_id, "reviewed_at": datetime.now(timezone.utc), "review_reason": reason}}
     )
 
     # 2. Update User Stats & Remove Temp Scrolls
-    users_collection.update_one(
+    await users_collection.update_one(
         {'user_id': upload_data['user_id']},
         {
             '$pull': {'temp_scrolls': {'upload_id': upload_id}},
@@ -3387,7 +3397,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    if not has_free_video_access(user_id, limit=1):
+    if not await has_free_video_access(user_id, limit=1):
         await callback_query.answer("You need an access token to view saved videos! 🧐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -3413,13 +3423,13 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         await client.send_message(chat_id, "Your menu has expired. Please click '🎞️ Get Video' to get a new one. ⏰")
         return
 
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     bookmarked_videos = user_doc.get('bookmarked_videos', [])
 
     # Filter bookmarks for the selected category and sort by bookmarked_at
     filtered_saved_videos = []
     for bookmark in bookmarked_videos:
-        video_data = get_video_by_uuid(bookmark['uuid'])
+        video_data = await get_video_by_uuid(bookmark['uuid'])
         if video_data and video_data.get('category') == selected_category:
             filtered_saved_videos.append(bookmark)
 
@@ -3434,18 +3444,18 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
             message_id_to_edit_or_delete=callback_query.message.id,
             new_message_type="text",
             text_content="🗂️ <b>Select a Category from your Saved Videos:</b>",
-            reply_markup=saved_category_keyboard(user_id)
+            reply_markup=await saved_category_keyboard(user_id)
         )
         return
 
     # Get the first video in this specific saved category
     first_saved_video_uuid = filtered_saved_videos[0]['uuid']
-    video_to_display = get_video_by_uuid(first_saved_video_uuid)
+    video_to_display = await get_video_by_uuid(first_saved_video_uuid)
 
     if not video_to_display:
         await callback_query.answer("The first video in this saved category was not found. It may have been removed. 😔", show_alert=True)
         # Clean up the invalid bookmark
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$pull': {'bookmarked_videos': {'uuid': first_saved_video_uuid}}}
         )
@@ -3456,7 +3466,7 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
             message_id_to_edit_or_delete=callback_query.message.id,
             new_message_type="text",
             text_content="🗂️ <b>Select a Category from your Saved Videos:</b>",
-            reply_markup=saved_category_keyboard(user_id)
+            reply_markup=await saved_category_keyboard(user_id)
         )
         return
 
@@ -3467,14 +3477,14 @@ async def view_saved_category_callback(client: Client, callback_query: CallbackQ
         message_id_to_edit_or_delete=callback_query.message.id,
         new_message_type="video",
         video_data=video_to_display,
-        reply_markup=video_nav_keyboard(video_to_display['uuid'], selected_category, user_id, is_saved=True),
+        reply_markup=await video_nav_keyboard(video_to_display['uuid'], selected_category, user_id, is_saved=True),
         force_new_message=True
     )
 
     if sent_success:
-        mark_free_video_used(user_id)
+        await mark_free_video_used(user_id)
         user_session_history[user_id] = {'category': selected_category, 'videos': [video_to_display['uuid']], 'position': 0, 'is_get_video': False, 'is_saved': True}
-        save_history(user_id, video_to_display['uuid'], selected_category)
+        await save_history(user_id, video_to_display['uuid'], selected_category)
         await callback_query.answer()
         logger.info(f"User {user_id} viewed first saved video {video_to_display['uuid']} in category {selected_category}.")
     else:
@@ -3489,7 +3499,7 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
     parts = callback_query.data.split('|')
     video_uuid = parts[1]
 
-    if not has_free_video_access(user_id, current_video_uuid=video_uuid):
+    if not await has_free_video_access(user_id, current_video_uuid=video_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -3498,7 +3508,7 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
     popup = "You liked this video! ❤️" if is_like else "You disliked this video! 💔"
     try:
         # Save rating to DB
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$set': {f'ratings.{video_uuid}': "like" if is_like else "dislike"}},
             upsert=True
@@ -3506,7 +3516,7 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
 
         await callback_query.answer(popup, show_alert=False)
 
-        video_data = get_video_by_uuid(video_uuid)
+        video_data = await get_video_by_uuid(video_uuid)
         if not video_data:
             return
 
@@ -3514,11 +3524,11 @@ async def interaction_callback(client: Client, callback_query: CallbackQuery):
         if len(parts) >= 4:
             is_saved_from_markup = bool(int(parts[3]))
 
-        _, current_position, total_videos = get_video_and_position(
+        _, current_position, total_videos = await get_video_and_position(
             video_uuid, video_data.get('category'), is_saved_from_markup, user_id
         )
 
-        fake_ratio = get_user_adjusted_fake_ratio(user_id, video_uuid)
+        fake_ratio = await get_user_adjusted_fake_ratio(user_id, video_uuid)
         custom_caption = video_data.get('custom_caption')
         category_name = video_data.get('category') or 'Default'
 
@@ -3568,7 +3578,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             action, current_uuid, is_saved_flag_str = parts
             is_saved = bool(int(is_saved_flag_str))
             # Retrieve category from database as it's no longer in the callback to save space
-            video_doc = get_video_by_uuid(current_uuid)
+            video_doc = await get_video_by_uuid(current_uuid)
             if not video_doc:
                 await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
                 return
@@ -3591,14 +3601,14 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
         limit = 2 if session and session.get('is_get_video') else 1
 
         if action == "next":
-            if not has_free_video_access(user_id, limit=limit):
+            if not await has_free_video_access(user_id, limit=limit):
                 await callback_query.answer("Human verification required! 🔐", show_alert=True)
                 await send_token_earning_options(client, callback_query.message)
                 return
         elif action == "prev":
             # Allow previous if it's within session history or if they have access for a new one
             is_within_session = session and session['position'] > 0
-            if not is_within_session and not has_free_video_access(user_id, limit=limit, current_video_uuid=current_uuid):
+            if not is_within_session and not await has_free_video_access(user_id, limit=limit, current_video_uuid=current_uuid):
                  await callback_query.answer("Human verification required! 🔐", show_alert=True)
                  await send_token_earning_options(client, callback_query.message)
                  return
@@ -3635,7 +3645,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
 
             # --- MODIFICATION: Check for last video ---
             if action == "next":
-                _, current_pos, total_videos = get_video_and_position(current_uuid, category, is_saved, user_id)
+                _, current_pos, total_videos = await get_video_and_position(current_uuid, category, is_saved, user_id)
                 if total_videos > 0 and current_pos >= total_videos:
                     await callback_query.answer(
                         "✨ You've watched all the videos from this menu! ✨\n\n"
@@ -3649,29 +3659,29 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
             if action == "prev" and session and session['position'] > 0:
                 # Use session history for Previous
                 prev_uuid = session['videos'][session['position'] - 1]
-                video = get_video_by_uuid(prev_uuid)
+                video = await get_video_by_uuid(prev_uuid)
 
             if not video:
                 if is_saved:
                     if action == "next":
-                        video = get_next_saved_video_chronological(user_id, current_uuid, category)
+                        video = await get_next_saved_video_chronological(user_id, current_uuid, category)
                     elif action == "prev":
-                        video = get_previous_saved_video_chronological(user_id, current_uuid, category)
+                        video = await get_previous_saved_video_chronological(user_id, current_uuid, category)
 
                     if not video: # This should not be hit if the check above is correct, but as a fallback.
                         await callback_query.answer("No more saved videos in this category. ❤️", show_alert=True)
                         return
 
                 else: # Not a saved video, use regular chronological navigation based on sequence_number
-                    if category not in get_categories():
+                    if category not in await get_categories():
                         logger.warning(f"User {user_id} used invalid category '{category}' for navigation (non-saved).")
                         await callback_query.answer("Category not found. Try 'Change Category'! 🧐", show_alert=True)
                         return
 
                     if action == "next":
-                        video = get_next_video_chronological(current_uuid, category)
+                        video = await get_next_video_chronological(current_uuid, category)
                     elif action == "prev":
-                        video = get_previous_video_chronological(current_uuid, category)
+                        video = await get_previous_video_chronological(current_uuid, category)
 
                     if not video: # This case should ideally not be hit with looping logic, but as a fallback.
                         await callback_query.answer(f"No more {action} videos in this category. Try another! 😔", show_alert=True)
@@ -3684,13 +3694,13 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                 message_id_to_edit_or_delete=callback_query.message.id,
                 new_message_type="video",
                 video_data=video,
-                reply_markup=video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
+                reply_markup=await video_nav_keyboard(video['uuid'], category, user_id, is_saved=is_saved),
                 force_new_message=False # Try to edit the existing message
             )
 
             if sent_success:
                 if action == "next":
-                    mark_free_video_used(user_id)
+                    await mark_free_video_used(user_id)
                     # Update session history
                     if session:
                         if video['uuid'] not in session['videos']:
@@ -3703,7 +3713,7 @@ async def navigate_video(client: Client, callback_query: CallbackQuery):
                         except ValueError:
                             pass
 
-                save_history(user_id, video['uuid'], category)
+                await save_history(user_id, video['uuid'], category)
                 logger.info(f"User {user_id} navigated to {action} video {video['uuid']} in category {category}.")
                 await callback_query.answer()
             else:
@@ -3728,7 +3738,7 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('|')[1]
 
-    if not has_free_video_access(user_id, current_video_uuid=video_uuid):
+    if not await has_free_video_access(user_id, current_video_uuid=video_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -3737,7 +3747,7 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
     popup = "You liked this video! ❤️" if is_like else "You disliked this video! 💔"
     try:
         # Save rating to DB
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$set': {f'ratings.{video_uuid}': "like" if is_like else "dislike"}},
             upsert=True
@@ -3745,15 +3755,15 @@ async def interaction_default_callback(client: Client, callback_query: CallbackQ
 
         await callback_query.answer(popup, show_alert=False)
 
-        video_data = get_video_by_uuid(video_uuid)
+        video_data = await get_video_by_uuid(video_uuid)
         if not video_data:
             return
 
-        _, current_position, total_videos = get_video_and_position(
+        _, current_position, total_videos = await get_video_and_position(
             video_uuid, "default (all)", False, user_id
         )
 
-        fake_ratio = get_user_adjusted_fake_ratio(user_id, video_uuid)
+        fake_ratio = await get_user_adjusted_fake_ratio(user_id, video_uuid)
         custom_caption = video_data.get('custom_caption')
         category_name = video_data.get('category') or 'Default'
 
@@ -3800,12 +3810,12 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
         limit = 2 if session and session.get('is_get_video') else 1
 
         if action == "next_default":
-            if not has_free_video_access(user_id, limit=limit):
+            if not await has_free_video_access(user_id, limit=limit):
                 await callback_query.answer("Human verification required! 🔐", show_alert=True)
                 await send_token_earning_options(client, callback_query.message)
                 return
         elif action == "prev_default":
-             if not has_free_video_access(user_id, current_video_uuid=current_uuid):
+             if not await has_free_video_access(user_id, current_video_uuid=current_uuid):
                 await callback_query.answer("Human verification required! 🔐", show_alert=True)
                 await send_token_earning_options(client, callback_query.message)
                 return
@@ -3818,9 +3828,9 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
             session['position'] += 1
             if session['position'] >= len(session['videos']):
                 # Fetch a new video from a different category
-                current_video_doc = get_video_by_uuid(current_uuid)
+                current_video_doc = await get_video_by_uuid(current_uuid)
                 current_category = current_video_doc.get('category') if current_video_doc else None
-                new_video = get_random_video_from_different_category(current_category)
+                new_video = await get_random_video_from_different_category(current_category)
                 if new_video:
                     session['videos'].append(new_video['uuid'])
                     video = new_video
@@ -3830,12 +3840,12 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
                     return
             else:
                 # Get the next video from history
-                video = get_video_by_uuid(session['videos'][session['position']])
+                video = await get_video_by_uuid(session['videos'][session['position']])
 
         elif action == "prev_default":
             if session['position'] > 0:
                 session['position'] -= 1
-                video = get_video_by_uuid(session['videos'][session['position']])
+                video = await get_video_by_uuid(session['videos'][session['position']])
             else:
                 await callback_query.answer("You are at the beginning of your history.", show_alert=True)
                 return
@@ -3846,13 +3856,13 @@ async def navigate_default_category(client: Client, callback_query: CallbackQuer
 
         sent_success, _ = await send_and_replace_message(
             client, chat_id, callback_query.message.id, "video", video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+            reply_markup=await video_nav_keyboard(video['uuid'], "default (all)", user_id),
             force_new_message=False
         )
         if sent_success:
             if action == "next_default":
-                 mark_free_video_used(user_id)
-            save_history(user_id, video['uuid'], "default (all)")
+                 await mark_free_video_used(user_id)
+            await save_history(user_id, video['uuid'], "default (all)")
         await callback_query.answer()
 
     except Exception as e:
@@ -3876,13 +3886,13 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
     is_prev = action == "prev_batch"
 
     # For batches, "Next" is strictly gated for free users (limit=0).
-    if action == "next_batch" and not has_free_video_access(user_id, limit=0):
+    if action == "next_batch" and not await has_free_video_access(user_id, limit=0):
          await callback_query.answer("Human verification required! 🔐", show_alert=True)
          await send_token_earning_options(client, callback_query.message)
          return
 
     # Allow "Previous" if it's within session history
-    if is_prev and not has_free_video_access(user_id, current_video_uuid=current_uuid):
+    if is_prev and not await has_free_video_access(user_id, current_video_uuid=current_uuid):
          is_within_session = session and session.get('batch_id') == batch_id and current_index > 0
          if not is_within_session:
              await callback_query.answer("Human verification required! 🔐", show_alert=True)
@@ -3905,11 +3915,11 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
             await send_force_subscribe_message(client, user_id)
             return
 
-        batch_doc = video_batches_collection.find_one({'batch_id': batch_id})
+        batch_doc = await video_batches_collection.find_one({'batch_id': batch_id})
         if batch_doc:
             video_uuids = batch_doc.get('video_uuids', [])
         else:
-            album_videos = get_album_videos_by_group_id(batch_id)
+            album_videos = await get_album_videos_by_group_id(batch_id)
             video_uuids = [v['uuid'] for v in album_videos]
 
         if not video_uuids:
@@ -3935,7 +3945,7 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
 
 
         next_video_uuid = video_uuids[new_index]
-        video = get_video_by_uuid(next_video_uuid)
+        video = await get_video_by_uuid(next_video_uuid)
 
         if not video:
             await callback_query.answer("The next video in this batch is unavailable.", show_alert=True)
@@ -3944,7 +3954,7 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
 
         sent_success, _ = await send_and_replace_message(
             client, chat_id, callback_query.message.id, "video", video_data=video,
-            reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=batch_id, batch_index=new_index),
+            reply_markup=await video_nav_keyboard(video['uuid'], video['category'], user_id, is_batch=True, batch_id=batch_id, batch_index=new_index),
             force_new_message=False, is_batch=True, batch_id=batch_id, batch_index=new_index
         )
         if sent_success:
@@ -3972,7 +3982,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
     active_menu = active_video_message.get(user_id)
     current_uuid = active_menu.get('video_uuid') if active_menu else None
 
-    if not has_free_video_access(user_id, current_video_uuid=current_uuid):
+    if not await has_free_video_access(user_id, current_video_uuid=current_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -4022,7 +4032,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         except Exception as e:
             logger.error(f"Failed to delete current video message {callback_query.message.id} for user {user_id} during change category: {e}")
 
-        cats = get_categories()
+        cats = await get_categories()
         if not cats:
             await callback_query.answer("😔 No categories available. Please ask an admin to add some! 🛠️", show_alert=True)
             return
@@ -4030,7 +4040,7 @@ async def change_category(client: Client, callback_query: CallbackQuery):
         sent_message = await client.send_message(
             chat_id,
             "🎬 <b>Choose a Category:</b>",
-            reply_markup=category_keyboard()
+            reply_markup=await category_keyboard()
         )
         set_active_video_message(user_id, sent_message.id, chat_id)
         await callback_query.answer()
@@ -4109,7 +4119,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -4118,20 +4128,20 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "✨ <b>Almost there! Just one quick step...</b>\n\n"
                 "Please verify you're human to instantly unlock the next video and keep watching! ❤️"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
+            reply_markup = await generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         elif is_pending_content:
             text = (
                 "🔒 <b>Access Token Required!</b>\n\n"
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
                 "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = await generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         else:
             text = (
                 "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
                 "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
+            reply_markup = await generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
         await message.reply(
             text,
@@ -4153,7 +4163,7 @@ async def share_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
 
-    if not has_free_video_access(user_id, current_video_uuid=video_uuid):
+    if not await has_free_video_access(user_id, current_video_uuid=video_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -4200,13 +4210,13 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('_', 1)[1]
 
-    video = get_video_by_uuid(video_uuid)
+    video = await get_video_by_uuid(video_uuid)
     if not video or not video.get('media_group_id'):
         await callback_query.answer("Collection not found. 😔", show_alert=True)
         return
 
     media_group_id = video['media_group_id']
-    album_videos = get_album_videos_by_group_id(media_group_id)
+    album_videos = await get_album_videos_by_group_id(media_group_id)
     video_uuids = [v['uuid'] for v in album_videos]
 
     try:
@@ -4242,7 +4252,7 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
         message_id_to_edit_or_delete=callback_query.message.id,
         new_message_type="video",
         video_data=target_video,
-        reply_markup=video_nav_keyboard(
+        reply_markup=await video_nav_keyboard(
             target_video['uuid'], target_video['category'], user_id,
             is_batch=True, batch_id=str_group_id, batch_index=start_index
         ),
@@ -4253,14 +4263,14 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
 async def age_yes_callback(client: Client, callback_query: CallbackQuery):
     """User confirmed they are 18+."""
     user_id = callback_query.from_user.id
-    users_collection.update_one({'user_id': user_id}, {'$set': {'age_verified': True}})
+    await users_collection.update_one({'user_id': user_id}, {'$set': {'age_verified': True}})
     await callback_query.answer("Verification successful! ✅", show_alert=True)
     try:
         await callback_query.message.delete()
     except Exception:
         pass
 
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     pending_command = user_doc.get('pending_command') if user_doc else None
 
     # Re-run start command
@@ -4283,7 +4293,7 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     user_id = callback_query.from_user.id
     video_uuid = callback_query.data.split('|')[1]
 
-    video_data = get_video_by_uuid(video_uuid)
+    video_data = await get_video_by_uuid(video_uuid)
     if not video_data:
         await callback_query.answer("Video not found.")
         return
@@ -4311,17 +4321,17 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
     batch_id = session.get('batch_id')
     batch_index = session.get('position', 1) - 1
 
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     is_saved = any(b['uuid'] == video_uuid for b in user_doc.get('bookmarked_videos', [])) if user_doc else False
 
     is_shared_link = (not session) or (not session.get('is_get_video', False) and not session.get('category') and not is_batch and not is_saved)
 
-    _, current_position, total_videos = get_video_and_position(
+    _, current_position, total_videos = await get_video_and_position(
         video_uuid, category_name, is_saved, user_id
     )
 
     # Build back caption
-    fake_ratio = get_user_adjusted_fake_ratio(user_id, video_uuid)
+    fake_ratio = await get_user_adjusted_fake_ratio(user_id, video_uuid)
     custom_caption = video_data.get('custom_caption')
     if custom_caption:
         custom_caption = strip_hashtags(custom_caption)
@@ -4354,7 +4364,7 @@ async def back_from_share_callback(client: Client, callback_query: CallbackQuery
             new_caption += f"📝 <i>{html.escape(custom_caption)}</i>\n"
 
     # Restore original navigation keyboard
-    back_keyboard = video_nav_keyboard(
+    back_keyboard = await video_nav_keyboard(
         video_uuid, category_name, user_id,
         is_saved=is_saved, is_batch=is_batch,
         batch_id=batch_id, batch_index=batch_index,
@@ -4400,7 +4410,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
-        if not is_premium_user(user_id):
+        if not await is_premium_user(user_id):
             logger.info(f"Non-premium user {user_id} attempted to download video {video_uuid}.")
             await callback_query.answer("⚠️ Premium feature only! ✨", show_alert=True)
             await client.send_message(
@@ -4410,7 +4420,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
             )
             return
 
-        video = get_video_by_uuid(video_uuid)
+        video = await get_video_by_uuid(video_uuid)
         if not video:
             logger.warning(f"Premium user {user_id} requested download for non-existent video {video_uuid}.")
             await callback_query.answer("Video not found. It might have been removed. 😔", show_alert=True)
@@ -4447,7 +4457,7 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                     raise ValueError("Failed to fetch or find video in healed message during download.")
 
                 new_file_id = healed_message.video.file_id
-                media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
+                await media_collection.update_one({'uuid': video['uuid']}, {'$set': {'file_id': new_file_id}})
                 logger.info(f"Database updated with new file_id for video {video['uuid']} during download.")
 
                 sent_video = await client.send_video(
@@ -4481,7 +4491,7 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
 
     logger.info(f"User {user_id} requested to bookmark video {video_uuid}.")
 
-    if not has_free_video_access(user_id, current_video_uuid=video_uuid):
+    if not await has_free_video_access(user_id, current_video_uuid=video_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -4493,7 +4503,7 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
     try:
-        user = users_collection.find_one({'user_id': user_id})
+        user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
         if not user:
             await callback_query.answer("User not found. Please restart the bot.", show_alert=True)
             return
@@ -4504,13 +4514,13 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
             await callback_query.answer("This video is already bookmarked! ❤️", show_alert=True)
             return
 
-        is_premium = is_premium_user(user_id)
+        is_premium = await is_premium_user(user_id)
 
         if not is_premium and len(bookmarked_videos) >= config.FREE_USER_SAVE_LIMIT:
             await callback_query.answer(f"You've reached your limit of {config.FREE_USER_SAVE_LIMIT} saved videos! Upgrade to Premium for unlimited saves. ✨", show_alert=True)
             return
 
-        video_data = get_video_by_uuid(video_uuid)
+        video_data = await get_video_by_uuid(video_uuid)
         if not video_data:
             await callback_query.answer("Cannot bookmark: video not found. 😔", show_alert=True)
             return
@@ -4518,7 +4528,7 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
         # Add the video with timestamp for ordering and its category for filtering
         bookmarked_videos.append({'uuid': video_uuid, 'bookmarked_at': datetime.now(timezone.utc), 'category': video_data.get('category')})
 
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$set': {'bookmarked_videos': bookmarked_videos}}
         )
@@ -4548,18 +4558,18 @@ async def saved_videos_btn(client: Client, message: Message):
         logger.warning(f"User {user_id} hit rate limit in saved_videos_btn.")
         return
 
-    if not user_can_access_video(user_id):
+    if not await user_can_access_video(user_id):
         logger.info(f"User {user_id} has no access, prompting earning options for saved videos.")
         await send_token_earning_options(client, message)
         return
 
-    user = users_collection.find_one({'user_id': user_id})
+    user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
     if not user or not user.get('bookmarked_videos'):
         await message.reply("You haven't saved any videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
         return
 
     # Get the keyboard with categories from saved videos
-    saved_cats_keyboard = saved_category_keyboard(user_id)
+    saved_cats_keyboard = await saved_category_keyboard(user_id)
 
     if saved_cats_keyboard.inline_keyboard[0][0].callback_data in ["no_saved_videos", "no_valid_saved_videos"]:
         await message.reply("You haven't saved any valid videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
@@ -4590,7 +4600,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
     chat_id = callback_query.message.chat.id
     logger.info(f"User {user_id} requested to remove saved video {video_uuid}.")
 
-    if not has_free_video_access(user_id, current_video_uuid=video_uuid):
+    if not await has_free_video_access(user_id, current_video_uuid=video_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -4630,35 +4640,35 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                 logger.warning(f"Failed to delete outdated menu message for user {user_id}: {e}")
             return
 
-        result = users_collection.update_one(
+        result = await users_collection.update_one(
             {'user_id': user_id},
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
         )
 
         if result.modified_count > 0:
             await callback_query.answer("Video removed from saved videos. 🗑️")
-            user = users_collection.find_one({'user_id': user_id})
+            user = await users_collection.find_one({'user_id': user_id}, projection={'permanent_scrolls': 1, 'temp_scrolls': 1, 'free_video_usage': 1})
             bookmarked_videos = user.get('bookmarked_videos', [])
 
             existing_bookmarked_videos = []
             for bookmark in bookmarked_videos:
-                if get_video_by_uuid(bookmark['uuid']):
+                if await get_video_by_uuid(bookmark['uuid']):
                     existing_bookmarked_videos.append(bookmark)
                 else:
                     logger.warning(f"Saved video {bookmark['uuid']} for user {user_id} not found in media_collection during remove_saved_video_callback. Removing from bookmarks.")
-                    users_collection.update_one(
+                    await users_collection.update_one(
                         {'user_id': user_id},
                         {'$pull': {'bookmarked_videos': {'uuid': bookmark['uuid']}}}
                     )
 
-            current_video_info = media_collection.find_one({'uuid': video_uuid})
+            current_video_info = await media_collection.find_one({'uuid': video_uuid})
 
             if current_video_info:
                 current_category_of_removed_video = current_video_info.get('category')
 
                 remaining_in_same_category = [
                     b for b in existing_bookmarked_videos
-                    if get_video_by_uuid(b['uuid']) and get_video_by_uuid(b['uuid']).get('category') == current_category_of_removed_video
+                    if await get_video_by_uuid(b['uuid']) and await get_video_by_uuid(b['uuid']).get('category') == current_category_of_removed_video
                 ]
                 remaining_in_same_category.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)))
 
@@ -4666,7 +4676,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                     # Show the next video in the same category (chronologically by bookmark date)
                     # For simplicity, let's just show the first one in that category after removal
                     next_video_uuid = remaining_in_same_category[0]['uuid']
-                    next_video = get_video_by_uuid(next_video_uuid)
+                    next_video = await get_video_by_uuid(next_video_uuid)
 
                     if next_video:
                         sent_success, sent_message_or_error = await send_and_replace_message(
@@ -4675,7 +4685,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                             message_id_to_edit_or_delete=callback_query.message.id,
                             new_message_type="video",
                             video_data=next_video,
-                            reply_markup=video_nav_keyboard(next_video['uuid'], current_category_of_removed_video, user_id, is_saved=True),
+                            reply_markup=await video_nav_keyboard(next_video['uuid'], current_category_of_removed_video, user_id, is_saved=True),
                             force_new_message=False # Try to edit the existing message
                         )
                         if not sent_success:
@@ -4690,7 +4700,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                         message_id_to_edit_or_delete=callback_query.message.id,
                         new_message_type="text",
                         text_content="You have no more saved videos in this category. ❤️ Select another category or click '🎞️ Get Video' to find new ones!",
-                        reply_markup=saved_category_keyboard(user_id)
+                        reply_markup=await saved_category_keyboard(user_id)
                     )
             else: # If the original video info was missing, just go back to saved categories menu
                 await send_and_replace_message(
@@ -4699,7 +4709,7 @@ async def remove_saved_video_callback(client: Client, callback_query: CallbackQu
                     message_id_to_edit_or_delete=callback_query.message.id,
                     new_message_type="text",
                     text_content="The video was removed. Select another category or click '🎞️ Get Video' to find new ones!",
-                    reply_markup=saved_category_keyboard(user_id)
+                    reply_markup=await saved_category_keyboard(user_id)
                 )
         else:
             await callback_query.answer("Video not found in your saved videos. 🧐", show_alert=True)
@@ -4759,17 +4769,17 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         return
 
     wait_msg = await callback_query.message.reply("Just a moment, checking your access...")
-    if not has_free_video_access(user_id, limit=1):
+    if not await has_free_video_access(user_id, limit=1):
         await wait_msg.delete()
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
     await wait_msg.delete()
 
-    video = get_video_by_uuid(video_uuid)
+    video = await get_video_by_uuid(video_uuid)
     if not video:
         await callback_query.answer("Video not found or has been removed. 😔", show_alert=True)
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
         )
@@ -4781,14 +4791,14 @@ async def view_saved_video_callback(client: Client, callback_query: CallbackQuer
         message_id_to_edit_or_delete=callback_query.message.id,
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=True),
+        reply_markup=await video_nav_keyboard(video['uuid'], video['category'], user_id, is_saved=True),
         force_new_message=False # Try to edit the existing message
     )
 
     if sent_success:
-        mark_free_video_used(user_id)
+        await mark_free_video_used(user_id)
         user_session_history[user_id] = {'category': video['category'], 'videos': [video['uuid']], 'position': 0, 'is_get_video': False, 'is_saved': True}
-        save_history(user_id, video['uuid'], video['category'])
+        await save_history(user_id, video['uuid'], video['category'])
         await callback_query.answer()
         logger.info(f"User {user_id} viewed saved video {video_uuid}.")
     else:
@@ -4807,7 +4817,7 @@ async def unavailable_video_callback(client: Client, callback_query: CallbackQue
         return
 
     await callback_query.answer("This video is no longer available. It may have been removed. 😔", show_alert=True)
-    users_collection.update_one(
+    await users_collection.update_one(
         {'user_id': user_id},
         {'$pull': {'bookmarked_videos': {'uuid': video_uuid}}}
     )
@@ -4845,7 +4855,7 @@ async def clear_all_saved_videos_callback(client: Client, callback_query: Callba
         return
 
     try:
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$set': {'bookmarked_videos': []}}
         )
@@ -4881,7 +4891,7 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     active_menu = active_video_message.get(user_id)
     current_uuid = active_menu.get('video_uuid') if active_menu else None
 
-    if not has_free_video_access(user_id, current_video_uuid=current_uuid):
+    if not await has_free_video_access(user_id, current_video_uuid=current_uuid):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
@@ -4896,7 +4906,7 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
     except Exception as e:
         logger.warning(f"Could not delete message on 'Back' to saved cats: {e}")
 
-    saved_cats_keyboard = saved_category_keyboard(user_id)
+    saved_cats_keyboard = await saved_category_keyboard(user_id)
     if saved_cats_keyboard.inline_keyboard[0][0].callback_data in ["no_saved_videos", "no_valid_saved_videos"]:
         await client.send_message(chat_id, "You have no more saved videos. ❤️")
         return
@@ -4923,12 +4933,12 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    if not has_free_video_access(user_id, limit=2):
+    if not await has_free_video_access(user_id, limit=2):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
 
-    video = get_random_video()
+    video = await get_random_video()
     if not video:
         await callback_query.answer("No videos available at the moment. Please try again later.", show_alert=True)
         return
@@ -4942,13 +4952,13 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
         message_id_to_edit_or_delete=callback_query.message.id,
         new_message_type="video",
         video_data=video,
-        reply_markup=video_nav_keyboard(video['uuid'], "default (all)", user_id),
+        reply_markup=await video_nav_keyboard(video['uuid'], "default (all)", user_id),
         force_new_message=True
     )
     if sent_success:
-        mark_free_video_used(user_id)
+        await mark_free_video_used(user_id)
         user_session_history[user_id] = {'videos': [video['uuid']], 'position': 0, 'is_get_video': True}
-        save_history(user_id, video['uuid'], "default (all)")
+        await save_history(user_id, video['uuid'], "default (all)")
     await callback_query.answer()
 
 # --- NEW: Mini App Launch Handler ---
@@ -4962,7 +4972,7 @@ async def broadcast_cmd(client: Client, message: Message):
     logger.info(f"Admin {user_id} initiated broadcast.")
     try:
         users_cursor = users_collection.find({}, {'user_id': 1})
-        total_users = users_collection.count_documents({})
+        total_users = await users_collection.count_documents({})
         broadcast_msg = await message.reply(f"📣 <b>Broadcasting</b> to <b>{total_users}</b> users... Please wait! 🚀")
         logger.info(f"Admin {user_id} initiating broadcast to {total_users} users.")
 
@@ -4970,7 +4980,7 @@ async def broadcast_cmd(client: Client, message: Message):
         blocked = 0
         failed = 0
 
-        for user in users_cursor:
+        async for user in users_cursor:
             try:
                 await replied_message.copy(user['user_id'])
                 success += 1
@@ -5032,7 +5042,7 @@ async def addcategory_cmd(client: Client, message: Message):
             return
 
         name = args[1].strip() # Strip whitespace
-        success, msg = add_category(name)
+        success, msg = await add_category(name)
         if success:
             logger.info(f"Admin {user_id} successfully added category '{name}'.")
             await message.reply(f"✅ {msg}")
@@ -5049,7 +5059,7 @@ async def deletecategory_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested to delete category.")
     try:
-        categories = get_categories(for_admin_use=True)
+        categories = await get_categories(for_admin_use=True)
         if not categories:
             logger.warning(f"Admin {user_id} tried to delete category but no categories exist.")
             await message.reply_text("😔 No categories to delete. Add some first! ➕")
@@ -5086,7 +5096,7 @@ async def confirm_delcat_callback(client: Client, callback_query: CallbackQuery)
 
         logger.warning(f"Admin {user_id} is confirming deletion of category: {category}")
 
-        success, msg, deleted_count = delete_category(category)
+        success, msg, deleted_count = await delete_category(category)
 
         if success:
             formatted_msg = f"✅ Category '<b>{html.escape(category)}</b>' deleted, and <b>{deleted_count}</b> videos removed permanently. Use /addcategory to create new categories. ✨"
@@ -5125,7 +5135,7 @@ async def addtoken_cmd(client: Client, message: Message):
             await message.reply("Number of days must be a positive integer. 🔢")
             return
 
-        user_doc = users_collection.find_one({'user_id': target_user_id})
+        user_doc = await users_collection.find_one({'user_id': target_user_id})
         if not user_doc:
             logger.warning(f"Admin {user_id} attempted to add premium to non-existent user {target_user_id}.")
             await message.reply("User not found in database. 🧐")
@@ -5133,7 +5143,7 @@ async def addtoken_cmd(client: Client, message: Message):
 
         # Grant unlimited access for specified number of days
         duration_seconds = num_days * 86400
-        add_token_info = add_token(target_user_id, duration_seconds=duration_seconds, is_admin_granted=True)
+        add_token_info = await add_token(target_user_id, duration_seconds=duration_seconds, is_admin_granted=True)
 
         if not add_token_info:
             await message.reply("❌ Failed to grant premium access. Please try again. 🐛")
@@ -5145,7 +5155,7 @@ async def addtoken_cmd(client: Client, message: Message):
 
         try:
             await client.send_message(target_user_id, f"🎉 <b>Congratulations!</b> You have been granted <b>{num_days}</b> days of unlimited Red Token Access by an admin! Your access now expires on <b>{expiry_date.strftime('%Y-%m-%d %H:%M:%S UTC')}</b>. Enjoy exclusive features! 🔴")
-            users_collection.update_one(
+            await users_collection.update_one(
                 {'user_id': target_user_id},
                 {'$set': {'last_premium_check_status': True}}
             )
@@ -5184,18 +5194,18 @@ async def removetoken_cmd(client: Client, message: Message):
             await message.reply("❌ You cannot remove the owner's access.")
             return
 
-        user_doc = users_collection.find_one({'user_id': target_user_id})
+        user_doc = await users_collection.find_one({'user_id': target_user_id})
         if not user_doc:
             logger.warning(f"Admin {admin_user_id} attempted to remove tokens from non-existent user {target_user_id}.")
             await message.reply("User not found in database. 🧐")
             return
 
         # Remove all tokens for the user
-        result = tokens_collection.delete_one({'user_id': target_user_id})
+        result = await tokens_collection.delete_one({'user_id': target_user_id})
 
         if result.deleted_count > 0:
             # Update the user's premium status in the users collection
-            users_collection.update_one(
+            await users_collection.update_one(
                 {'user_id': target_user_id},
                 {'$set': {'last_premium_check_status': False}}
             )
@@ -5228,7 +5238,7 @@ async def remove_all_new_user_free_scrolls_cmd(client: Client, message: Message)
     try:
         # This operation updates all documents in the users_collection.
         # It sets the 'new_user_scrolls_used' field to the value of config.NEW_USER_SCROLLS.
-        result = users_collection.update_many(
+        result = await users_collection.update_many(
             {},
             {'$set': {'new_user_scrolls_used': config.NEW_USER_SCROLLS}}
         )
@@ -5288,7 +5298,7 @@ async def process_batch_queue(user_id: int, client: Client):
 
         try:
             file_unique_id = message.video.file_unique_id
-            existing_video = media_collection.find_one({"file_unique_id": file_unique_id})
+            existing_video = await media_collection.find_one({"file_unique_id": file_unique_id})
             if existing_video:
                 link = get_channel_msg_link(DATA_CHANNEL_ID, existing_video.get('message_id'))
                 link_text = f"\nLink: {link}" if link else ""
@@ -5318,7 +5328,7 @@ async def process_batch_queue(user_id: int, client: Client):
                 "media_group_id": message.media_group_id,
                 "forward_info": forward_info
             }
-            media_collection.insert_one(video_data)
+            await media_collection.insert_one(video_data)
             state['next_sequence'] += 1
             state['videos_this_session'] += 1
 
@@ -5358,7 +5368,7 @@ async def batchadd_cmd(client: Client, message: Message):
             await message.reply("❌ Video storage channel is not configured. Please set it using /setdata before adding videos.")
             return
 
-        categories = get_categories()
+        categories = await get_categories()
         if not categories:
             await message.reply("⚠️ No categories exist. Please create at least one category using /addcategory before starting batch add. ➕")
             logger.warning(f"Admin {user_id} tried to start batch add with no categories.")
@@ -5392,15 +5402,15 @@ async def batch_select_category_callback(client: Client, callback_query: Callbac
             await callback_query.answer("❌ Video storage channel is not configured. Please set it using /setdata.", show_alert=True)
             return
 
-        if category_name not in get_categories():
+        if category_name not in await get_categories():
             await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
             await callback_query.message.edit_text(
                 "Category not found. Please try again! 🧐",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"batchselcat_{str_to_b64(cat)}")] for cat in get_categories()])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"batchselcat_{str_to_b64(cat)}")] for cat in await get_categories()])
             )
             return
 
-        last_video_in_category = media_collection.find_one(
+        last_video_in_category = await media_collection.find_one(
             {'category': category_name},
             sort=[('sequence_number', DESCENDING)]
         )
@@ -5489,7 +5499,7 @@ async def handle_incoming_videos(client: Client, message: Message):
             logger.info(f"Admin {user_id} sent a video for deletion.")
             try:
                 file_unique_id = message.video.file_unique_id
-                video_to_delete = media_collection.find_one({"file_unique_id": file_unique_id})
+                video_to_delete = await media_collection.find_one({"file_unique_id": file_unique_id})
                 if not video_to_delete:
                     await message.reply_text("❌ Video not found in the database.")
                     return
@@ -5509,7 +5519,7 @@ async def handle_incoming_videos(client: Client, message: Message):
         if user_id in admin_batch_link_state:
             logger.info(f"Admin {user_id} sent a video for batch link creation.")
             file_unique_id = message.video.file_unique_id
-            video_doc = media_collection.find_one({"file_unique_id": file_unique_id}, {"uuid": 1})
+            video_doc = await media_collection.find_one({"file_unique_id": file_unique_id}, {"uuid": 1})
             if video_doc:
                 admin_batch_link_state[user_id].append(video_doc['uuid'])
                 await message.reply(f"✅ Video added to batch. Total: {len(admin_batch_link_state[user_id])}.")
@@ -5551,13 +5561,13 @@ async def handle_incoming_videos(client: Client, message: Message):
         if user_id in admin_rename_category_state and admin_rename_category_state[user_id].get('step') == 'chg_cat_await_video':
             logger.info(f"Admin {user_id} sent video for re-categorization.")
             file_unique_id = message.video.file_unique_id
-            video_doc = media_collection.find_one({"file_unique_id": file_unique_id})
+            video_doc = await media_collection.find_one({"file_unique_id": file_unique_id})
             if not video_doc:
                 await message.reply("❌ Video not found in database. Please send a valid UUID or send a video.")
                 return
 
             video_uuid = video_doc['uuid']
-            categories = get_categories(for_admin_use=True)
+            categories = await get_categories(for_admin_use=True)
             if not categories:
                 await message.reply("⚠️ No categories available. Please create one using /addcategory first.")
                 del admin_rename_category_state[user_id]
@@ -5623,18 +5633,18 @@ async def handle_user_upload(client: Client, message: Message):
         return
 
     # 2. Duplicate Check
-    existing_in_media = media_collection.find_one({"file_unique_id": file_unique_id})
+    existing_in_media = await media_collection.find_one({"file_unique_id": file_unique_id})
     if existing_in_media:
         await message.reply_text("🙏 **Thank you!** But this video already exists in our collection. Please send something new! ✨")
         return
 
-    existing_in_pending = pending_uploads_collection.find_one({"file_unique_id": file_unique_id})
+    existing_in_pending = await pending_uploads_collection.find_one({"file_unique_id": file_unique_id})
     if existing_in_pending:
         await message.reply_text("⏳ This video is already under review! Thank you for your patience. ❤️")
         return
 
     # 3. Rate Limiting Check
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await users_collection.find_one({'user_id': user_id})
     stats = user_doc.get('upload_stats', {})
 
     # Daily max check
@@ -5670,14 +5680,14 @@ async def handle_user_upload(client: Client, message: Message):
         "media_group_id": message.media_group_id,
         "forward_info": forward_info
     }
-    pending_uploads_collection.insert_one(pending_data)
+    await pending_uploads_collection.insert_one(pending_data)
 
     # 5. Update User Stats & Session Count
     user_upload_state[user_id]['session_uploads'] = user_upload_state[user_id].get('session_uploads', 0) + 1
     session_count = user_upload_state[user_id]['session_uploads']
     min_req = UPLOAD_CONFIG.get('min_upload_count', 1)
 
-    users_collection.update_one(
+    await users_collection.update_one(
         {'user_id': user_id},
         {
             '$inc': {'upload_stats.total_uploads': 1, 'upload_stats.pending_count': 1, 'upload_stats.daily_uploads.count': 1},
@@ -5697,7 +5707,7 @@ async def handle_user_upload(client: Client, message: Message):
             'expires_at': temp_scroll_expiry,
             'upload_id': upload_id
         }
-        users_collection.update_one(
+        await users_collection.update_one(
             {'user_id': user_id},
             {'$push': {'temp_scrolls': temp_scroll_entry}}
         )
@@ -5744,7 +5754,7 @@ async def handle_user_upload(client: Client, message: Message):
         status_msg_id = sent_confirmation.id
 
     # Store confirmation message ID in pending_data
-    pending_uploads_collection.update_one(
+    await pending_uploads_collection.update_one(
         {"upload_id": upload_id},
         {"$set": {"confirmation_message_id": status_msg_id}}
     )
@@ -5768,7 +5778,7 @@ async def notify_admins_of_upload(client: Client, upload_data: dict):
 
     # Buttons for notification
     if upload_data.get('category'):
-        categories = get_categories(for_admin_use=True)
+        categories = await get_categories(for_admin_use=True)
         if upload_data['category'] in categories:
             cat_idx = categories.index(upload_data['category'])
             approve_cb = f"apr_cat_{upload_id}_{cat_idx}"
@@ -5830,7 +5840,7 @@ async def set_category_cmd(client: Client, message: Message):
             await message.reply_text("❌ Error: Start batch mode with /batchadd first. 🚀")
             return
 
-        categories = get_categories()
+        categories = await get_categories()
         if not categories:
             logger.warning(f"Admin {user_id} tried to set category but no categories available.")
             await message.reply_text("⚠️ No categories available to set. Use /addcategory to create one.➕")
@@ -5874,18 +5884,18 @@ async def setcat_callback(client: Client, callback_query: CallbackQuery):
             logger.warning(f"Admin {user_id} tried to set category but batch mode not active.")
             return
 
-        if category_name not in get_categories():
+        if category_name not in await get_categories():
             await callback_query.answer(f"❌ Invalid category '<b>{html.escape(category_name)}</b>'. 🧐", show_alert=True)
             await callback_query.message.edit_text(
                 "Category not found. Please try again! 🧐",
                 # Changed: Encode category name for callback data in error case
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"setcat_{str_to_b64(cat)}")] for cat in get_categories()])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"🗂️ {html.escape(cat)}", callback_data=f"setcat_{str_to_b64(cat)}")] for cat in await get_categories()])
             )
             logger.warning(f"Admin {user_id} tried to set invalid category: '{category_name}'.")
             return
 
         # When changing category within batch mode, re-calculate the next sequence for the new category
-        last_video_in_category = media_collection.find_one(
+        last_video_in_category = await media_collection.find_one(
             {'category': category_name},
             sort=[('sequence_number', DESCENDING)]
         )
@@ -5925,7 +5935,7 @@ async def view_token_page(client: Client, message_or_query, page: int = 0):
         {"$group": {"_id": "$user_id", "token_count": {"$sum": 1}}},
         {"$sort": {"token_count": -1}}
     ]
-    all_users = list(tokens_collection.aggregate(pipeline))
+    all_users = await tokens_collection.aggregate(pipeline).to_list(length=None)
 
     total_users = len(all_users)
     if total_users == 0:
@@ -5944,7 +5954,7 @@ async def view_token_page(client: Client, message_or_query, page: int = 0):
 
     # Fetch user info in a single query
     user_ids = [user_data['_id'] for user_data in users_on_page]
-    user_info_map = {user['user_id']: user for user in users_collection.find({"user_id": {"$in": user_ids}})}
+    user_info_map = {user['user_id']: user async for user in users_collection.find({"user_id": {"$in": user_ids}})}
 
     for i, user_data in enumerate(users_on_page):
         user_id = user_data['_id']
@@ -6091,9 +6101,9 @@ async def stats_cmd(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested stats.")
     try:
-        total_users = users_collection.count_documents({})
-        total_videos = media_collection.count_documents({})
-        total_categories = categories_collection.count_documents({})
+        total_users = await users_collection.count_documents({})
+        total_videos = await media_collection.count_documents({})
+        total_categories = await categories_collection.count_documents({})
 
         stats_text = f"📊 <b>Bot Statistics</b> 📈\n\n" \
                      f"<b>Total Users:</b> {total_users} 👥\n" \
@@ -6101,10 +6111,10 @@ async def stats_cmd(client: Client, message: Message):
                      f"<b>Total Categories:</b> {total_categories} 🗂️\n\n" \
                      f"<b>Videos per Category:</b>\n"
 
-        categories = get_categories()
+        categories = await get_categories()
         if categories:
             for category in categories:
-                video_count_in_category = media_collection.count_documents({'category': category})
+                video_count_in_category = await media_collection.count_documents({'category': category})
                 stats_text += f"  - <b>{html.escape(category)}:</b> {video_count_in_category} videos\n"
         else:
             stats_text += "  <i>No categories found.</i>\n"
@@ -6120,7 +6130,7 @@ async def token_stats_cmd(client: Client, message: Message):
     """Admin command to show URL shortener usage statistics."""
     try:
         one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
-        count = shortener_logs_collection.count_documents({'timestamp': {'$gte': one_day_ago}})
+        count = await shortener_logs_collection.count_documents({'timestamp': {'$gte': one_day_ago}})
         await message.reply(f"📊 **Token Generation Stats**\n\n"
                             f"The URL shortener has been used **{count}** times in the last 24 hours.")
     except Exception as e:
@@ -6149,7 +6159,7 @@ async def bypass_limit_cmd(client: Client, message: Message):
             await message.reply("Invalid input. Please provide a non-negative integer for seconds.")
             return
 
-        settings_collection.update_one(
+        await settings_collection.update_one(
             {'_id': 'bot_settings'},
             {'$set': {'bypass_limit_seconds': seconds}},
             upsert=True
@@ -6181,7 +6191,7 @@ async def add_admin_cmd(client: Client, message: Message):
 
             BOT_ADMINS.add(user_id_to_add)
             # Persist change to DB
-            settings_collection.update_one(
+            await settings_collection.update_one(
                 {'_id': 'bot_settings'},
                 {'$addToSet': {'admins': user_id_to_add}},
                 upsert=True
@@ -6229,12 +6239,12 @@ async def perform_user_deletion(client: Client, admin_user_id: int, target_user_
         return "❌ You cannot delete another admin. Please remove them from admin status first using /removeadmin."
 
     try:
-        user_deleted = users_collection.delete_one({'user_id': target_user_id})
-        tokens_deleted = tokens_collection.delete_one({'user_id': target_user_id})
-        history_deleted = history_collection.delete_one({'user_id': target_user_id})
-        ssrb_deleted = ssrb_verifications_collection.delete_one({'user_id': target_user_id})
-        pending_uploads_deleted = pending_uploads_collection.delete_many({'user_id': target_user_id})
-        shortener_logs_deleted = shortener_logs_collection.delete_many({'user_id': target_user_id})
+        user_deleted = await users_collection.delete_one({'user_id': target_user_id})
+        tokens_deleted = await tokens_collection.delete_one({'user_id': target_user_id})
+        history_deleted = await history_collection.delete_one({'user_id': target_user_id})
+        ssrb_deleted = await ssrb_verifications_collection.delete_one({'user_id': target_user_id})
+        pending_uploads_deleted = await pending_uploads_collection.delete_many({'user_id': target_user_id})
+        shortener_logs_deleted = await shortener_logs_collection.delete_many({'user_id': target_user_id})
 
         if user_deleted.deleted_count > 0:
             logger.info(f"Admin {admin_user_id} successfully deleted user {target_user_id}.")
@@ -6284,7 +6294,7 @@ async def remove_admin_callback(client: Client, callback_query: CallbackQuery):
         if admin_id_to_remove in BOT_ADMINS:
             BOT_ADMINS.remove(admin_id_to_remove)
             # Persist change to DB
-            settings_collection.update_one(
+            await settings_collection.update_one(
                 {'_id': 'bot_settings'},
                 {'$pull': {'admins': admin_id_to_remove}},
                 upsert=True
@@ -6348,7 +6358,7 @@ async def create_batch_link_cmd(client: Client, message: Message):
     video_uuids = admin_batch_link_state[user_id]
     batch_id = str(uuid.uuid4())
 
-    video_batches_collection.insert_one({
+    await video_batches_collection.insert_one({
         "batch_id": batch_id,
         "video_uuids": video_uuids,
         "created_by": user_id,
@@ -6366,7 +6376,7 @@ async def create_batch_link_cmd(client: Client, message: Message):
 async def perform_video_category_change(video_uuid: str, new_category: str) -> tuple[bool, str]:
     """Helper function to change a video's category in DB and cascade updates."""
     try:
-        video_doc = media_collection.find_one({"uuid": video_uuid})
+        video_doc = await media_collection.find_one({"uuid": video_uuid})
         if not video_doc:
             return False, "Video not found in database."
 
@@ -6378,27 +6388,27 @@ async def perform_video_category_change(video_uuid: str, new_category: str) -> t
 
         # 1. Rearrange sequence numbers in old category
         if old_category and old_seq is not None:
-            rearrange_sequences_after_deletion(old_category, old_seq)
+            await rearrange_sequences_after_deletion(old_category, old_seq)
 
         # 2. Get next sequence number in new category
-        last_video = media_collection.find_one({'category': new_category}, sort=[('sequence_number', DESCENDING)])
+        last_video = await media_collection.find_one({'category': new_category}, sort=[('sequence_number', DESCENDING)])
         next_seq = (last_video['sequence_number'] + 1) if last_video and 'sequence_number' in last_video else 1
 
         # 3. Update video document
-        media_collection.update_one(
+        await media_collection.update_one(
             {"uuid": video_uuid},
             {"$set": {"category": new_category, "sequence_number": next_seq}}
         )
 
         # 4. Cascade updates to bookmarks
-        users_collection.update_many(
+        await users_collection.update_many(
             {'bookmarked_videos.uuid': video_uuid},
             {'$set': {'bookmarked_videos.$[elem].category': new_category}},
             array_filters=[{'elem.uuid': video_uuid}]
         )
 
         # 5. Cascade updates to history
-        history_collection.update_many(
+        await history_collection.update_many(
             {'history.video_uuid': video_uuid},
             {'$set': {'history.$[elem].category': new_category}},
             array_filters=[{'elem.video_uuid': video_uuid}]
@@ -6423,7 +6433,7 @@ async def changecategory_cmd(client: Client, message: Message):
     # Try to extract from reply message
     if message.reply_to_message and message.reply_to_message.video:
         file_unique_id = message.reply_to_message.video.file_unique_id
-        video_doc = media_collection.find_one({"file_unique_id": file_unique_id})
+        video_doc = await media_collection.find_one({"file_unique_id": file_unique_id})
         if video_doc:
             video_uuid = video_doc['uuid']
         if len(args) > 1:
@@ -6432,7 +6442,7 @@ async def changecategory_cmd(client: Client, message: Message):
     elif len(args) > 1:
         # Check if first arg is a valid UUID
         possible_uuid = args[1].strip()
-        video_doc = media_collection.find_one({"uuid": possible_uuid})
+        video_doc = await media_collection.find_one({"uuid": possible_uuid})
         if video_doc:
             video_uuid = video_doc['uuid']
             if len(args) > 2:
@@ -6440,7 +6450,7 @@ async def changecategory_cmd(client: Client, message: Message):
 
     # If we have video_uuid and new_category_name, perform direct change
     if video_uuid and new_category_name:
-        if new_category_name not in get_categories(for_admin_use=True):
+        if new_category_name not in await get_categories(for_admin_use=True):
             await message.reply(f"❌ Category '<b>{html.escape(new_category_name)}</b>' does not exist. Please create it first using /addcategory.")
             return
 
@@ -6458,7 +6468,7 @@ async def changecategory_cmd(client: Client, message: Message):
         await message.reply("Please **reply to a video** with this command, or **send/forward a video**, or send the **video UUID** to change its category. 🎥")
     else:
         # We have the video, but need the category. Show category buttons!
-        categories = get_categories(for_admin_use=True)
+        categories = await get_categories(for_admin_use=True)
         if not categories:
             await message.reply("⚠️ No categories available. Please create one using /addcategory first.")
             return
@@ -6484,7 +6494,7 @@ async def chg_cat_callback(client: Client, callback_query: CallbackQuery):
     video_uuid = match.group(1)
     cat_idx = int(match.group(2))
 
-    categories = get_categories(for_admin_use=True)
+    categories = await get_categories(for_admin_use=True)
     if cat_idx >= len(categories):
         await callback_query.answer("❌ Invalid category index.", show_alert=True)
         return
@@ -6580,7 +6590,7 @@ async def remove_fsub_callback(client: Client, callback_query: CallbackQuery):
 
     channel_id = int(callback_query.data.split('_')[1])
 
-    result = force_sub_channels_collection.delete_one({'channel_id': channel_id})
+    result = await force_sub_channels_collection.delete_one({'channel_id': channel_id})
     if result.deleted_count > 0:
         await load_force_sub_channels() # Reload global list
         await callback_query.answer("Channel removed successfully!", show_alert=True)
@@ -6646,21 +6656,21 @@ async def config_upload_callback(client: Client, callback_query: CallbackQuery):
 
     if setting == "disable_expiry":
         UPLOAD_CONFIG['temp_scrolls_expiry_hours'] = 0
-        settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+        await settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
         await callback_query.answer("Scrolls expiry disabled (scrolls are now permanent)!")
         await config_upload_cmd(client, callback_query.message)
         return
 
     if setting == "toggle_scrolls":
         UPLOAD_CONFIG['auto_give_scrolls'] = not UPLOAD_CONFIG['auto_give_scrolls']
-        settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+        await settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
         await callback_query.answer(f"Auto-give scrolls: {'Enabled' if UPLOAD_CONFIG['auto_give_scrolls'] else 'Disabled'}")
         await config_upload_cmd(client, callback_query.message)
         return
 
     if setting == "toggle_milestones":
         UPLOAD_CONFIG['milestones_enabled'] = not UPLOAD_CONFIG.get('milestones_enabled', False)
-        settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+        await settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
         await callback_query.answer(f"Milestones: {'Enabled' if UPLOAD_CONFIG['milestones_enabled'] else 'Disabled'}")
         await config_upload_cmd(client, callback_query.message)
         return
@@ -6699,7 +6709,7 @@ async def set_review_chat_cmd(client: Client, message: Message):
         chat_id = int(args[1])
         global REVIEW_CHAT_ID
         REVIEW_CHAT_ID = chat_id
-        settings_collection.update_one(
+        await settings_collection.update_one(
             {'_id': 'upload_config'},
             {'$set': {'review_chat_id': chat_id}},
             upsert=True
@@ -6756,7 +6766,7 @@ async def remove_data_channel_callback(client: Client, callback_query: CallbackQ
         await callback_query.answer("❌ Not authorized.", show_alert=True)
         return
 
-    result = data_channel_collection.delete_one({'_id': 'data_channel'})
+    result = await data_channel_collection.delete_one({'_id': 'data_channel'})
     if result.deleted_count > 0:
         await load_data_channel_id() # Reload global variable
         await callback_query.answer("Data channel removed successfully!", show_alert=True)
@@ -6778,7 +6788,7 @@ async def turnoff_shortener_cmd(client: Client, message: Message):
             return # Ignore other /turnoff commands or pass to handle_text_input if propagation continued
 
     try:
-        settings_collection.update_one(
+        await settings_collection.update_one(
             {'_id': 'bot_settings'},
             {'$set': {'shortener_disabled': True}},
             upsert=True
@@ -6801,7 +6811,7 @@ async def turnon_shortener_cmd(client: Client, message: Message):
             return
 
     try:
-        settings_collection.update_one(
+        await settings_collection.update_one(
             {'_id': 'bot_settings'},
             {'$set': {'shortener_disabled': False}},
             upsert=True
@@ -6829,7 +6839,7 @@ async def config_token_button_cmd(client: Client, message: Message):
         action = args[1].lower()
         if action in ["on", "visible", "show", "true", "enable"]:
             try:
-                settings_collection.update_one(
+                await settings_collection.update_one(
                     {'_id': 'bot_settings'},
                     {'$set': {'token_button_disabled': False}},
                     upsert=True
@@ -6842,7 +6852,7 @@ async def config_token_button_cmd(client: Client, message: Message):
                 await message.reply("❌ Failed to update setting. Check logs.")
         elif action in ["off", "invisible", "hide", "false", "disable"]:
             try:
-                settings_collection.update_one(
+                await settings_collection.update_one(
                     {'_id': 'bot_settings'},
                     {'$set': {'token_button_disabled': True}},
                     upsert=True
@@ -6886,7 +6896,7 @@ async def config_token_button_on_callback(client: Client, callback_query: Callba
 
     global TOKEN_BUTTON_DISABLED
     try:
-        settings_collection.update_one(
+        await settings_collection.update_one(
             {'_id': 'bot_settings'},
             {'$set': {'token_button_disabled': False}},
             upsert=True
@@ -6924,7 +6934,7 @@ async def config_token_button_off_callback(client: Client, callback_query: Callb
 
     global TOKEN_BUTTON_DISABLED
     try:
-        settings_collection.update_one(
+        await settings_collection.update_one(
             {'_id': 'bot_settings'},
             {'$set': {'token_button_disabled': True}},
             upsert=True
@@ -6969,7 +6979,7 @@ async def handle_text_input(client: Client, message: Message):
 
                 BOT_ADMINS.add(user_id_to_add)
                 # Persist change to DB
-                settings_collection.update_one(
+                await settings_collection.update_one(
                     {'_id': 'bot_settings'},
                     {'$addToSet': {'admins': user_id_to_add}},
                     upsert=True
@@ -7028,7 +7038,7 @@ async def handle_text_input(client: Client, message: Message):
                 return
 
             try:
-                settings_collection.update_one(
+                await settings_collection.update_one(
                     {'_id': 'shortener_config'},
                     {'$set': {'template_url': template_url}},
                     upsert=True
@@ -7047,12 +7057,12 @@ async def handle_text_input(client: Client, message: Message):
 
             if current_step == 'chg_cat_await_video':
                 video_uuid = text_input
-                video_doc = media_collection.find_one({"uuid": video_uuid})
+                video_doc = await media_collection.find_one({"uuid": video_uuid})
                 if not video_doc:
                     await message.reply("❌ Video not found in database. Please send a valid UUID or send a video.")
                     return
 
-                categories = get_categories(for_admin_use=True)
+                categories = await get_categories(for_admin_use=True)
                 if not categories:
                     await message.reply("⚠️ No categories available. Please create one using /addcategory first.")
                     del admin_rename_category_state[user_id]
@@ -7083,7 +7093,7 @@ async def handle_text_input(client: Client, message: Message):
                     logger.warning(f"Admin {user_id} provided invalid old category name for rename: {old_name}")
                     return
 
-                if not categories_collection.find_one({'name': old_name}):
+                if not await categories_collection.find_one({'name': old_name}):
                     await message.reply(f"❌ Category '<b>{html.escape(old_name)}</b>' does not exist. Please send an existing category name. 🧐")
                     logger.warning(f"Admin {user_id} tried to rename non-existent category: {old_name}")
                     return
@@ -7104,40 +7114,40 @@ async def handle_text_input(client: Client, message: Message):
                     logger.warning(f"Admin {user_id} provided invalid new category name for rename: {new_name}")
                     return
 
-                if categories_collection.find_one({'name': new_name}):
+                if await categories_collection.find_one({'name': new_name}):
                     await message.reply(f"❌ Category '<b>{html.escape(new_name)}</b>' already exists. Please choose a different new name. 🧐")
                     logger.warning(f"Admin {user_id} tried to rename to an existing category: {new_name}")
                     return
 
                 try:
-                    categories_collection.update_one({'name': old_name}, {'$set': {'name': new_name}})
+                    await categories_collection.update_one({'name': old_name}, {'$set': {'name': new_name}})
                     logger.info(f"Category '{old_name}' renamed to '{new_name}' in categories_collection.")
 
-                    media_collection.update_many({'category': old_name}, {'$set': {'category': new_name}})
+                    await media_collection.update_many({'category': old_name}, {'$set': {'category': new_name}})
                     logger.info(f"Updated media_collection documents from '{old_name}' to '{new_name}'.")
 
-                    users_collection.update_many(
+                    await users_collection.update_many(
                         {'bookmarked_videos.category': old_name},
                         {'$set': {'bookmarked_videos.$[elem].category': new_name}},
                         array_filters=[{'elem.category': old_name}]
                     )
                     logger.info(f"Updated bookmarked_videos in users_collection from '{old_name}' to '{new_name}'.")
 
-                    history_collection.update_many(
+                    await history_collection.update_many(
                         {'history.category': old_name},
                         {'$set': {'history.$[elem].category': new_name}},
                         array_filters=[{'elem.category': old_name}]
                     )
                     logger.info(f"Updated history in history_collection from '{old_name}' to '{new_name}'.")
 
-                    all_users_with_last_viewed = users_collection.find({'last_viewed_per_category': {'$exists': True}})
+                    all_users_with_last_viewed = await users_collection.find({'last_viewed_per_category': {'$exists': True}}).to_list(length=None)
                     for user_doc in all_users_with_last_viewed:
                         user_id_to_update = user_doc['user_id']
                         last_viewed_map = user_doc['last_viewed_per_category']
                         if old_name in last_viewed_map:
                             video_uuid_to_move = last_viewed_map.pop(old_name)
                             last_viewed_map[new_name] = video_uuid_to_move
-                            users_collection.update_one(
+                            await users_collection.update_one(
                                 {'user_id': user_id_to_update},
                                 {'$set': {'last_viewed_per_category': last_viewed_map}}
                             )
@@ -7167,7 +7177,7 @@ async def handle_text_input(client: Client, message: Message):
                     await message.reply(f"❌ Could not find the channel or bot is not a member. Please check the ID/username and try again. Error: {e}")
                     return
 
-                if force_sub_channels_collection.find_one({'channel_id': channel_id}):
+                if await force_sub_channels_collection.find_one({'channel_id': channel_id}):
                     await message.reply("This channel is already in the force subscribe list.")
                     del admin_fsub_state[user_id]
                     return
@@ -7182,7 +7192,7 @@ async def handle_text_input(client: Client, message: Message):
                     await message.reply(f"An unexpected error occurred while getting the invite link: {e}")
                     return
 
-                force_sub_channels_collection.insert_one({
+                await force_sub_channels_collection.insert_one({
                     'channel_id': channel_id,
                     'name': channel_name,
                     'link': invite_link,
@@ -7244,7 +7254,7 @@ async def handle_text_input(client: Client, message: Message):
                         return
                     UPLOAD_CONFIG['milestones'] = new_milestones
 
-                settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
+                await settings_collection.update_one({'_id': 'upload_config'}, {'$set': {'settings': UPLOAD_CONFIG}}, upsert=True)
                 await message.reply(f"✅ Setting **{setting}** updated successfully!")
                 await config_upload_cmd(client, message)
             except ValueError:
@@ -7259,7 +7269,7 @@ async def handle_text_input(client: Client, message: Message):
                 chat_id = int(text_input)
                 global REVIEW_CHAT_ID
                 REVIEW_CHAT_ID = chat_id
-                settings_collection.update_one(
+                await settings_collection.update_one(
                     {'_id': 'upload_config'},
                     {'$set': {'review_chat_id': chat_id}},
                     upsert=True
@@ -7301,7 +7311,7 @@ async def handle_text_input(client: Client, message: Message):
                     await message.reply(f"An unexpected error occurred while checking permissions: {e}")
                     return
 
-                data_channel_collection.update_one(
+                await data_channel_collection.update_one(
                     {'_id': 'data_channel'},
                     {'$set': {'channel_id': channel_id, 'name': channel_name, 'set_by': user_id, 'set_at': datetime.now(timezone.utc)}},
                     upsert=True
@@ -7326,9 +7336,9 @@ async def toggle_auto_delete(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested to toggle auto-delete.")
     try:
-        s = settings_collection.find_one({'_id': 'settings'}) or {'auto_delete': True}
+        s = await settings_collection.find_one({'_id': 'settings'}) or {'auto_delete': True}
         new_status = not s.get('auto_delete', True)
-        settings_collection.update_one({'_id': 'settings'}, {'$set': {'auto_delete': new_status}}, upsert=True)
+        await settings_collection.update_one({'_id': 'settings'}, {'$set': {'auto_delete': new_status}}, upsert=True)
         await message.reply(f"Auto-delete feature (for videos *sent into the channel*) is now {'<b>enabled</b> ✅' if new_status else '<b>disabled</b> 🚫'}.")
         logger.info(f"Admin {user_id} toggled auto-delete to {'enabled' if new_status else 'disabled'}.")
     except Exception as e:
@@ -7341,9 +7351,9 @@ async def toggle_protect(client: Client, message: Message):
     user_id = message.from_user.id
     logger.info(f"Admin {user_id} requested to toggle content protection.")
     try:
-        s = settings_collection.find_one({'_id': 'settings'}) or {'protect_content': True}
+        s = await settings_collection.find_one({'_id': 'settings'}) or {'protect_content': True}
         new_status = not s.get('protect_content', True)
-        settings_collection.update_one({'_id': 'settings'}, {'$set': {'protect_content': new_status}}, upsert=True)
+        await settings_collection.update_one({'_id': 'settings'}, {'$set': {'protect_content': new_status}}, upsert=True)
         await message.reply(f"Content protection is now {'<b>enabled</b> ✅' if new_status else '<b>disabled</b> 🚫'}.")
         logger.info(f"Admin {user_id} toggled content protection to {'enabled' if new_status else 'disabled'}.")
     except Exception as e:
@@ -7357,17 +7367,17 @@ async def cleanup_expired_data():
         try:
             now = datetime.now(timezone.utc)
 
-            tokens_collection.update_many(
+            await tokens_collection.update_many(
                 {},
                 {'$pull': {'tokens': {'expires_at': {'$lt': now}}}}
             )
             logger.info("Expired tokens cleanup completed.")
 
-            all_users = users_collection.find({})
+            all_users = await users_collection.find({}).to_list(length=None)
             for user in all_users:
                 user_id = user['user_id']
 
-                is_currently_premium = is_premium_user(user_id)
+                is_currently_premium = await is_premium_user(user_id)
 
                 bookmarked_videos = user.get('bookmarked_videos', [])
 
@@ -7375,16 +7385,16 @@ async def cleanup_expired_data():
                     bookmarked_videos.sort(key=lambda x: x.get('bookmarked_at', datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
                     truncated_bookmarks = bookmarked_videos[:config.FREE_USER_SAVE_LIMIT]
 
-                    users_collection.update_one(
+                    await users_collection.update_one(
                         {'user_id': user_id},
                         {'$set': {'bookmarked_videos': truncated_bookmarks}}
                     )
                     logger.info(f"User {user_id}'s bookmarked videos truncated to {config.FREE_USER_SAVE_LIMIT}.")
 
-            history_collection.delete_many({'history': {'$size': 0}})
+            await history_collection.delete_many({'history': {'$size': 0}})
             logger.info("Empty history documents cleanup completed.")
 
-            tokens_collection.delete_many({'tokens': {'$size': 0}})
+            await tokens_collection.delete_many({'tokens': {'$size': 0}})
             logger.info("Empty token documents cleanup completed.")
 
             logger.info("Database cleanup cycle completed.")
@@ -7464,7 +7474,7 @@ async def verify_and_cleanup_media():
             continue
 
         try:
-            all_media = list(media_collection.find({}))
+            all_media = await media_collection.find({}).to_list(length=None)
             for media_item in all_media:
                 video_uuid = media_item.get('uuid')
                 message_id_in_channel = media_item.get('message_id')
@@ -7542,14 +7552,14 @@ async def monitor_ssrb_verifications(client: Client):
     while True:
         try:
             # Find unconsumed verifications
-            unconsumed = list(ssrb_verifications_collection.find({"is_consumed_by_atdb": False}))
+            unconsumed = await ssrb_verifications_collection.find({"is_consumed_by_atdb": False}).to_list(length=None)
             for doc in unconsumed:
                 user_id = doc['user_id']
                 logger.info(f"Detected new SSRB verification for user {user_id}. Granting token...")
 
                 # Grant token
                 duration = config.VERIFICATION_TOKEN_DURATION_HOURS * 3600
-                add_token(user_id, duration_seconds=duration, is_admin_granted=False, is_activated=True)
+                await add_token(user_id, duration_seconds=duration, is_admin_granted=False, is_activated=True)
 
                 # Notify user
                 try:
@@ -7586,7 +7596,7 @@ async def monitor_ssrb_verifications(client: Client):
                         logger.error(f"Failed to auto-trigger pending command for user {user_id}: {e}")
 
                 # Mark as consumed
-                ssrb_verifications_collection.update_one(
+                await ssrb_verifications_collection.update_one(
                     {"_id": doc["_id"]},
                     {"$set": {"is_consumed_by_atdb": True}}
                 )
@@ -7608,18 +7618,18 @@ async def run_bot_background():
         except RPCError as e:
             if any(err in str(e) for err in ["SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED"]):
                 logger.error(f"Session is invalid ({e}). Clearing session string and forcing container restart.")
-                settings_collection.delete_one({'_id': 'hydrogram_session'})
+                await settings_collection.delete_one({'_id': 'hydrogram_session'})
                 # Force exit to trigger container restart on hosting platforms
                 os._exit(1)
             raise e
         logger.info("Hydrogram client started.")
 
         # If this is the first run, save the session string
-        SESSION_STRING = get_session_string()
+        SESSION_STRING = await get_session_string()
         if not SESSION_STRING:
             logger.info("Saving session string to DB for future runs...")
             new_session_string = await bot.export_session_string()
-            set_session_string(new_session_string)
+            await set_session_string(new_session_string)
 
         # Load admins and run background tasks
         await load_admins_from_db()
