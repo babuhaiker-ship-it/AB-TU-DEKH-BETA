@@ -130,6 +130,10 @@ pending_uploads_collection.create_index([("status", ASCENDING)])
 force_sub_channels_collection.create_index([("channel_id", ASCENDING)], unique=True)
 # FIX: Removed unique=True for _id index as it's redundant and causes an error
 data_channel_collection.create_index([("_id", ASCENDING)])
+media_collection.create_index([("media_group_id", ASCENDING)])
+ssrb_verifications_collection.create_index([("is_consumed_by_atdb", ASCENDING)])
+shortener_logs_collection.create_index([("ad_code", ASCENDING)])
+shortener_logs_collection.create_index([("user_id", ASCENDING)])
 
 
 # --- Session Management with MongoDB ---
@@ -1738,13 +1742,11 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         vip_text = "🔴 Get Red Token"
         buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
-    if not SHORTENER_DISABLED:
-        if not remove_tutorial:
-            buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
-        buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
+    # Always offer Refer & Earn button
+    buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
 
-    # Always append the Refresh button when we display the token required/earning screen
-    buttons.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="reload_pending_content")])
+    # Always append the Refresh Token button when we display the token required/earning screen
+    buttons.append([InlineKeyboardButton("🔄 Refresh Token", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -4113,25 +4115,17 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
-        if SHORTENER_DISABLED:
-            text = (
-                "✨ <b>Almost there! Just one quick step...</b>\n\n"
-                "Please verify you're human to instantly unlock the next video and keep watching! ❤️"
-            )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
-        elif is_pending_content:
-            text = (
-                "🔒 <b>Access Token Required!</b>\n\n"
-                "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
-                "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
-            )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
-        else:
-            text = (
-                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
-                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
-            )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
+        text = (
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
+        )
+        reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
         await message.reply(
             text,
@@ -7464,7 +7458,7 @@ async def verify_and_cleanup_media():
             continue
 
         try:
-            all_media = list(media_collection.find({}))
+            all_media = list(media_collection.find({}, {"uuid": 1, "message_id": 1}))
             for media_item in all_media:
                 video_uuid = media_item.get('uuid')
                 message_id_in_channel = media_item.get('message_id')
