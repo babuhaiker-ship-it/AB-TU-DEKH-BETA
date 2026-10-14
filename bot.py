@@ -817,11 +817,16 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         )
     else:
         text = (
-            "🛑 <b>Access Token Required</b> 🛑\n\n"
-            "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            f"Unlock <b>{int(config.TOKEN_ACCESS_HOURS)} hours</b> of uninterrupted, premium access and keep the vibe going! ✨"
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
         )
-    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
+    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id, remove_tutorial=True)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 # --- Premium Status Check and Notification ---
@@ -4125,11 +4130,17 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
                 "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         else:
             text = (
-                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
-                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
+                "💡 Information \n\n"
+                " Here's how to get your token! 🚀 \n\n"
+                " Hey 💕 unlimited money hack, \n\n"
+                " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+                " Token Timeout: 24 hours ⏰ \n\n"
+                " What is a token? \n\n"
+                " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+                " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
