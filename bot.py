@@ -1062,28 +1062,25 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
         return None, 0, 0
 
     else: # Regular category navigation, use sequence_number for ordering
-        all_videos_in_category = list(media_collection.find(
-            {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
-            sort=[('sequence_number', ASCENDING)]
-        ))
-
-        total_videos = len(all_videos_in_category)
-        if not total_videos:
+        video = media_collection.find_one({'uuid': video_uuid, 'category': category, 'banned': {'$ne': True}})
+        if not video:
             return None, 0, 0
 
-        current_video_index = -1
-        for i, video_doc in enumerate(all_videos_in_category):
-            if video_doc['uuid'] == video_uuid:
-                current_video_index = i
-                break
+        query_filter = {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}
+        total_videos = media_collection.count_documents(query_filter)
 
-        if current_video_index != -1:
-            video = all_videos_in_category[current_video_index]
-            # Added log for missing sequence_number during navigation
-            if 'sequence_number' not in video:
-                logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number' but is being retrieved for navigation. This indicates a potential data inconsistency or failed migration.")
-            return video, current_video_index + 1, total_videos
-        return None, 0, 0
+        seq_num = video.get('sequence_number')
+        if seq_num is not None:
+            # Count videos preceding this one in the same category
+            earlier_count = media_collection.count_documents({
+                'category': category,
+                'sequence_number': {'$lt': seq_num},
+                'banned': {'$ne': True}
+            })
+            return video, earlier_count + 1, total_videos
+        else:
+            logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number'. Falling back.")
+            return video, 1, max(1, total_videos)
 
 def get_album_videos_by_group_id(media_group_id) -> list[dict]:
     """Retrieves all non-banned videos belonging to a media_group_id, matching both string and integer IDs."""
@@ -4125,7 +4122,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
                 "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         else:
             text = (
                 "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
