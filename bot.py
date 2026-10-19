@@ -806,7 +806,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
     """Sends a message informing the user they need a token to access content."""
     user_id = chat_id
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+    await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -1739,12 +1739,10 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        if not remove_tutorial:
-            buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
         buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
 
     # Always append the Refresh button when we display the token required/earning screen
-    buttons.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="reload_pending_content")])
+    buttons.append([InlineKeyboardButton("🔄 Refresh Token", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -2530,7 +2528,7 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 
     if not user_can_access_video(user_id):
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -2554,7 +2552,8 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
         await callback_query.answer()
         return
 
-    user_doc = users_collection.find_one_and_update(
+    user_doc = await asyncio.to_thread(
+        users_collection.find_one_and_update,
         {'user_id': user_id},
         {'$unset': {'pending_command': ""}},
         return_document=ReturnDocument.BEFORE
@@ -4109,7 +4108,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -4123,7 +4122,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             text = (
                 "🔒 <b>Access Token Required!</b>\n\n"
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
-                "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
+                "👉 Once done, click the <b>🔄 Refresh Token</b> button below to instantly view your video! 🍿"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         else:
