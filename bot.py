@@ -806,7 +806,10 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
     """Sends a message informing the user they need a token to access content."""
     user_id = chat_id
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+    await asyncio.to_thread(
+        shortener_logs_collection.insert_one,
+        {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)}
+    )
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -1062,28 +1065,27 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
         return None, 0, 0
 
     else: # Regular category navigation, use sequence_number for ordering
-        all_videos_in_category = list(media_collection.find(
-            {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
-            sort=[('sequence_number', ASCENDING)]
-        ))
+        target_video = get_video_by_uuid(video_uuid)
+        if not target_video or target_video.get('banned'):
+            return None, 0, 0
 
-        total_videos = len(all_videos_in_category)
+        target_seq = target_video.get('sequence_number')
+        base_query = {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}
+
+        total_videos = media_collection.count_documents(base_query)
         if not total_videos:
             return None, 0, 0
 
-        current_video_index = -1
-        for i, video_doc in enumerate(all_videos_in_category):
-            if video_doc['uuid'] == video_uuid:
-                current_video_index = i
-                break
+        if target_seq is not None:
+            preceding_count = media_collection.count_documents({
+                **base_query,
+                'sequence_number': {'$lt': target_seq}
+            })
+            current_position = preceding_count + 1
+        else:
+            current_position = 1
 
-        if current_video_index != -1:
-            video = all_videos_in_category[current_video_index]
-            # Added log for missing sequence_number during navigation
-            if 'sequence_number' not in video:
-                logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number' but is being retrieved for navigation. This indicates a potential data inconsistency or failed migration.")
-            return video, current_video_index + 1, total_videos
-        return None, 0, 0
+        return target_video, current_position, total_videos
 
 def get_album_videos_by_group_id(media_group_id) -> list[dict]:
     """Retrieves all non-banned videos belonging to a media_group_id, matching both string and integer IDs."""
@@ -1739,12 +1741,10 @@ def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = Fals
         buttons.append([InlineKeyboardButton(vip_text, url=config.BUY_BOT_URL)])
 
     if not SHORTENER_DISABLED:
-        if not remove_tutorial:
-            buttons.append([InlineKeyboardButton(f"📚 {int(config.TOKEN_ACCESS_HOURS)}-Hour Access Tutorial", url=config.TUTORIAL_LINK_2)])
         buttons.append([InlineKeyboardButton("🔗 Refer & Earn", callback_data="refer_and_earn_inline")])
 
-    # Always append the Refresh button when we display the token required/earning screen
-    buttons.append([InlineKeyboardButton("🔄 Refresh Status", callback_data="reload_pending_content")])
+    # Always append the Refresh Token button when we display the token required/earning screen
+    buttons.append([InlineKeyboardButton("🔄 Refresh Token", callback_data="reload_pending_content")])
     return InlineKeyboardMarkup(buttons)
 
 def category_keyboard() -> InlineKeyboardMarkup:
@@ -2530,7 +2530,10 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 
     if not user_can_access_video(user_id):
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(
+            shortener_logs_collection.insert_one,
+            {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)}
+        )
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -4109,7 +4112,10 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(
+            shortener_logs_collection.insert_one,
+            {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)}
+        )
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -4118,12 +4124,12 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "✨ <b>Almost there! Just one quick step...</b>\n\n"
                 "Please verify you're human to instantly unlock the next video and keep watching! ❤️"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         elif is_pending_content:
             text = (
                 "🔒 <b>Access Token Required!</b>\n\n"
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
-                "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
+                "👉 Once done, click the <b>🔄 Refresh Token</b> button below to instantly view your video! 🍿"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         else:
@@ -4131,7 +4137,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
                 "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
 
         await message.reply(
             text,
