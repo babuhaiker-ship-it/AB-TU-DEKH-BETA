@@ -830,7 +830,7 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
     Checks user's premium status and sends a notification if they just lost premium.
     Updates the user's last_premium_check_status in DB.
     """
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await asyncio.to_thread(users_collection.find_one, {'user_id': user_id})
     if not user_doc:
         return
 
@@ -847,7 +847,8 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
             logger.error(f"Failed to send premium expiry notification to user {user_id}: {e}")
 
     if current_premium_status != last_known_premium_status:
-        users_collection.update_one(
+        await asyncio.to_thread(
+            users_collection.update_one,
             {'user_id': user_id},
             {'$set': {'last_premium_check_status': current_premium_status}}
         )
@@ -907,7 +908,7 @@ async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
     - 50 referrals -> 30 Days Premium (+2592000 seconds, is_admin_granted=True)
     """
     try:
-        user_doc = users_collection.find_one({'user_id': referrer_id})
+        user_doc = await asyncio.to_thread(users_collection.find_one, {'user_id': referrer_id})
         if not user_doc:
             return
 
@@ -927,7 +928,8 @@ async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
                 add_token_info = add_token(referrer_id, duration_seconds=duration_seconds, is_admin_granted=True)
                 if add_token_info:
                     # Update claimed list
-                    users_collection.update_one(
+                    await asyncio.to_thread(
+                        users_collection.update_one,
                         {'user_id': referrer_id},
                         {
                             '$addToSet': {'claimed_referral_milestones': req_count},
@@ -1970,22 +1972,22 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             return False, "💡 You already have active premium access. No need to refresh yet! Enjoy the videos! 🥳"
 
         # Bypass detection logic
-        settings = settings_collection.find_one({'_id': 'bot_settings'})
+        settings = await asyncio.to_thread(settings_collection.find_one, {'_id': 'bot_settings'})
         bypass_limit_seconds = settings.get('bypass_limit_seconds', 0) if settings else 0
 
         if bypass_limit_seconds > 0:
-            log_entry = shortener_logs_collection.find_one({'ad_code': ad_code, 'user_id': user_id})
+            log_entry = await asyncio.to_thread(shortener_logs_collection.find_one, {'ad_code': ad_code, 'user_id': user_id})
             if log_entry:
                 time_elapsed = (datetime.now(timezone.utc) - log_entry['created_at']).total_seconds()
                 if time_elapsed < bypass_limit_seconds:
                     logger.warning(f"Bypass detected for user {user_id}. Time elapsed: {time_elapsed}s, Limit: {bypass_limit_seconds}s")
 
                     # Invalidate the current token log
-                    shortener_logs_collection.delete_one({'ad_code': ad_code})
+                    await asyncio.to_thread(shortener_logs_collection.delete_one, {'ad_code': ad_code})
 
                     # Generate a new token and link
                     new_ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-                    shortener_logs_collection.insert_one({'ad_code': new_ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+                    await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': new_ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
                     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{new_ad_code}"
                     new_ad_url = await get_shortener_config_and_shorten_url(long_url)
 
@@ -2014,13 +2016,14 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
             logger.warning(f"User {user_id} attempted to use another user's token refresh link ({code_user_id}).")
             return False, "This Token Is Not For You 😠\n\nor maybe you are using 2 telegram apps, if yes then please uninstall this one and try again."
 
-        if refresh_tokens_used_collection.find_one({'ad_code': ad_code}):
+        is_used = await asyncio.to_thread(refresh_tokens_used_collection.find_one, {'ad_code': ad_code})
+        if is_used:
             logger.warning(f"User {user_id} attempted to reuse token refresh link: {ad_code}")
             return False, "This token refresh link has already been used. Please generate a new one. 🔄"
 
         added_token = add_token(user_id, config.REFRESH_BONUS * config.TOKEN_EXPIRY, is_admin_granted=False)
         if added_token:
-            refresh_tokens_used_collection.insert_one({'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
+            await asyncio.to_thread(refresh_tokens_used_collection.insert_one, {'ad_code': ad_code, 'used_at': datetime.now(timezone.utc)})
             logger.info(f"Token added for user {user_id} via refresh. Token is banked.")
             return True, f"🎉 <b>Success!</b> You got {config.REFRESH_BONUS} token. It has been added to your bank. Activate it whenever you need access! 🏦"
         else:
@@ -2044,7 +2047,7 @@ async def is_rate_limited(user_id: int) -> bool:
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
 
-    try:
+    def _sync_rate_limit():
         # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
         tokens_collection.update_one(
             {'user_id': user_id},
@@ -2061,11 +2064,13 @@ async def is_rate_limited(user_id: int) -> bool:
         # Step 3: Retrieve the document to check the current count.
         result = tokens_collection.find_one({'user_id': user_id})
         current_requests = len(result.get('rate_limits', [])) if result else 0
+        return current_requests > RATE_LIMIT_MAX
 
-        if current_requests > RATE_LIMIT_MAX:
-            logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
-            return True
-        return False
+    try:
+        limited = await asyncio.to_thread(_sync_rate_limit)
+        if limited:
+            logger.warning(f"User {user_id} is rate limited. Window: {RATE_LIMIT_WINDOW}s, Max: {RATE_LIMIT_MAX}")
+        return limited
     except Exception as e:
         logger.error(f"Error in is_rate_limited for user {user_id}: {e}", exc_info=True)
         return False
@@ -2530,7 +2535,7 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 
     if not user_can_access_video(user_id):
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -4109,7 +4114,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -4121,15 +4126,26 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         elif is_pending_content:
             text = (
-                "🔒 <b>Access Token Required!</b>\n\n"
-                "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
-                "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
+                "💡 Information \n\n"
+                " Here's how to get your token! 🚀 \n\n"
+                " Hey 💕 unlimited money hack, \n\n"
+                " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+                " Token Timeout: 24 hours ⏰ \n\n"
+                " What is a token? \n\n"
+                " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+                " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         else:
             text = (
-                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
-                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
+                "💡 Information \n\n"
+                " Here's how to get your token! 🚀 \n\n"
+                " Hey 💕 unlimited money hack, \n\n"
+                " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+                " Token Timeout: 24 hours ⏰ \n\n"
+                " What is a token? \n\n"
+                " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+                " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
@@ -4923,7 +4939,7 @@ async def get_default_video_callback(client: Client, callback_query: CallbackQue
 
     create_tracked_task(check_premium_status_and_notify(client, user_id))
 
-    if not has_free_video_access(user_id, limit=2):
+    if not has_free_video_access(user_id):
         await callback_query.answer("Human verification required! 🔐", show_alert=True)
         await send_token_earning_options(client, callback_query.message)
         return
