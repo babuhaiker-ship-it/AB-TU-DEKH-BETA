@@ -117,19 +117,20 @@ media_collection.create_index([("uuid", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING)])
 media_collection.create_index([("file_unique_id", ASCENDING)], unique=True)
 media_collection.create_index([("category", ASCENDING), ("sequence_number", ASCENDING)])
+media_collection.create_index([("media_group_id", ASCENDING), ("banned", ASCENDING)])
 history_collection.create_index([("user_id", ASCENDING)], unique=True)
 categories_collection.create_index([("name", ASCENDING)], unique=True)
 refresh_tokens_used_collection.create_index([("ad_code", ASCENDING)], unique=True) # Renamed to "used url link" conceptually
 video_batches_collection.create_index([("batch_id", ASCENDING)], unique=True)
 ssrb_verifications_collection.create_index([("user_id", ASCENDING)], unique=True)
+ssrb_verifications_collection.create_index([("is_consumed_by_atdb", ASCENDING)])
 pending_uploads_collection.create_index([("upload_id", ASCENDING)], unique=True)
 pending_uploads_collection.create_index([("user_id", ASCENDING)])
 pending_uploads_collection.create_index([("file_unique_id", ASCENDING)])
 pending_uploads_collection.create_index([("status", ASCENDING)])
-# NEW: Indexes for new collections
 force_sub_channels_collection.create_index([("channel_id", ASCENDING)], unique=True)
-# FIX: Removed unique=True for _id index as it's redundant and causes an error
 data_channel_collection.create_index([("_id", ASCENDING)])
+shortener_logs_collection.create_index([("ad_code", ASCENDING), ("user_id", ASCENDING)])
 
 
 # --- Session Management with MongoDB ---
@@ -293,7 +294,7 @@ TOKEN_BUTTON_DISABLED = False
 async def load_admins_from_db():
     """Loads admin list from DB and ensures owner is always included."""
     global BOT_ADMINS
-    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    settings_doc = await asyncio.to_thread(settings_collection.find_one, {'_id': 'bot_settings'})
     db_admins = settings_doc.get('admins', []) if settings_doc else []
 
     # Cast all loaded admin IDs to int to guarantee type safety for comparison
@@ -311,7 +312,7 @@ async def load_admins_from_db():
 async def load_data_channel_id():
     """Loads the data channel ID from the database."""
     global DATA_CHANNEL_ID
-    data_doc = data_channel_collection.find_one({'_id': 'data_channel'})
+    data_doc = await asyncio.to_thread(data_channel_collection.find_one, {'_id': 'data_channel'})
     if data_doc:
         DATA_CHANNEL_ID = data_doc.get('channel_id')
         logger.info(f"Loaded data channel ID: {DATA_CHANNEL_ID}")
@@ -322,27 +323,27 @@ async def load_data_channel_id():
 async def load_force_sub_channels():
     """Loads force subscribe channels from the database."""
     global FORCE_SUB_CHANNELS
-    FORCE_SUB_CHANNELS = list(force_sub_channels_collection.find({}))
+    FORCE_SUB_CHANNELS = await asyncio.to_thread(list, force_sub_channels_collection.find({}))
     logger.info(f"Loaded {len(FORCE_SUB_CHANNELS)} force subscribe channels.")
 
 async def load_shortener_setting():
     """Loads the shortener disabled setting from the database."""
     global SHORTENER_DISABLED
-    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    settings_doc = await asyncio.to_thread(settings_collection.find_one, {'_id': 'bot_settings'})
     SHORTENER_DISABLED = settings_doc.get('shortener_disabled', False) if settings_doc else False
     logger.info(f"Loaded shortener setting: {'Disabled' if SHORTENER_DISABLED else 'Enabled'}")
 
 async def load_token_button_setting():
     """Loads the token button disabled setting from the database."""
     global TOKEN_BUTTON_DISABLED
-    settings_doc = settings_collection.find_one({'_id': 'bot_settings'})
+    settings_doc = await asyncio.to_thread(settings_collection.find_one, {'_id': 'bot_settings'})
     TOKEN_BUTTON_DISABLED = settings_doc.get('token_button_disabled', False) if settings_doc else False
     logger.info(f"Loaded token button setting: {'Disabled' if TOKEN_BUTTON_DISABLED else 'Enabled'}")
 
 async def load_upload_config():
     """Loads upload configuration and review chat ID from database."""
     global REVIEW_CHAT_ID, UPLOAD_CONFIG
-    config_doc = settings_collection.find_one({'_id': 'upload_config'})
+    config_doc = await asyncio.to_thread(settings_collection.find_one, {'_id': 'upload_config'})
     if config_doc:
         UPLOAD_CONFIG.update(config_doc.get('settings', {}))
         REVIEW_CHAT_ID = config_doc.get('review_chat_id')
@@ -535,7 +536,7 @@ async def get_shortener_config_and_shorten_url(long_url: str) -> str:
     Fetches configuration from the database. If no config or API error, returns original URL.
     """
     logger.info(f"Attempting to shorten URL: {long_url}")
-    shortener_config = settings_collection.find_one({'_id': 'shortener_config'})
+    shortener_config = await asyncio.to_thread(settings_collection.find_one, {'_id': 'shortener_config'})
     logger.info(f"Retrieved shortener_config from DB: {shortener_config}")
 
     if not shortener_config:
@@ -680,7 +681,7 @@ def get_banked_tokens_count(user_id: int) -> int:
 
 async def activate_bank_token(user_id: int) -> tuple[bool, str]:
     """Activates one banked token for the user."""
-    doc = tokens_collection.find_one({'user_id': user_id})
+    doc = await asyncio.to_thread(tokens_collection.find_one, {'user_id': user_id})
     if not doc or 'tokens' not in doc:
         return False, "You don't have any tokens to activate."
 
@@ -698,7 +699,8 @@ async def activate_bank_token(user_id: int) -> tuple[bool, str]:
 
     try:
         # Atomically update the specific token in the array
-        result = tokens_collection.update_one(
+        result = await asyncio.to_thread(
+            tokens_collection.update_one,
             {'user_id': user_id, 'tokens.token_id': target_token['token_id']},
             {'$set': {
                 'tokens.$.is_activated': True,
@@ -806,7 +808,7 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
     """Sends a message informing the user they need a token to access content."""
     user_id = chat_id
     ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-    shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+    await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
     long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
     ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -817,11 +819,16 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         )
     else:
         text = (
-            "🛑 <b>Access Token Required</b> 🛑\n\n"
-            "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            f"Unlock <b>{int(config.TOKEN_ACCESS_HOURS)} hours</b> of uninterrupted, premium access and keep the vibe going! ✨"
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
         )
-    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
+    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id, remove_tutorial=True)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 # --- Premium Status Check and Notification ---
@@ -830,7 +837,7 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
     Checks user's premium status and sends a notification if they just lost premium.
     Updates the user's last_premium_check_status in DB.
     """
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await asyncio.to_thread(users_collection.find_one, {'user_id': user_id})
     if not user_doc:
         return
 
@@ -847,7 +854,8 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
             logger.error(f"Failed to send premium expiry notification to user {user_id}: {e}")
 
     if current_premium_status != last_known_premium_status:
-        users_collection.update_one(
+        await asyncio.to_thread(
+            users_collection.update_one,
             {'user_id': user_id},
             {'$set': {'last_premium_check_status': current_premium_status}}
         )
@@ -907,7 +915,7 @@ async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
     - 50 referrals -> 30 Days Premium (+2592000 seconds, is_admin_granted=True)
     """
     try:
-        user_doc = users_collection.find_one({'user_id': referrer_id})
+        user_doc = await asyncio.to_thread(users_collection.find_one, {'user_id': referrer_id})
         if not user_doc:
             return
 
@@ -927,7 +935,8 @@ async def check_and_grant_referral_milestones(client: Client, referrer_id: int):
                 add_token_info = add_token(referrer_id, duration_seconds=duration_seconds, is_admin_granted=True)
                 if add_token_info:
                     # Update claimed list
-                    users_collection.update_one(
+                    await asyncio.to_thread(
+                        users_collection.update_one,
                         {'user_id': referrer_id},
                         {
                             '$addToSet': {'claimed_referral_milestones': req_count},
@@ -1716,7 +1725,7 @@ async def get_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
-def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None, remove_tutorial: bool = False) -> InlineKeyboardMarkup:
+def generate_token_earning_keyboard(ad_url: str, is_pending_content: bool = False, user_id: int = None, remove_tutorial: bool = True) -> InlineKeyboardMarkup:
     """Generates the keyboard for token earning options with conditional buttons."""
     buttons = []
 
@@ -2530,7 +2539,7 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
 
     if not user_can_access_video(user_id):
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -2554,7 +2563,8 @@ async def reload_pending_content_callback(client: Client, callback_query: Callba
         await callback_query.answer()
         return
 
-    user_doc = users_collection.find_one_and_update(
+    user_doc = await asyncio.to_thread(
+        users_collection.find_one_and_update,
         {'user_id': user_id},
         {'$unset': {'pending_command': ""}},
         return_document=ReturnDocument.BEFORE
@@ -4109,7 +4119,7 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
             return
 
         ad_code = str_to_b64(f"{user_id}:{get_current_time()}")
-        shortener_logs_collection.insert_one({'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
+        await asyncio.to_thread(shortener_logs_collection.insert_one, {'ad_code': ad_code, 'user_id': user_id, 'created_at': datetime.now(timezone.utc)})
         long_url = f"https://t.me/{config.BOT_USERNAME[1:]}?start=token_{ad_code}"
         ad_url = await get_shortener_config_and_shorten_url(long_url) if not SHORTENER_DISABLED else ""
 
@@ -4125,11 +4135,17 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
                 "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         else:
             text = (
-                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
-                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
+                "💡 Information \n\n"
+                " Here's how to get your token! 🚀 \n\n"
+                " Hey 💕 unlimited money hack, \n\n"
+                " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+                " Token Timeout: 24 hours ⏰ \n\n"
+                " What is a token? \n\n"
+                " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+                " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
@@ -4253,14 +4269,14 @@ async def view_album_callback(client: Client, callback_query: CallbackQuery):
 async def age_yes_callback(client: Client, callback_query: CallbackQuery):
     """User confirmed they are 18+."""
     user_id = callback_query.from_user.id
-    users_collection.update_one({'user_id': user_id}, {'$set': {'age_verified': True}})
+    await asyncio.to_thread(users_collection.update_one, {'user_id': user_id}, {'$set': {'age_verified': True}})
     await callback_query.answer("Verification successful! ✅", show_alert=True)
     try:
         await callback_query.message.delete()
     except Exception:
         pass
 
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await asyncio.to_thread(users_collection.find_one, {'user_id': user_id})
     pending_command = user_doc.get('pending_command') if user_doc else None
 
     # Re-run start command
@@ -7542,7 +7558,7 @@ async def monitor_ssrb_verifications(client: Client):
     while True:
         try:
             # Find unconsumed verifications
-            unconsumed = list(ssrb_verifications_collection.find({"is_consumed_by_atdb": False}))
+            unconsumed = await asyncio.to_thread(list, ssrb_verifications_collection.find({"is_consumed_by_atdb": False}))
             for doc in unconsumed:
                 user_id = doc['user_id']
                 logger.info(f"Detected new SSRB verification for user {user_id}. Granting token...")
@@ -7562,7 +7578,8 @@ async def monitor_ssrb_verifications(client: Client):
                     logger.warning(f"Failed to notify user {user_id} about ATDB token: {e}")
 
                 # NEW: Automatically load request if pending command exists
-                user_doc = users_collection.find_one_and_update(
+                user_doc = await asyncio.to_thread(
+                    users_collection.find_one_and_update,
                     {'user_id': user_id},
                     {'$unset': {'pending_command': ""}},
                     return_document=ReturnDocument.BEFORE
@@ -7586,7 +7603,8 @@ async def monitor_ssrb_verifications(client: Client):
                         logger.error(f"Failed to auto-trigger pending command for user {user_id}: {e}")
 
                 # Mark as consumed
-                ssrb_verifications_collection.update_one(
+                await asyncio.to_thread(
+                    ssrb_verifications_collection.update_one,
                     {"_id": doc["_id"]},
                     {"$set": {"is_consumed_by_atdb": True}}
                 )
