@@ -817,11 +817,16 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         )
     else:
         text = (
-            "🛑 <b>Access Token Required</b> 🛑\n\n"
-            "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            f"Unlock <b>{int(config.TOKEN_ACCESS_HOURS)} hours</b> of uninterrupted, premium access and keep the vibe going! ✨"
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
         )
-    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
+    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id, remove_tutorial=True)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 # --- Premium Status Check and Notification ---
@@ -829,12 +834,13 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
     """
     Checks user's premium status and sends a notification if they just lost premium.
     Updates the user's last_premium_check_status in DB.
+    Offloaded via asyncio.to_thread to prevent blocking the event loop.
     """
-    user_doc = users_collection.find_one({'user_id': user_id})
+    user_doc = await asyncio.to_thread(users_collection.find_one, {'user_id': user_id})
     if not user_doc:
         return
 
-    current_premium_status = is_premium_user(user_id)
+    current_premium_status = await asyncio.to_thread(is_premium_user, user_id)
     last_known_premium_status = user_doc.get('last_premium_check_status', False)
 
     if last_known_premium_status and not current_premium_status:
@@ -847,7 +853,8 @@ async def check_premium_status_and_notify(client: Client, user_id: int):
             logger.error(f"Failed to send premium expiry notification to user {user_id}: {e}")
 
     if current_premium_status != last_known_premium_status:
-        users_collection.update_one(
+        await asyncio.to_thread(
+            users_collection.update_one,
             {'user_id': user_id},
             {'$set': {'last_premium_check_status': current_premium_status}}
         )
@@ -2037,14 +2044,15 @@ async def is_rate_limited(user_id: int) -> bool:
     """
     Checks if a user is rate-limited based on their recent requests.
     Stores request timestamps in MongoDB for persistence.
+    Offloaded via asyncio.to_thread for optimal non-blocking concurrency.
     """
     if is_admin(user_id):
         return False
 
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
+    def _sync_check():
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
 
-    try:
         # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
         tokens_collection.update_one(
             {'user_id': user_id},
@@ -2066,6 +2074,9 @@ async def is_rate_limited(user_id: int) -> bool:
             logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
             return True
         return False
+
+    try:
+        return await asyncio.to_thread(_sync_check)
     except Exception as e:
         logger.error(f"Error in is_rate_limited for user {user_id}: {e}", exc_info=True)
         return False
@@ -4125,11 +4136,17 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
                 "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
             )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
+            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
         else:
             text = (
-                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
-                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
+                "💡 Information \n\n"
+                " Here's how to get your token! 🚀 \n\n"
+                " Hey 💕 unlimited money hack, \n\n"
+                " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+                " Token Timeout: 24 hours ⏰ \n\n"
+                " What is a token? \n\n"
+                " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+                " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
