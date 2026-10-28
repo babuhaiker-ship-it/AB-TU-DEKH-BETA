@@ -1591,7 +1591,7 @@ async def send_and_replace_message(
                 sent_message = await client.edit_message_media(
                     chat_id=chat_id,
                     message_id=message_id_to_edit_or_delete,
-                    media=InputMediaVideo(media=video_data['file_id'], caption=caption_text),
+                    media=InputMediaVideo(media=video_data['file_id'], caption=caption_text, supports_streaming=True),
                     reply_markup=reply_markup
                 )
                 logger.info(f"Successfully edited message {message_id_to_edit_or_delete} with video {video_data['uuid']}.")
@@ -1610,7 +1610,7 @@ async def send_and_replace_message(
                     sent_message = await client.edit_message_media(
                         chat_id=chat_id,
                         message_id=message_id_to_edit_or_delete,
-                        media=InputMediaVideo(media=video_data['file_id'], caption=caption_text),
+                        media=InputMediaVideo(media=video_data['file_id'], caption=caption_text, supports_streaming=True),
                         reply_markup=reply_markup
                     )
                     logger.info(f"Successfully edited message {message_id_to_edit_or_delete} after self-healing.")
@@ -1658,7 +1658,8 @@ async def send_and_replace_message(
                         video_data['file_id'],
                         caption=caption_text,
                         reply_markup=reply_markup,
-                        protect_content=protect_content_for_user
+                        protect_content=protect_content_for_user,
+                        supports_streaming=True
                     )
                     logger.info(f"Successfully sent video {video_data['uuid']} via send_video fallback.")
                 except FileReferenceExpired:
@@ -1688,7 +1689,8 @@ async def send_and_replace_message(
                             video_data['file_id'],
                             caption=caption_text,
                             reply_markup=reply_markup,
-                            protect_content=protect_content_for_user
+                            protect_content=protect_content_for_user,
+                            supports_streaming=True
                         )
                         logger.info(f"Successfully sent video {video_data['uuid']} via send_video after self-healing.")
                     except Exception as heal_e:
@@ -3145,7 +3147,8 @@ async def admin_final_approve_callback(client: Client, callback_query: CallbackQ
             sent_video = await client.send_video(
                 chat_id=DATA_CHANNEL_ID,
                 video=upload_data['file_id'],
-                caption=caption_to_use
+                caption=caption_to_use,
+                supports_streaming=True
             )
 
         # Get next sequence number
@@ -4452,7 +4455,8 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                     "This video will be automatically deleted in <b>10 minutes</b> to protect privacy. "
                     "Please save, download, or forward it now! 🚀"
                 ),
-                protect_content=False
+                protect_content=False,
+                supports_streaming=True
             )
             create_tracked_task(auto_delete_download(client, chat_id, sent_video))
             await callback_query.answer("Download initiated! 🚀")
@@ -4480,7 +4484,8 @@ async def download_video_callback(client: Client, callback_query: CallbackQuery)
                         "This video will be automatically deleted in <b>10 minutes</b> to protect privacy. "
                         "Please save, download, or forward it now! 🚀"
                     ),
-                    protect_content=False
+                    protect_content=False,
+                    supports_streaming=True
                 )
                 create_tracked_task(auto_delete_download(client, chat_id, sent_video))
                 await callback_query.answer("Download initiated! 🚀")
@@ -5324,7 +5329,8 @@ async def process_batch_queue(user_id: int, client: Client):
 
             sent_video_message = await client.send_video(
                 chat_id=DATA_CHANNEL_ID, video=message.video.file_id,
-                caption=caption_to_use
+                caption=caption_to_use,
+                supports_streaming=True
             )
             if not sent_video_message or not sent_video_message.video:
                 raise Exception("send_video did not return a valid video message.")
