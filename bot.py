@@ -961,13 +961,30 @@ def validate_category_name(name: str) -> tuple[bool, str]:
         return False, "Category name cannot be longer than 64 characters."
     return True, ""
 
+_categories_cache = {'timestamp': 0, 'data': []}
+CATEGORIES_CACHE_TTL = 30 # seconds
+
+def invalidate_categories_cache():
+    """Invalidates the in-memory category cache."""
+    global _categories_cache
+    _categories_cache['timestamp'] = 0
+    _categories_cache['data'] = []
+
 def get_categories(for_admin_use: bool = False) -> list[str]:
     """
-    Gets all category names.
+    Gets all category names with in-memory TTL caching.
     Prepends 'default (all)' for user-facing lists.
     """
-    categories = [c['name'] for c in categories_collection.find({})]
-    sorted_categories = sorted(list(set(categories)))
+    import time
+    global _categories_cache
+    now = time.time()
+    if now - _categories_cache['timestamp'] > CATEGORIES_CACHE_TTL:
+        categories = [c['name'] for c in categories_collection.find({})]
+        sorted_categories = sorted(list(set(categories)))
+        _categories_cache['timestamp'] = now
+        _categories_cache['data'] = sorted_categories
+
+    sorted_categories = _categories_cache['data']
     if not for_admin_use:
         return ["default (all)"] + sorted_categories
     return sorted_categories
@@ -986,6 +1003,7 @@ def add_category(name: str) -> tuple[bool, str]:
             'name': name,
             'created_at': datetime.now(timezone.utc)
         })
+        invalidate_categories_cache()
         logger.info(f"Category '{name}' added")
         return True, f"Category '{html.escape(name)}' added successfully."
     except Exception as e:
@@ -1004,6 +1022,7 @@ def delete_category(name: str) -> tuple[bool, str, int]:
         deleted_count = result.deleted_count
 
         categories_collection.delete_one({'name': name})
+        invalidate_categories_cache()
         logger.info(f"Category '{name}' and {deleted_count} videos deleted")
         return True, f"Category '{html.escape(name)}' and {deleted_count} videos deleted.", deleted_count
     except Exception as e:
@@ -1062,28 +1081,26 @@ def get_video_and_position(video_uuid: str, category: str, is_saved: bool, user_
         return None, 0, 0
 
     else: # Regular category navigation, use sequence_number for ordering
-        all_videos_in_category = list(media_collection.find(
-            {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}},
-            sort=[('sequence_number', ASCENDING)]
-        ))
+        video = get_video_by_uuid(video_uuid)
+        if not video or video.get('banned') or video.get('category') != category:
+            return None, 0, 0
 
-        total_videos = len(all_videos_in_category)
+        seq = video.get('sequence_number')
+        category_filter = {'category': category, 'sequence_number': {'$exists': True, '$ne': None}, 'banned': {'$ne': True}}
+        total_videos = media_collection.count_documents(category_filter)
         if not total_videos:
             return None, 0, 0
 
-        current_video_index = -1
-        for i, video_doc in enumerate(all_videos_in_category):
-            if video_doc['uuid'] == video_uuid:
-                current_video_index = i
-                break
+        if seq is None:
+            logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number'.")
+            return video, 1, total_videos
 
-        if current_video_index != -1:
-            video = all_videos_in_category[current_video_index]
-            # Added log for missing sequence_number during navigation
-            if 'sequence_number' not in video:
-                logger.warning(f"Video {video['uuid']} in category {category} is missing 'sequence_number' but is being retrieved for navigation. This indicates a potential data inconsistency or failed migration.")
-            return video, current_video_index + 1, total_videos
-        return None, 0, 0
+        position = media_collection.count_documents({
+            'category': category,
+            'sequence_number': {'$exists': True, '$ne': None, '$lte': seq},
+            'banned': {'$ne': True}
+        })
+        return video, position if position > 0 else 1, total_videos
 
 def get_album_videos_by_group_id(media_group_id) -> list[dict]:
     """Retrieves all non-banned videos belonging to a media_group_id, matching both string and integer IDs."""
@@ -2033,6 +2050,32 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
 RATE_LIMIT_WINDOW = 120
 RATE_LIMIT_MAX = 60
 
+def _check_rate_limit_sync(user_id: int) -> bool:
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
+
+    # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
+    tokens_collection.update_one(
+        {'user_id': user_id},
+        {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
+        upsert=True
+    )
+
+    # Step 2: Atomically add the new timestamp.
+    tokens_collection.update_one(
+        {'user_id': user_id},
+        {'$push': {'rate_limits': {'timestamp': now}}}
+    )
+
+    # Step 3: Retrieve the document to check the current count.
+    result = tokens_collection.find_one({'user_id': user_id})
+    current_requests = len(result.get('rate_limits', [])) if result else 0
+
+    if current_requests > RATE_LIMIT_MAX:
+        logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
+        return True
+    return False
+
 async def is_rate_limited(user_id: int) -> bool:
     """
     Checks if a user is rate-limited based on their recent requests.
@@ -2041,31 +2084,8 @@ async def is_rate_limited(user_id: int) -> bool:
     if is_admin(user_id):
         return False
 
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
-
     try:
-        # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
-        tokens_collection.update_one(
-            {'user_id': user_id},
-            {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
-            upsert=True
-        )
-
-        # Step 2: Atomically add the new timestamp.
-        tokens_collection.update_one(
-            {'user_id': user_id},
-            {'$push': {'rate_limits': {'timestamp': now}}}
-        )
-
-        # Step 3: Retrieve the document to check the current count.
-        result = tokens_collection.find_one({'user_id': user_id})
-        current_requests = len(result.get('rate_limits', [])) if result else 0
-
-        if current_requests > RATE_LIMIT_MAX:
-            logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
-            return True
-        return False
+        return await asyncio.to_thread(_check_rate_limit_sync, user_id)
     except Exception as e:
         logger.error(f"Error in is_rate_limited for user {user_id}: {e}", exc_info=True)
         return False
@@ -7111,6 +7131,7 @@ async def handle_text_input(client: Client, message: Message):
 
                 try:
                     categories_collection.update_one({'name': old_name}, {'$set': {'name': new_name}})
+                    invalidate_categories_cache()
                     logger.info(f"Category '{old_name}' renamed to '{new_name}' in categories_collection.")
 
                     media_collection.update_many({'category': old_name}, {'$set': {'category': new_name}})
