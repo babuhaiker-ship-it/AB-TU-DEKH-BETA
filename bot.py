@@ -46,7 +46,7 @@ class BotConfig:
     MONGO_DB_NAME = os.environ.get('MONGO_DB_NAME')
 
     # Configuration Parameters (With Defaults)
-    BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/nyraapaybot?start')
+    BUY_BOT_URL = os.environ.get('BUY_BOT_URL', 'https://t.me/ShareSins_paybot?start')
     OWNER_ID = int(os.environ.get('OWNER_ID', 6612030110))
     TUTORIAL_LINK_2 = os.environ.get('TUTORIAL_LINK_2', 'https://t.me/urlshortenertutorial')
     TOKEN_EXPIRY = int(os.environ.get('TOKEN_EXPIRY', 21600))
@@ -1920,20 +1920,22 @@ def referral_keyboard(ref_link: str) -> InlineKeyboardMarkup:
 def get_premium_only_text() -> str:
     """Returns the text highlighting only Red Token benefits."""
     return (
-        "✨ <b>Red Token User Benefits</b> ✨\n\n"
-        "✅ <b>Unlimited Saved Videos</b> — keep as many bookmarks as you like.\n"
-        "✅ <b>Direct Video Downloads</b> — instantly get the actual file with no restrictions.\n"
-        "✅ <b>No Ad Refresh Needed</b> — enjoy uninterrupted access for your entire active period.\n"
-        "✅ <b>Bookmarks Never Deleted</b> — your saved videos are safe.\n"
-        "✅ <b>Priority Content Delivery</b> — faster, reliable downloads so you always get the video.\n\n"
-        f"💳 Get Red Token for just <b>₹{config.PREMIUM_MONTH_PRICE_INR}/month</b> and enjoy all benefits instantly! 🚀"
+        "✨ <b>Unlock Red Token (VIP Access)</b> ✨\n\n"
+        "Elevate your viewing experience with full unlimited access and VIP privileges:\n\n"
+        "⚡ <b>Direct Video Downloads</b> — Save & forward media without any restrictions.\n"
+        "📂 <b>Full Category Access</b> — Browse all exclusive categories freely.\n"
+        "🚫 <b>Ad-Free Streaming</b> — Enjoy non-stop viewing without ad verification.\n"
+        "🔖 <b>Unlimited Bookmarks</b> — Save your favorite videos forever.\n"
+        "🚀 <b>Priority High-Speed Delivery</b> — Faster loading & buffer-free playback.\n\n"
+        "🛒 <b>How to Upgrade:</b>\n"
+        "Click the button below to purchase your VIP pass directly via <b>@ShareSins_paybot</b>!"
     )
 
 def buy_token_keyboard() -> InlineKeyboardMarkup or None:
     """Keyboard for buying tokens."""
     if TOKEN_BUTTON_DISABLED:
         return None
-    btn_text = "🔴 Get Red Token"
+    btn_text = "💎 Purchase Red Token (@ShareSins_paybot)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(btn_text, url=config.BUY_BOT_URL)]
     ])
