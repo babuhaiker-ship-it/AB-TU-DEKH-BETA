@@ -11,7 +11,7 @@ from hydrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, Message, InputMediaVideo, CallbackQuery, WebAppInfo, User as HyUser, Chat as HyChat
 )
 from hydrogram.handlers import MessageHandler, CallbackQueryHandler
-from hydrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
+from hydrogram.errors import UserIsBlocked, ChatInvalid, MessageIdInvalid, MessageNotModified, FloodWait, PeerIdInvalid, RPCError, FileIdInvalid, FileReferenceExpired, ChatAdminRequired
 from hydrogram.enums import ChatMemberStatus, ChatType
 from pymongo import MongoClient, ASCENDING, DESCENDING, ReturnDocument, UpdateOne # Import UpdateOne for bulk operations
 import aiohttp
@@ -759,15 +759,20 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
     usage = user.get('free_video_usage')
     now = datetime.now(timezone.utc)
     if not usage or now > usage.get('reset_at', datetime.min.replace(tzinfo=timezone.utc)):
-        # Reset usage
-        users_collection.update_one(
-            {'user_id': user_id},
+        # Atomically reset usage if expired or missing
+        new_reset = now + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)
+        res = users_collection.update_one(
+            {'user_id': user_id, '$or': [
+                {'free_video_usage': {'$exists': False}},
+                {'free_video_usage.reset_at': {'$lt': now}}
+            ]},
             {'$set': {
                 'free_video_usage.count': 0,
-                'free_video_usage.reset_at': now + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)
+                'free_video_usage.reset_at': new_reset
             }}
         )
-        return True
+        if res.modified_count > 0 or not usage:
+            return True
 
     return usage.get('count', 0) < effective_limit
 
@@ -1616,6 +1621,9 @@ async def send_and_replace_message(
                 except Exception as heal_e:
                     logger.error(f"Self-healing or retry-edit failed: {heal_e}. Will send a new message instead.")
                     sent_message = None
+            except (MessageNotModified, MessageIdInvalid) as e:
+                logger.debug(f"edit_message_media ignored harmless exception for {message_id_to_edit_or_delete}: {e}")
+                return True, "Message not modified or already updated."
             except Exception as e:
                 logger.warning(f"Editing message {message_id_to_edit_or_delete} failed with non-healable error: {e}. Will send a new message instead.")
                 sent_message = None
@@ -3964,9 +3972,19 @@ async def navigate_batch_video(client: Client, callback_query: CallbackQuery):
         next_video_uuid = video_uuids[new_index]
         video = get_video_by_uuid(next_video_uuid)
 
+        # Loop through available videos in batch if target video is unavailable
+        attempts = 0
+        while not video and attempts < total_videos:
+            attempts += 1
+            if action == "next_batch":
+                new_index = (new_index + 1) % total_videos
+            else:
+                new_index = (new_index - 1 + total_videos) % total_videos
+            next_video_uuid = video_uuids[new_index]
+            video = get_video_by_uuid(next_video_uuid)
+
         if not video:
-            await callback_query.answer("The next video in this batch is unavailable.", show_alert=True)
-            # In a more robust system, you might skip to the next available one.
+            await callback_query.answer("None of the videos in this collection are currently available.", show_alert=True)
             return
 
         sent_success, _ = await send_and_replace_message(
@@ -4572,13 +4590,16 @@ async def bookmark_video_callback(client: Client, callback_query: CallbackQuery)
             await callback_query.answer("Cannot bookmark: video not found. 😔", show_alert=True)
             return
 
-        # Add the video with timestamp for ordering and its category for filtering
-        bookmarked_videos.append({'uuid': video_uuid, 'bookmarked_at': datetime.now(timezone.utc), 'category': video_data.get('category')})
-
-        users_collection.update_one(
-            {'user_id': user_id},
-            {'$set': {'bookmarked_videos': bookmarked_videos}}
+        # Atomically push bookmark only if the UUID does not already exist
+        new_bookmark = {'uuid': video_uuid, 'bookmarked_at': datetime.now(timezone.utc), 'category': video_data.get('category')}
+        update_result = users_collection.update_one(
+            {'user_id': user_id, 'bookmarked_videos.uuid': {'$ne': video_uuid}},
+            {'$push': {'bookmarked_videos': new_bookmark}}
         )
+
+        if update_result.modified_count == 0:
+            await callback_query.answer("This video is already bookmarked! ❤️", show_alert=True)
+            return
 
         await callback_query.answer("Video bookmarked successfully! ❤️")
         logger.info(f"User {user_id} bookmarked video {video_uuid}.")
@@ -5696,6 +5717,8 @@ async def delayed_upload_done_notification(user_id: int, client: Client):
         pass
     except Exception as e:
         logger.error(f"Error in delayed_upload_done_notification for user {user_id}: {e}", exc_info=True)
+    finally:
+        upload_inactivity_timers.pop(user_id, None)
 
 async def handle_user_upload(client: Client, message: Message):
     """Processes a video uploaded by a user."""
