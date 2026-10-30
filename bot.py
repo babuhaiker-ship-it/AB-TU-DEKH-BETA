@@ -826,14 +826,13 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         )
     else:
         text = (
-            "💡 Information \n\n"
-            " Here's how to get your token! 🚀 \n\n"
-            " Hey 💕 unlimited money hack, \n\n"
-            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
-            " Token Timeout: 24 hours ⏰ \n\n"
-            " What is a token? \n\n"
-            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
-            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
+            "⏳ <b>Daily Free Watch Limit Reached</b>\n\n"
+            "You've enjoyed your free videos for today! To keep watching unlimited content, choose an option below:\n\n"
+            "🔹 <b>Watch a Quick Ad</b> — Unlock <b>24 Hours</b> of instant access.\n"
+            "🔹 <b>Verify Human</b> — Instantly unlock your next video.\n"
+            "🔹 <b>Upload Videos</b> — Earn free scrolls by sharing media.\n"
+            "🔹 <b>Get Red Token</b> — Enjoy uninterrupted, ad-free watching forever.\n\n"
+            "🍎 <i>iPhone Users: Open ad links in Chrome or Safari for best experience.</i>"
         )
     reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id, remove_tutorial=True)
     await client.send_message(chat_id, text, reply_markup=reply_markup, disable_web_page_preview=True)
@@ -2926,13 +2925,20 @@ async def select_category(client: Client, callback_query: CallbackQuery):
     logger.info(f"User {user_id} selected category: {category_name}.")
 
     if category_name != "default (all)" and not is_premium_user(user_id):
-        await callback_query.answer("🔴 Red Token Required! 🔴", show_alert=True)
+        await callback_query.answer("🔒 Category Locked (VIP Feature)", show_alert=True)
+        vip_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💎 Upgrade to VIP (@ShareSins_paybot)", url=config.BUY_BOT_URL)],
+            [InlineKeyboardButton("🍿 Continue Watching Free Videos", callback_data="get_default_video")]
+        ]) if not TOKEN_BUTTON_DISABLED else InlineKeyboardMarkup([
+            [InlineKeyboardButton("🍿 Continue Watching Free Videos", callback_data="get_default_video")]
+        ])
+
         await client.send_message(
             chat_id,
-            "⚠️ <b>Red Token Required</b> ⚠️\n\n"
-            "To watch videos in categories other than <b>default (all)</b>, you need a <b>Red Token</b>. 🔴\n\n"
-            "Get a Red Token now to instantly unlock unlimited category selection, direct downloads, and ad-free spicy content! 🚀",
-            reply_markup=buy_token_keyboard()
+            "🔒 <b>Category Locked (VIP Feature)</b>\n\n"
+            "Selecting specific categories is an exclusive <b>Red Token (VIP)</b> feature.\n\n"
+            "As a free member, you can watch unlimited videos from our <b>Default (All)</b> collection anytime! 🍿",
+            reply_markup=vip_keyboard
         )
         return
 
@@ -4300,9 +4306,31 @@ async def age_yes_callback(client: Client, callback_query: CallbackQuery):
 async def age_no_callback(client: Client, callback_query: CallbackQuery):
     """User selected that they are under 18."""
     await callback_query.message.edit_text(
-        "🚫 <b>Access Denied</b>\n\nThis bot is only for 18+ adults. Try again later."
+        "🚫 <b>Access Denied</b>\n\n"
+        "You must be 18 years or older to use this bot.\n\n"
+        "<i>If you selected this by mistake, tap the button below to try again.</i>",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Try Verification Again", callback_data="age_retry")]
+        ])
     )
     await callback_query.answer("You must be 18+ to use this bot.", show_alert=True)
+
+@bot.on_callback_query(filters.regex(r"^age_retry$"))
+async def age_retry_callback(client: Client, callback_query: CallbackQuery):
+    """User wants to re-attempt age verification after selecting no."""
+    user_id = callback_query.from_user.id
+    user_doc = users_collection.find_one({'user_id': user_id})
+    pending_command = user_doc.get('pending_command') if user_doc else None
+
+    try:
+        await callback_query.message.delete()
+    except Exception:
+        pass
+
+    mock_msg = callback_query.message
+    mock_msg.text = f"/start {pending_command}" if pending_command else "/start"
+    mock_msg.from_user = callback_query.from_user
+    create_tracked_task(start_cmd(client, mock_msg))
 
 @bot.on_callback_query(filters.regex(r"^back_from_share\|(.+)$"))
 async def back_from_share_callback(client: Client, callback_query: CallbackQuery):
@@ -4584,14 +4612,32 @@ async def saved_videos_btn(client: Client, message: Message):
 
     user = users_collection.find_one({'user_id': user_id})
     if not user or not user.get('bookmarked_videos'):
-        await message.reply("You haven't saved any videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
+        empty_saved_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Watch Videos Now", callback_data="get_default_video")]
+        ])
+        await message.reply(
+            "🔖 <b>Your Saved Library is Empty</b>\n\n"
+            "You haven't bookmarked any videos yet!\n\n"
+            "💡 <b>How to save videos:</b>\n"
+            "While watching any video, tap the <b>🔖 Save Video</b> button below the video player. Your saved videos will appear right here!",
+            reply_markup=empty_saved_keyboard
+        )
         return
 
     # Get the keyboard with categories from saved videos
     saved_cats_keyboard = saved_category_keyboard(user_id)
 
     if saved_cats_keyboard.inline_keyboard[0][0].callback_data in ["no_saved_videos", "no_valid_saved_videos"]:
-        await message.reply("You haven't saved any valid videos yet. ❤️ Click 'Get Video' and then 'Bookmark' your favorites! ✨", reply_markup=await get_main_keyboard(user_id))
+        empty_saved_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Watch Videos Now", callback_data="get_default_video")]
+        ])
+        await message.reply(
+            "🔖 <b>Your Saved Library is Empty</b>\n\n"
+            "You haven't bookmarked any valid videos yet!\n\n"
+            "💡 <b>How to save videos:</b>\n"
+            "While watching any video, tap the <b>🔖 Save Video</b> button below the video player. Your saved videos will appear right here!",
+            reply_markup=empty_saved_keyboard
+        )
         return
 
     message_id_to_edit_or_delete = message.id
@@ -4927,7 +4973,16 @@ async def back_to_saved_cats_callback(client: Client, callback_query: CallbackQu
 
     saved_cats_keyboard = saved_category_keyboard(user_id)
     if saved_cats_keyboard.inline_keyboard[0][0].callback_data in ["no_saved_videos", "no_valid_saved_videos"]:
-        await client.send_message(chat_id, "You have no more saved videos. ❤️")
+        empty_saved_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎬 Watch Videos Now", callback_data="get_default_video")]
+        ])
+        await client.send_message(
+            chat_id,
+            "🔖 <b>Your Saved Library is Empty</b>\n\n"
+            "You have no more saved videos remaining.\n\n"
+            "💡 Tap below to discover and save new videos!",
+            reply_markup=empty_saved_keyboard
+        )
         return
 
     sent_message = await client.send_message(
@@ -5752,11 +5807,10 @@ async def handle_user_upload(client: Client, message: Message):
 
     cat_display = html.escape(category) if category else "Default"
     confirmation = (
-        "✅ **Video received! Thank you for contributing.**\n\n"
-        f"📦 Videos uploaded this session: **{session_count}**\n"
-        f"🗂️ Category: `{cat_display}`\n"
-        f"⏳ Status: `Pending Approval`\n\n"
-        f"Your contribution is under review.{reward_text}"
+        f"📤 **Upload Received! ({session_count}/10 in this session)**\n\n"
+        f"🗂️ **Category:** `{cat_display}`\n"
+        f"🎁 **Instant Reward:** `+{UPLOAD_CONFIG['temp_scrolls_amount']} Temporary Scrolls added!`\n\n"
+        f"💡 *You can keep sending more videos directly here, or simply stop whenever you're done. We will review them shortly!*"
     )
 
     status_msg_id = user_upload_state[user_id].get('status_message_id')
