@@ -91,7 +91,14 @@ BATCH_UPLOAD_LIMIT = 20
 BATCH_COOLDOWN_SECONDS = 60
 
 # --- MongoDB Setup ---
-client = MongoClient(config.MONGO_URI, tz_aware=True)
+client = MongoClient(
+    config.MONGO_URI,
+    tz_aware=True,
+    maxPoolSize=100,
+    minPoolSize=10,
+    maxIdleTimeMS=45000,
+    serverSelectionTimeoutMS=5000
+)
 db = client[config.MONGO_DB_NAME]
 users_collection = db['users']
 tokens_collection = db['tokens']
@@ -758,7 +765,11 @@ def has_free_video_access(user_id: int, limit: int = None, current_video_uuid: s
 
     usage = user.get('free_video_usage')
     now = datetime.now(timezone.utc)
-    if not usage or now > usage.get('reset_at', datetime.min.replace(tzinfo=timezone.utc)):
+    reset_at = usage.get('reset_at') if usage else None
+    if reset_at and reset_at.tzinfo is None:
+        reset_at = reset_at.replace(tzinfo=timezone.utc)
+
+    if not usage or not reset_at or now > reset_at:
         # Atomically reset usage if expired or missing
         new_reset = now + timedelta(hours=config.FREE_VIDEO_RESET_HOURS)
         res = users_collection.update_one(
@@ -2091,6 +2102,12 @@ async def is_rate_limited(user_id: int) -> bool:
     timestamps = [t for t in _user_rate_limits[user_id] if t > cutoff]
     timestamps.append(now)
     _user_rate_limits[user_id] = timestamps
+
+    # Periodically clean up stale keys from inactive users
+    if len(_user_rate_limits) > 5000:
+        stale_keys = [uid for uid, ts in list(_user_rate_limits.items()) if not ts or max(ts) < cutoff]
+        for uid in stale_keys:
+            _user_rate_limits.pop(uid, None)
 
     if len(timestamps) > RATE_LIMIT_MAX:
         logger.warning(f"User {user_id} is rate limited. Current requests: {len(timestamps)}, Max: {RATE_LIMIT_MAX}")
