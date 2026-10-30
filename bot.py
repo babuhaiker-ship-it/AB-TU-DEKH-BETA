@@ -817,11 +817,16 @@ async def send_access_limit_reached_message(client: Client, chat_id: int):
         )
     else:
         text = (
-            "🛑 <b>Access Token Required</b> 🛑\n\n"
-            "To continue watching our private collection, you need a temporary access token. 🤫\n\n"
-            f"Unlock <b>{int(config.TOKEN_ACCESS_HOURS)} hours</b> of uninterrupted, premium access and keep the vibe going! ✨"
+            "💡 Information \n\n"
+            " Here's how to get your token! 🚀 \n\n"
+            " Hey 💕 unlimited money hack, \n\n"
+            " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+            " Token Timeout: 24 hours ⏰ \n\n"
+            " What is a token? \n\n"
+            " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+            " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
         )
-    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id)
+    reply_markup = generate_token_earning_keyboard(ad_url, user_id=user_id, remove_tutorial=True)
     await client.send_message(chat_id, text, reply_markup=reply_markup)
 
 # --- Premium Status Check and Notification ---
@@ -2033,39 +2038,39 @@ async def handle_token_refresh(user_id: int, ad_code: str) -> tuple[bool, str]:
 RATE_LIMIT_WINDOW = 120
 RATE_LIMIT_MAX = 60
 
+def _is_rate_limited_sync(user_id: int) -> bool:
+    """Synchronous helper for is_rate_limited to offload PyMongo operations."""
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
+    # Step 1: Remove old timestamps past window_start
+    tokens_collection.update_one(
+        {'user_id': user_id},
+        {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
+        upsert=True
+    )
+    # Step 2: Push current timestamp and fetch updated document atomically
+    result = tokens_collection.find_one_and_update(
+        {'user_id': user_id},
+        {'$push': {'rate_limits': {'timestamp': now}}},
+        return_document=ReturnDocument.AFTER
+    )
+    current_requests = len(result.get('rate_limits', [])) if result else 0
+    return current_requests > RATE_LIMIT_MAX
+
 async def is_rate_limited(user_id: int) -> bool:
     """
     Checks if a user is rate-limited based on their recent requests.
     Stores request timestamps in MongoDB for persistence.
+    Offloaded to thread pool to avoid blocking the asyncio event loop.
     """
     if is_admin(user_id):
         return False
 
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(seconds=RATE_LIMIT_WINDOW)
-
     try:
-        # Step 1: Atomically remove old timestamps. This avoids the conflicting operator error.
-        tokens_collection.update_one(
-            {'user_id': user_id},
-            {'$pull': {'rate_limits': {'timestamp': {'$lt': window_start}}}},
-            upsert=True
-        )
-
-        # Step 2: Atomically add the new timestamp.
-        tokens_collection.update_one(
-            {'user_id': user_id},
-            {'$push': {'rate_limits': {'timestamp': now}}}
-        )
-
-        # Step 3: Retrieve the document to check the current count.
-        result = tokens_collection.find_one({'user_id': user_id})
-        current_requests = len(result.get('rate_limits', [])) if result else 0
-
-        if current_requests > RATE_LIMIT_MAX:
-            logger.warning(f"User {user_id} is rate limited. Current requests: {current_requests}, Max: {RATE_LIMIT_MAX}")
-            return True
-        return False
+        limited = await asyncio.to_thread(_is_rate_limited_sync, user_id)
+        if limited:
+            logger.warning(f"User {user_id} is rate limited.")
+        return limited
     except Exception as e:
         logger.error(f"Error in is_rate_limited for user {user_id}: {e}", exc_info=True)
         return False
@@ -4076,7 +4081,7 @@ async def refer_and_earn_inline_callback(client: Client, callback_query: Callbac
 
         ref_link = f"https://t.me/{config.BOT_USERNAME[1:]}?start=ref_{user_id}"
         await callback_query.message.reply(
-            f"🔗 <b>Share & Earn!</b>\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
+            f"🔗 <b>Share & Earn!</b>\n\nWhen a new user joins through this link, you'll receive {config.REFERRAL_BONUS} token. It's a win-win! 🎉\n\n<code>{html.escape(ref_link)}</code>\n\nShare this link to new users only to get the token! 📢",
             quote=True,
             disable_web_page_preview=True
         )
@@ -4119,17 +4124,16 @@ async def send_token_earning_options(client: Client, message: Message, is_pendin
                 "Please verify you're human to instantly unlock the next video and keep watching! ❤️"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
-        elif is_pending_content:
-            text = (
-                "🔒 <b>Access Token Required!</b>\n\n"
-                "To continue watching the video you requested, please complete human verification or watch a quick ad.\n\n"
-                "👉 Once done, click the <b>🔄 Refresh Status</b> button below to instantly view your video! 🍿"
-            )
-            reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id)
         else:
             text = (
-                "❌ <b>No Active Session or Tokens Left!</b> 😔\n\n"
-                "Keep the vibe going! Use any of the options below to acquire a temporary access token or unlock premium bypass instantly! 👇"
+                "💡 Information \n\n"
+                " Here's how to get your token! 🚀 \n\n"
+                " Hey 💕 unlimited money hack, \n\n"
+                " Your Ads token is expired. Please refresh your token by clicking the button below and try again. 👇 \n\n"
+                " Token Timeout: 24 hours ⏰ \n\n"
+                " What is a token? \n\n"
+                " This is an ads token. If you pass 1 ad, you can use the bot for 24 hours after passing the ad. It's that simple! ✨ \n\n"
+                " ‼️ APPLE/IPHONE USERS: Copy the token link and open it in a Chrome browser for best experience. 🍎"
             )
             reply_markup = generate_token_earning_keyboard(ad_url, is_pending_content, user_id=user_id, remove_tutorial=True)
 
